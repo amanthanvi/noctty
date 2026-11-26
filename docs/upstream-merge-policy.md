@@ -182,7 +182,9 @@ They read, write, cancel and close pty handles and pipes through Win32
 externs, one declaration per symbol: upstream's `exp.kernel32` block in
 `src/os/windows.zig` stays as upstream wrote it, on std's `BOOL`, and what
 upstream lacks goes in one fork-added file under `src/os/` with
-`BOOL = c_int`. On this path `std.Io` is for locks taken with
+`BOOL = c_int`. Re-read that `exp.kernel32` block at every merge: a name it
+newly declares leaves the fork file, so each symbol on the path keeps one
+declaration. On this path `std.Io` is for locks taken with
 `lockUncancelable`, timestamps, thread names, passing the handle on, and
 regular files that are not pty handles (the working-directory check before a
 spawn, the `input` files, the bundled ConPTY loader). `Io.File` on a pty
@@ -346,7 +348,11 @@ equals the content before it, or the diff is reviewed.
   `nix/libghostty-vt.nix`, `nix/zigCacheHash.nix`, `nix/build-support/*`.
 
 **Track upstream.** The gate is that the directory's tree equals the merged
-revision's.
+revision's, with the allowances the table names and no others: fontconfig's
+listed adds, deletes and rename, and in `pkg/breakpad` one file,
+`pkg/breakpad/build.zig`, whose diff against the merged revision must be
+exactly the fork changes its row names. Every other file in `pkg/breakpad`
+compares equal.
 
 | Directory                                                    | Stepping stone (`74d0c72fd`), as landed                                                                                                    | `v1.4.0`                                                                  |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
@@ -399,7 +405,8 @@ The landing:
    `git merge-base --is-ancestor origin/main <gated tip>`. The tip then
    contains `main`, so the merge commit's tree will equal the tip's.
 2. Merge the pull request as a merge commit pinned to the gated tip:
-   `gh pr merge --merge --match-head-commit <gated tip>`, never with
+   `gh pr merge <PR> --repo amanthanvi/noctty --merge --match-head-commit <gated tip>`,
+   never with
    `--admin`. Squash and rebase merging stay enabled for ordinary pull
    requests; the explicit method and the pin are what rule a squash out here.
 3. Verify all three, and stop if one fails, because the merge is then not the
@@ -412,6 +419,15 @@ The gated tip and the merge commit are one tree under two SHAs. Evidence
 bound to the tree carries over from the tip. The Test workflow runs again on
 the merge SHA, because `release.yml` requires a successful Test run for the
 exact SHA it releases.
+
+If that run fails, re-run it once only when the failure is the runner's, not
+the code's (a hosted outage, a cancelled job). A failure in the code is a
+regression in the candidate, and it is fixed forward, as below: the
+maintainer disables the hold for the fix's pull request alone and re-enables
+it at once, as for the landing merge. The fix's merge commit is the new
+candidate. The Test workflow must pass on that exact SHA before the
+prerelease is cut, and any gate whose evidence the fix's diff touches runs
+again on it.
 
 The stepping stone landed this way as `f739b4c7b` (#748): its first parent is
 `358ce0f6a`, and its tree equals the gated tip `f0a5dc507`'s.
