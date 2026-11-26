@@ -135,13 +135,18 @@ jobs:
       # compiler, and it reads a fresh worktree of the commit, so files the
       # steps above leave in the checkout (ci/__pycache__) are not read.
       # Report-only exits 0 on findings; a setup or input error still fails.
+      # It reports even when a lint above fails (the 1B branch fails the
+      # Win32-identifier lint until 1B.5's re-pointing), and a cancelled job
+      # skips it.
       - name: Setup Zig
+        if: ${{ !cancelled() }}
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.1
           use-cache: false
 
       - name: Residue gate (report only)
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           zig build-exe ci/astdump.zig -lc -O ReleaseSafe "-femit-bin=$env:RUNNER_TEMP/astdump.exe"
