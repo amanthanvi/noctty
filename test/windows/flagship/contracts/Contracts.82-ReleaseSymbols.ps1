@@ -118,7 +118,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $processShared82
         Content = { $processSharedText82 }
-        Pattern = '(?s)pub const panic = switch \(builtin\.mode\) \{\s*\.Debug, \.ReleaseSafe => std\.debug\.FullPanic\(std\.debug\.defaultPanic\),\s*\.ReleaseFast, \.ReleaseSmall => std\.debug\.FullPanic\(releasePanic\),\s*\};.*?fn releasePanic\(msg: \[\]const u8, _: \?usize\) noreturn \{.*?@trap\(\);'
+        Pattern = '(?s)pub const panic = switch \(builtin\.mode\) \{\s*\.debug, \.safe => std\.debug\.FullPanic\(std\.debug\.defaultPanic\),\s*\.fast, \.small => std\.debug\.FullPanic\(releasePanic\),\s*\};.*?fn releasePanic\(msg: \[\]const u8, _: \?usize\) noreturn \{.*?@trap\(\);'
         Kind = 'Text'
         Description = 'release panics print the message and trap instead of linking std.debug''s symbolizer into an image that keeps debug info'
     }
