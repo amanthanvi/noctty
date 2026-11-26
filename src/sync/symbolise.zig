@@ -177,6 +177,33 @@ const ImagehlpModuleW64 = extern struct {
     Reserved: u32,
 };
 
+// DbgHelp.h's `IMAGEHLP_MODULEW64` (10.0.28000.0 SDK): the header packs with
+// pshpack8, which leaves every member here at its natural alignment, so the
+// DWORD64 after the first DWORD starts at 8, the GUID (`PdbSig70`, 4-aligned
+// in C) at 3,204, and the struct is 3,260 bytes rounded up to 3,264. A
+// `SizeOfStruct` DbgHelp does not know makes `SymGetModuleInfoW64` fail.
+test "ImagehlpModuleW64 matches DbgHelp.h's IMAGEHLP_MODULEW64" {
+    const T = ImagehlpModuleW64;
+    try std.testing.expectEqual(@as(usize, 3264), @sizeOf(T));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(T));
+    const offsets = .{
+        .{ "SizeOfStruct", 0 },      .{ "BaseOfImage", 8 },      .{ "ImageSize", 16 },
+        .{ "TimeDateStamp", 20 },    .{ "CheckSum", 24 },        .{ "NumSyms", 28 },
+        .{ "SymType", 32 },          .{ "ModuleName", 36 },      .{ "ImageName", 100 },
+        .{ "LoadedImageName", 612 }, .{ "LoadedPdbName", 1124 }, .{ "CVSig", 1636 },
+        .{ "CVData", 1640 },         .{ "PdbSig", 3200 },        .{ "PdbSig70", 3204 },
+        .{ "PdbAge", 3220 },         .{ "PdbUnmatched", 3224 },  .{ "DbgUnmatched", 3228 },
+        .{ "LineNumbers", 3232 },    .{ "GlobalSymbols", 3236 }, .{ "TypeInfo", 3240 },
+        .{ "SourceIndexed", 3244 },  .{ "Publics", 3248 },       .{ "MachineType", 3252 },
+        .{ "Reserved", 3256 },
+    };
+    inline for (offsets) |entry| {
+        try std.testing.expectEqual(@as(usize, entry[1]), @offsetOf(T, entry[0]));
+    }
+    // Every member is pinned: none was added or dropped.
+    try std.testing.expectEqual(offsets.len, @typeInfo(T).@"struct".field_names.len);
+}
+
 const sym_pdb = 3;
 const sym_dia = 7;
 
