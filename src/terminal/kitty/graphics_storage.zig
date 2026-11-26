@@ -1460,9 +1460,12 @@ pub const ImageStorage = struct {
         const placements_before = self.placements.count();
         const images_before = self.images.count();
 
-        // Delete unused placements and images. Orphaned relative
-        // placements must be reaped before the image sweep so that
-        // their images are reclaimable too.
+        // Delete unused placements and images. Placements whose rows were
+        // pruned are not visible, but they would keep their images in use
+        // (noctty; the 1B.1 merge took upstream's body without this sweep).
+        // Orphaned relative placements must be reaped before the image
+        // sweep so that their images are reclaimable too.
+        _ = self.removeGarbagePlacements(t.screens.active);
         self.deleteVisiblePlacements(alloc, t, true);
         _ = self.removeOrphans(t.screens.active, null);
         var image_it = self.images.iterator();
