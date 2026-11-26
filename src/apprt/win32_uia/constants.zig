@@ -154,10 +154,10 @@ test "ids match the Windows SDK headers" {
     inline for (sdk) |entry| {
         try std.testing.expectEqual(entry[1], @field(@This(), entry[0]));
     }
-    inline for (@typeInfo(@This()).@"struct".decls) |decl| {
-        if (@TypeOf(@field(@This(), decl.name)) != i32) continue;
+    inline for (@typeInfo(@This()).@"struct".decl_names) |decl_name| {
+        if (@TypeOf(@field(@This(), decl_name)) != i32) continue;
         const pinned = inline for (sdk) |entry| {
-            if (comptime std.mem.eql(u8, entry[0], decl.name)) break true;
+            if (comptime std.mem.eql(u8, entry[0], decl_name)) break true;
         } else false;
         try std.testing.expect(pinned);
     }

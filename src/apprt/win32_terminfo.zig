@@ -23,6 +23,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 const terminfo = @import("../terminfo/main.zig");
 const log = std.log.scoped(.win32_terminfo);
 
@@ -46,14 +47,14 @@ const record_name = ".noctty-installed";
 /// server.
 pub fn homeTerminfoDir(
     alloc: Allocator,
-    env: *const std.process.EnvMap,
+    env: *const std.process.Environ.Map,
 ) Allocator.Error!?[]u8 {
     const home = try homeDir(alloc, env) orelse return null;
     defer alloc.free(home);
     return try std.fs.path.join(alloc, &.{ home, ".terminfo" });
 }
 
-fn homeDir(alloc: Allocator, env: *const std.process.EnvMap) Allocator.Error!?[]u8 {
+fn homeDir(alloc: Allocator, env: *const std.process.Environ.Map) Allocator.Error!?[]u8 {
     // git.exe keeps a HOME that is set even when it is empty, so an empty one
     // gives none rather than the fallbacks below.
     if (env.get("HOME")) |home| return try localAbsolute(alloc, home);
@@ -75,7 +76,7 @@ fn localAbsolute(alloc: Allocator, path: []const u8) Allocator.Error!?[]u8 {
     return try alloc.dupe(u8, path);
 }
 
-fn getEnv(env: *const std.process.EnvMap, key: []const u8) ?[]const u8 {
+fn getEnv(env: *const std.process.Environ.Map, key: []const u8) ?[]const u8 {
     const value = env.get(key) orelse return null;
     return if (value.len == 0) null else value;
 }
@@ -102,8 +103,9 @@ fn isSeparator(c: u8) bool {
 }
 
 fn isDirectory(path: []const u8) bool {
-    var dir = std.fs.openDirAbsolute(path, .{}) catch return false;
-    dir.close();
+    const io = global.io();
+    var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return false;
+    dir.close(io);
     return true;
 }
 
@@ -112,12 +114,13 @@ fn isDirectory(path: []const u8) bool {
 /// would leave ncurses without an entry just the same.
 pub fn hasEntry(alloc: Allocator, terminfo_dir: []const u8, term: []const u8) bool {
     if (term.len == 0) return false;
-    var dir = std.fs.openDirAbsolute(terminfo_dir, .{}) catch return false;
-    defer dir.close();
+    const io = global.io();
+    var dir = std.Io.Dir.openDirAbsolute(io, terminfo_dir, .{}) catch return false;
+    defer dir.close(io);
     const hex = terminfo.compiled.hexDir(term);
-    var sub_dir = dir.openDir(&hex, .{}) catch return false;
-    defer sub_dir.close();
-    const data = sub_dir.readFileAlloc(alloc, term, terminfo.compiled.max_entry_size) catch return false;
+    var sub_dir = dir.openDir(io, &hex, .{}) catch return false;
+    defer sub_dir.close(io);
+    const data = sub_dir.readFileAlloc(io, term, alloc, .limited(terminfo.compiled.max_entry_size + 1)) catch return false;
     defer alloc.free(data);
     return terminfo.compiled.isEntry(data);
 }
@@ -167,11 +170,12 @@ fn installFiles(
     try terminfo.compiled.encode(alloc, source, &out.writer);
     const entry = out.written();
 
-    var home = try std.fs.openDirAbsolute(std.fs.path.dirname(dir_path) orelse
+    const io = global.io();
+    var home = try std.Io.Dir.openDirAbsolute(io, std.fs.path.dirname(dir_path) orelse
         return error.InvalidPath, .{});
-    defer home.close();
-    var dir = try home.makeOpenPath(std.fs.path.basename(dir_path), .{});
-    defer dir.close();
+    defer home.close(io);
+    var dir = try home.createDirPathOpen(io, std.fs.path.basename(dir_path), .{});
+    defer dir.close(io);
     const recorded = readRecordedHash(dir);
 
     var result: InstallResult = .current;
@@ -179,10 +183,10 @@ fn installFiles(
     var holding = false;
     for (try terminfo.compiled.fileNames(source)) |name| {
         const hex = terminfo.compiled.hexDir(name);
-        var sub_dir = try dir.makeOpenPath(&hex, .{});
-        defer sub_dir.close();
+        var sub_dir = try dir.createDirPathOpen(io, &hex, .{});
+        defer sub_dir.close(io);
 
-        const existing = sub_dir.readFileAlloc(alloc, name, 64 * 1024) catch |err| switch (err) {
+        const existing = sub_dir.readFileAlloc(io, name, alloc, .limited(64 * 1024 + 1)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -226,9 +230,9 @@ fn sha256(data: []const u8) [32]u8 {
     return hash;
 }
 
-fn readRecordedHash(dir: std.fs.Dir) ?[32]u8 {
+fn readRecordedHash(dir: std.Io.Dir) ?[32]u8 {
     var buf: [128]u8 = undefined;
-    const contents = dir.readFile(record_name, &buf) catch return null;
+    const contents = dir.readFile(global.io(), record_name, &buf) catch return null;
     const hex = std.mem.trim(u8, contents, &std.ascii.whitespace);
     var hash: [32]u8 = undefined;
     const decoded = std.fmt.hexToBytes(&hash, hex) catch return null;
@@ -240,22 +244,23 @@ fn readRecordedHash(dir: std.fs.Dir) ?[32]u8 {
 /// partial file. The temporary name is random and created exclusively, so
 /// two noctty processes never write into the same one, and an existing file
 /// or link of that name is never followed.
-pub fn writeAtomically(dir: std.fs.Dir, name: []const u8, data: []const u8) !void {
+pub fn writeAtomically(dir: std.Io.Dir, name: []const u8, data: []const u8) !void {
+    const io = global.io();
     var random: [8]u8 = undefined;
-    std.crypto.random.bytes(&random);
+    io.random(&random);
     const random_hex = std.fmt.bytesToHex(random, .lower);
     var tmp_buf: [std.fs.max_name_bytes]u8 = undefined;
     const tmp = try std.fmt.bufPrint(&tmp_buf, ".{s}.{s}.tmp", .{ name, &random_hex });
 
-    const file = try dir.createFile(tmp, .{ .exclusive = true });
-    file.writeAll(data) catch |err| {
-        file.close();
-        dir.deleteFile(tmp) catch {};
+    const file = try dir.createFile(io, tmp, .{ .exclusive = true });
+    file.writeStreamingAll(io, data) catch |err| {
+        file.close(io);
+        dir.deleteFile(io, tmp) catch {};
         return err;
     };
-    file.close();
-    dir.rename(tmp, name) catch |err| {
-        dir.deleteFile(tmp) catch {};
+    file.close(io);
+    dir.rename(tmp, dir, name, io) catch |err| {
+        dir.deleteFile(io, tmp) catch {};
         return err;
     };
 }
@@ -272,13 +277,13 @@ const test_source: terminfo.Source = .{
 
 const TestPaths = struct {
     tmp: testing.TmpDir,
-    root: []u8,
+    root: [:0]u8,
     db: []u8,
 
     fn init() !TestPaths {
         var tmp = testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
         errdefer testing.allocator.free(root);
         const db = try std.fs.path.join(testing.allocator, &.{ root, ".terminfo" });
         return .{ .tmp = tmp, .root = root, .db = db };
@@ -291,21 +296,21 @@ const TestPaths = struct {
     }
 
     fn read(self: *TestPaths, path: []const u8) ![]u8 {
-        var dir = try std.fs.openDirAbsolute(self.db, .{});
-        defer dir.close();
-        return dir.readFileAlloc(testing.allocator, path, 64 * 1024);
+        var dir = try std.Io.Dir.openDirAbsolute(testing.io, self.db, .{});
+        defer dir.close(testing.io);
+        return dir.readFileAlloc(testing.io, path, testing.allocator, .limited(64 * 1024));
     }
 
     fn put(self: *TestPaths, path: []const u8, data: []const u8) !void {
-        var dir = try std.fs.cwd().makeOpenPath(self.db, .{});
-        defer dir.close();
-        if (std.fs.path.dirname(path)) |parent| try dir.makePath(parent);
-        try dir.writeFile(.{ .sub_path = path, .data = data });
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(testing.io, self.db, .{});
+        defer dir.close(testing.io);
+        if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(testing.io, parent);
+        try dir.writeFile(testing.io, .{ .sub_path = path, .data = data });
     }
 
     fn recorded(self: *TestPaths) ?[32]u8 {
-        var dir = std.fs.openDirAbsolute(self.db, .{}) catch return null;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(testing.io, self.db, .{}) catch return null;
+        defer dir.close(testing.io);
         return readRecordedHash(dir);
     }
 
@@ -342,10 +347,10 @@ test "install writes every name and then finds them current" {
     try testing.expectEqual(.current, install(testing.allocator, test_source, paths.db));
 
     // No temporary file is left behind.
-    var dir = try std.fs.openDirAbsolute(paths.db, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(testing.io, paths.db, .{ .iterate = true });
+    defer dir.close(testing.io);
     var it = dir.iterate();
-    while (try it.next()) |item| try testing.expect(!std.mem.endsWith(u8, item.name, ".tmp"));
+    while (try it.next(testing.io)) |item| try testing.expect(!std.mem.endsWith(u8, item.name, ".tmp"));
 }
 
 test "install updates a file it wrote and keeps one it did not" {
@@ -422,7 +427,7 @@ test "install does not create a missing home" {
     const db = try std.fs.path.join(testing.allocator, &.{ paths.root, "no", "such", "home", ".terminfo" });
     defer testing.allocator.free(db);
     try testing.expectEqual(.failed, install(testing.allocator, test_source, db));
-    try testing.expectError(error.FileNotFound, paths.tmp.dir.access("no", .{}));
+    try testing.expectError(error.FileNotFound, paths.tmp.dir.access(testing.io, "no", .{}));
 }
 
 test "install reports a failure instead of returning an error" {
@@ -430,7 +435,7 @@ test "install reports a failure instead of returning an error" {
     defer paths.deinit();
 
     // A file where the database directory should be.
-    try paths.tmp.dir.writeFile(.{ .sub_path = ".terminfo", .data = "" });
+    try paths.tmp.dir.writeFile(testing.io, .{ .sub_path = ".terminfo", .data = "" });
     try testing.expectEqual(.failed, install(testing.allocator, test_source, paths.db));
 }
 
@@ -458,7 +463,7 @@ test "homeTerminfoDir follows where Git's tools look" {
 
     var paths: TestPaths = try .init();
     defer paths.deinit();
-    var env: std.process.EnvMap = .init(testing.allocator);
+    var env: std.process.Environ.Map = .init(testing.allocator);
     defer env.deinit();
 
     // Nothing usable.

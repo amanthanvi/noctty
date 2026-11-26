@@ -3,6 +3,7 @@ const win32_sys = @import("win32/sys.zig");
 const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const apprt = @import("../apprt.zig");
+const global = @import("../global.zig");
 const sys = @import("win32/sys.zig");
 const consts = @import("win32/consts.zig");
 const win32_layouts = @import("win32_layouts.zig");
@@ -755,7 +756,7 @@ fn readExactUntil(
                 if (err == .BROKEN_PIPE) return error.EndOfStream;
                 if (pipeIoPending(err)) {
                     if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
-                    std.Thread.sleep(poll_interval_ns);
+                    std.Io.sleep(global.io(), .fromNanoseconds(poll_interval_ns), .awake) catch {};
                     continue;
                 }
                 return windows.unexpectedError(err);
@@ -792,7 +793,7 @@ pub fn writeAll(pipe: Pipe, src: []const u8) !void {
                     if (sys.GetTickCount64() -| started_at >= io_timeout_ms) {
                         return error.IpcTimeout;
                     }
-                    std.Thread.sleep(poll_interval_ns);
+                    std.Io.sleep(global.io(), .fromNanoseconds(poll_interval_ns), .awake) catch {};
                     continue;
                 }
                 return windows.unexpectedError(err);
@@ -878,34 +879,42 @@ fn automationTargetBytes(tag: u8, value: u64) [9]u8 {
     return encoded;
 }
 
+/// Move a test file's OS file pointer, which the wire decoders' synchronous
+/// `ReadFile` reads from. 0.17's `Io.File` keeps no position of its own; a
+/// streaming writer's seek sets the handle's (`NtSetInformationFile`).
+fn seekTestFile(file: std.Io.File, offset: u64) !void {
+    var writer = file.writerStreaming(std.testing.io, &.{});
+    try writer.seekTo(offset);
+}
+
 fn writeAutomationSizedPayload(
-    file: *std.fs.File,
+    file: *std.Io.File,
     target: [9]u8,
     extra: []const u8,
     declared_len: u32,
     body: []const u8,
 ) !void {
-    try file.setEndPos(0);
-    try file.seekTo(0);
+    try file.setLength(std.testing.io, 0);
+    try seekTestFile(file.*, 0);
     var deadline_buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
-    try file.writeAll(&deadline_buf);
-    try file.writeAll(&target);
-    try file.writeAll(extra);
+    try file.writeStreamingAll(std.testing.io, &deadline_buf);
+    try file.writeStreamingAll(std.testing.io, &target);
+    try file.writeStreamingAll(std.testing.io, extra);
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, declared_len, .little);
-    try file.writeAll(&len_buf);
-    try file.writeAll(body);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &len_buf);
+    try file.writeStreamingAll(std.testing.io, body);
+    try seekTestFile(file.*, 0);
 }
 
 const test_deadline_ms: u64 = 0x0102030405060708;
 
-fn writeAutomationBytes(file: *std.fs.File, bytes: []const u8) !void {
-    try file.setEndPos(0);
-    try file.seekTo(0);
-    try file.writeAll(bytes);
-    try file.seekTo(0);
+fn writeAutomationBytes(file: *std.Io.File, bytes: []const u8) !void {
+    try file.setLength(std.testing.io, 0);
+    try seekTestFile(file.*, 0);
+    try file.writeStreamingAll(std.testing.io, bytes);
+    try seekTestFile(file.*, 0);
 }
 
 test "win32 automation numeric pins" {
@@ -1052,10 +1061,10 @@ test "win32 automation request and ack round trips" {
         .{ .status = ack_automation_target_not_found, .expected = error.AutomationTargetNotFound },
         .{ .status = ack_automation_policy_refused, .expected = error.AutomationPolicyRefused },
     }) |case| {
-        try file.setEndPos(0);
-        try file.seekTo(0);
+        try file.setLength(std.testing.io, 0);
+        try seekTestFile(file, 0);
         try writeAckStatus(.{ .handle = file.handle }, case.status);
-        try file.seekTo(0);
+        try seekTestFile(file, 0);
         try std.testing.expectError(case.expected, readAck(file.handle));
     }
 }
@@ -1187,7 +1196,7 @@ test "win32 IPC silent client read is bounded" {
 
     const DelayedWriter = struct {
         fn run(pipe: windows.HANDLE) void {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
             writeAll(.{ .handle = pipe }, "y") catch unreachable;
         }
     };
@@ -1252,8 +1261,8 @@ test "win32 toggle-quick-terminal IPC encodes and decodes the deadline" {
     defer tmp.cleanup();
     var file = try tmp.dir.createFile(std.testing.io, "toggle-quick-terminal.bin", .{ .read = true });
     defer file.close(std.testing.io);
-    try file.writeAll(request);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, request);
+    try seekTestFile(file, 0);
 
     const pipe: Pipe = .{ .handle = file.handle };
     try std.testing.expectEqual(RequestKind.toggle_quick_terminal_timed, try decodeRequestKind(pipe));
@@ -1277,8 +1286,8 @@ test "win32 launch-layout IPC encode decode round trip" {
         .truncate = true,
     });
     defer file.close(std.testing.io);
-    try file.writeAll(request);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, request);
+    try seekTestFile(file, 0);
 
     try std.testing.expectEqual(RequestKind.launch_layout_timed, try decodeRequestKind(.{ .handle = file.handle }));
     const decoded = try decodeLaunchLayoutPayload(std.testing.allocator, .{ .handle = file.handle }, true);
@@ -1344,12 +1353,12 @@ test "win32 launch-layout IPC decoder rejects invalid names without leaks" {
 
         var deadline_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
-        try file.writeAll(&deadline_buf);
+        try file.writeStreamingAll(std.testing.io, &deadline_buf);
         var len_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &len_buf, @intCast(name.len), .little);
-        try file.writeAll(&len_buf);
-        try file.writeAll(name);
-        try file.seekTo(0);
+        try file.writeStreamingAll(std.testing.io, &len_buf);
+        try file.writeStreamingAll(std.testing.io, name);
+        try seekTestFile(file, 0);
         try std.testing.expectError(
             error.InvalidAutomationAction,
             decodeLaunchLayoutPayload(std.testing.allocator, .{ .handle = file.handle }, true),
@@ -1370,12 +1379,12 @@ test "win32 launch-layout IPC decoder cleans up on partial EOF" {
 
     var deadline_buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
-    try file.writeAll(&deadline_buf);
+    try file.writeStreamingAll(std.testing.io, &deadline_buf);
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, 4, .little);
-    try file.writeAll(&len_buf);
-    try file.writeAll("ab");
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &len_buf);
+    try file.writeStreamingAll(std.testing.io, "ab");
+    try seekTestFile(file, 0);
     try std.testing.expectError(
         error.EndOfStream,
         decodeLaunchLayoutPayload(std.testing.allocator, .{ .handle = file.handle }, true),
@@ -1409,8 +1418,8 @@ test "win32 decodeNewWindowPayload rejects oversized argument length before allo
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], 1, .little);
     std.mem.writeInt(u32, buf[4..8], max_new_window_arg_len + 1, .little);
-    try file.writeAll(&buf);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &buf);
+    try seekTestFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidIpcRequest,
@@ -1434,8 +1443,8 @@ test "win32 decodeNewWindowPayload rejects aggregate argument bytes before alloc
     std.mem.writeInt(u32, buf[0..4], 2, .little);
     std.mem.writeInt(u32, buf[4..8], max_new_window_args_bytes, .little);
     std.mem.writeInt(u32, buf[8..12], 1, .little);
-    try file.writeAll(&buf);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &buf);
+    try seekTestFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidIpcRequest,
@@ -1460,8 +1469,8 @@ test "win32 decodeNewWindowPayload cleans up initialized args on partial EOF" {
     std.mem.writeInt(u32, header[4..8], 1, .little);
     header[8] = 'x';
     std.mem.writeInt(u32, header[9..13], 1, .little);
-    try file.writeAll(&header);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &header);
+    try seekTestFile(file, 0);
 
     try std.testing.expectError(
         error.EndOfStream,
@@ -1487,13 +1496,13 @@ test "win32 encodeNewWindowRequest rejects oversized forwarded arguments" {
 /// exercises the same `readExactUntil` path without a live named pipe, and
 /// one file is reused across a whole campaign instead of one per iteration.
 const FuzzTransport = struct {
-    file: std.fs.File,
+    file: std.Io.File,
 
     fn load(self: *FuzzTransport, bytes: []const u8) !void {
-        try self.file.seekTo(0);
-        try self.file.setEndPos(0);
-        try self.file.writeAll(bytes);
-        try self.file.seekTo(0);
+        try seekTestFile(self.file, 0);
+        try self.file.setLength(std.testing.io, 0);
+        try self.file.writeStreamingAll(std.testing.io, bytes);
+        try seekTestFile(self.file, 0);
     }
 
     /// Overwrite the transport with filler so any decoded value that still
@@ -1501,15 +1510,15 @@ const FuzzTransport = struct {
     fn scrub(self: *FuzzTransport, len: usize) !void {
         var filler: [256]u8 = undefined;
         @memset(&filler, 0xA5);
-        try self.file.seekTo(0);
-        try self.file.setEndPos(0);
+        try seekTestFile(self.file, 0);
+        try self.file.setLength(std.testing.io, 0);
         var remaining = len;
         while (remaining > 0) {
             const chunk = @min(remaining, filler.len);
-            try self.file.writeAll(filler[0..chunk]);
+            try self.file.writeStreamingAll(std.testing.io, filler[0..chunk]);
             remaining -= chunk;
         }
-        try self.file.seekTo(0);
+        try seekTestFile(self.file, 0);
     }
 };
 
@@ -1565,6 +1574,17 @@ fn fuzzDecodeNewWindowPayload(transport: *FuzzTransport, input: []const u8) !voi
     try expectArgumentsEqual(arguments, round_trip);
 }
 
+/// `fuzzDecodeNewWindowPayload` behind Zig 0.17's fuzz interface, which hands a test a
+/// `std.testing.Smith` rather than the input bytes. Outside fuzz mode the
+/// Smith holds one corpus entry (or the empty smoke input), passed through
+/// verbatim as 0.15's runner passed it; in fuzz mode the fuzzer draws the
+/// input.
+fn fuzzDecodeNewWindowPayloadSmith(context: *FuzzTransport, smith: *std.testing.Smith) anyerror!void {
+    if (smith.in) |input| return fuzzDecodeNewWindowPayload(context, input);
+    var buf: [4096]u8 = undefined;
+    try fuzzDecodeNewWindowPayload(context, buf[0..smith.slice(&buf)]);
+}
+
 const new_window_fuzz_corpus = [_][]const u8{
     "\x00\x00\x00\x00",
     "\x01\x00\x00\x00\x03\x00\x00\x00cmd",
@@ -1607,7 +1627,7 @@ test "fuzz win32 IPC new-window payload decoder" {
     defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
-    try std.testing.fuzz(&transport, fuzzDecodeNewWindowPayload, .{
+    try std.testing.fuzz(&transport, fuzzDecodeNewWindowPayloadSmith, .{
         .corpus = &new_window_fuzz_corpus,
     });
 }
@@ -1690,6 +1710,17 @@ fn fuzzDecodePerformActionPayload(transport: *FuzzTransport, input: []const u8) 
     );
 }
 
+/// `fuzzDecodePerformActionPayload` behind Zig 0.17's fuzz interface, which hands a test a
+/// `std.testing.Smith` rather than the input bytes. Outside fuzz mode the
+/// Smith holds one corpus entry (or the empty smoke input), passed through
+/// verbatim as 0.15's runner passed it; in fuzz mode the fuzzer draws the
+/// input.
+fn fuzzDecodePerformActionPayloadSmith(context: *FuzzTransport, smith: *std.testing.Smith) anyerror!void {
+    if (smith.in) |input| return fuzzDecodePerformActionPayload(context, input);
+    var buf: [4096]u8 = undefined;
+    try fuzzDecodePerformActionPayload(context, buf[0..smith.slice(&buf)]);
+}
+
 test "win32 IPC perform-action decoder rejects every truncated payload" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -1730,7 +1761,7 @@ test "fuzz win32 IPC perform-action payload decoder" {
     defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
-    try std.testing.fuzz(&transport, fuzzDecodePerformActionPayload, .{ .corpus = &.{
+    try std.testing.fuzz(&transport, fuzzDecodePerformActionPayloadSmith, .{ .corpus = &.{
         "\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
             "\x07\x00\x00\x00new_tab",
         "\x01\x2A\x00\x00\x00\x00\x00\x00\x00" ++

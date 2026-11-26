@@ -1480,8 +1480,8 @@ fn expectChangedFile(read: []const u8, now: []const u8, want: []const struct { k
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = read });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = read });
+    const path = try tmp.dir.realPathFileAlloc(testing.io, "config", alloc);
     defer alloc.free(path);
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
@@ -1491,7 +1491,7 @@ fn expectChangedFile(read: []const u8, now: []const u8, want: []const struct { k
     try current.loadFile(alloc, path);
     try current.finalize();
     try testing.expectEqual(@as(f32, 13), current.@"font-size");
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = now });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = now });
     const extra: [key_count][]const u8 = @splat("");
     var model: Model = .{};
     defer model.deinit();
@@ -1610,8 +1610,8 @@ fn expectLoadedStillChanged(now: []const u8, location: []const u8) !void {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "click-repeat-interval = 500\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = "click-repeat-interval = 500\n" });
+    const path = try tmp.dir.realPathFileAlloc(testing.io, "config", alloc);
     defer alloc.free(path);
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
@@ -1621,7 +1621,7 @@ fn expectLoadedStillChanged(now: []const u8, location: []const u8) !void {
     try current.loadFile(alloc, path);
     try current.finalize();
     try testing.expectEqual(@as(@TypeOf(current.@"click-repeat-interval"), 500), current.@"click-repeat-interval");
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = now });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = now });
     const extra: [key_count][]const u8 = @splat("");
     var model: Model = .{};
     defer model.deinit();
@@ -1762,10 +1762,10 @@ const TestRead = enum { readable, unavailable, undecodable };
 /// `extra_text`) and `args` into `current`, as the app does, and build
 /// `model` with the file read as `file` says. Returns the file's path, the
 /// caller's to free; `current` is the caller's to deinit.
-fn buildLoaded(alloc: std.mem.Allocator, dir: std.fs.Dir, text: []const u8, extra_text: []const u8, args: []const []const u8, model: *Model, current: *Config, defaults: *const Config, file: TestRead) ![]u8 {
-    try dir.writeFile(.{ .sub_path = "extra.conf", .data = extra_text });
-    try dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try dir.realpathAlloc(alloc, "config");
+fn buildLoaded(alloc: std.mem.Allocator, dir: std.Io.Dir, text: []const u8, extra_text: []const u8, args: []const []const u8, model: *Model, current: *Config, defaults: *const Config, file: TestRead) ![:0]u8 {
+    try dir.writeFile(testing.io, .{ .sub_path = "extra.conf", .data = extra_text });
+    try dir.writeFile(testing.io, .{ .sub_path = "config", .data = text });
+    const path = try dir.realPathFileAlloc(testing.io, "config", alloc);
     errdefer alloc.free(path);
     current.* = try Config.default(alloc);
     errdefer current.deinit();

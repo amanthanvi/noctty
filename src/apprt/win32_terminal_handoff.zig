@@ -8,6 +8,7 @@ const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const ptypkg = @import("../pty.zig");
+const global = @import("../global.zig");
 const com = @import("win32_uia/com.zig");
 const consts = @import("win32/consts.zig");
 
@@ -288,6 +289,15 @@ pub const QueueSessionFn = *const fn (ctx: *anyopaque, pending: *PendingSession)
 /// identifier we never handed out are the same thing, and both are dropped.
 pub const PendingId = usize;
 
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 /// Process-owned table of handoff sessions waiting for the UI thread.
 ///
 /// The wake-up for a completed handoff is a thread message, and any process on
@@ -298,7 +308,7 @@ pub const PendingId = usize;
 /// identifier we never issued - or issued and already consumed - resolves to
 /// null, and the message is dropped without touching any session.
 pub const PendingQueue = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     entries: std.ArrayList(Entry) = .empty,
 
     const Entry = struct {
@@ -313,8 +323,8 @@ pub const PendingQueue = struct {
         alloc: Allocator,
         session: *PendingSession,
     ) Allocator.Error!PendingId {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         var source: CryptoCapabilitySource = .{};
         const id = self.nextCapabilityWithSource(&source);
         try self.entries.append(alloc, .{ .id = id, .session = session });
@@ -323,7 +333,8 @@ pub const PendingQueue = struct {
 
     const CryptoCapabilitySource = struct {
         fn next(_: *@This()) PendingId {
-            return std.crypto.random.int(PendingId);
+            const random: std.Random.IoSource = .{ .io = global.io() };
+            return random.interface().int(PendingId);
         }
     };
 
@@ -340,8 +351,8 @@ pub const PendingQueue = struct {
     /// Resolves `id` and hands ownership back to the caller, or returns null
     /// when the identifier was never issued or has already been consumed.
     pub fn take(self: *PendingQueue, id: PendingId) ?*PendingSession {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         for (self.entries.items, 0..) |entry, index| {
             if (entry.id != id) continue;
             _ = self.entries.orderedRemove(index);
@@ -351,24 +362,24 @@ pub const PendingQueue = struct {
     }
 
     pub fn isEmpty(self: *PendingQueue) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         return self.entries.items.len == 0;
     }
 
     /// Recovery path for a queued session whose notification was lost.
     /// Removing its capability also makes a delayed notification harmless.
     pub fn takeOldest(self: *PendingQueue) ?*PendingSession {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (self.entries.items.len == 0) return null;
         return self.entries.orderedRemove(0).session;
     }
 
     /// Destroys every session that never reached the UI thread.
     pub fn drain(self: *PendingQueue, alloc: Allocator) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         for (self.entries.items) |entry| {
             entry.session.deinit();
             alloc.destroy(entry.session);
@@ -987,13 +998,13 @@ pub fn appendHandoffMilestone(alloc: Allocator, event: []const u8) void {
 }
 
 fn appendHandoffTrace(alloc: Allocator, line: []const u8) void {
-    if (!std.process.hasNonEmptyEnvVarConstant("NOCTTY_HANDOFF_TRACE")) return;
+    if (!global.environ().containsUnemptyConstant("NOCTTY_HANDOFF_TRACE")) return;
 
-    const local_app_data = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return;
+    const local_app_data = global.environ().getAlloc(alloc, "LOCALAPPDATA") catch return;
     defer alloc.free(local_app_data);
     const dir_path = std.fs.path.join(alloc, &.{ local_app_data, "noctty" }) catch return;
     defer alloc.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch return;
+    std.Io.Dir.cwd().createDirPath(global.io(), dir_path) catch return;
     const log_path = std.fs.path.join(alloc, &.{ dir_path, "handoff.log" }) catch return;
     defer alloc.free(log_path);
 
@@ -1001,18 +1012,19 @@ fn appendHandoffTrace(alloc: Allocator, line: []const u8) void {
 }
 
 fn appendHandoffTraceAtPath(log_path: []const u8, line: []const u8) !void {
-    const file = try std.fs.createFileAbsolute(log_path, .{ .truncate = false });
-    defer file.close();
-    const current_size = try file.getEndPos();
-    if (current_size + line.len + 2 > handoff_trace_max_bytes) {
-        try file.setEndPos(0);
-        try file.seekTo(0);
-    } else {
-        try file.seekTo(current_size);
+    const io = global.io();
+    const file = try std.Io.Dir.createFileAbsolute(io, log_path, .{ .truncate = false });
+    defer file.close(io);
+    // 0.17's `Io.File` has no seek of its own: write at the offset the 0.15
+    // code seeked to (the end, or 0 after the truncation).
+    var offset = try file.length(io);
+    if (offset + line.len + 2 > handoff_trace_max_bytes) {
+        try file.setLength(io, 0);
+        offset = 0;
     }
-    try file.writeAll(line);
-    try file.writeAll("\r\n");
-    try file.sync();
+    try file.writePositionalAll(io, line, offset);
+    try file.writePositionalAll(io, "\r\n", offset + line.len);
+    try file.sync(io);
 }
 
 pub fn isEmbeddingArgs(argv: []const []const u8) bool {
@@ -1024,8 +1036,9 @@ pub fn isEmbeddingArgs(argv: []const []const u8) bool {
 }
 
 pub fn isEmbeddingProcess(alloc: Allocator) bool {
-    const argv = std.process.argsAlloc(alloc) catch return false;
-    defer std.process.argsFree(alloc, argv);
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const argv = global.args().toSlice(arena.allocator()) catch return false;
     return isEmbeddingArgs(argv);
 }
 
@@ -1249,7 +1262,7 @@ pub fn nocttyExePathForLauncher(alloc: Allocator, launcher_path: []const u8) ![]
 }
 
 pub fn currentNocttyExePath(alloc: Allocator) ![]u8 {
-    const launcher = try std.fs.selfExePathAlloc(alloc);
+    const launcher = try std.process.executablePathAlloc(global.io(), alloc);
     defer alloc.free(launcher);
     return nocttyExePathForLauncher(alloc, launcher);
 }
@@ -1270,8 +1283,10 @@ pub fn proxyDllPathForExe(alloc: Allocator, exe_path: []const u8) ![]u8 {
 pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocator.Error || RegistrationError || error{InvalidExecutablePath})!RegisterResult {
     const proxy_path = try proxyDllPathForExe(alloc, exe_path);
     defer alloc.free(proxy_path);
-    const proxy_file = std.fs.openFileAbsolute(proxy_path, .{}) catch return error.ProxyDllMissing;
-    proxy_file.close();
+    // `allow_directory = false` keeps 0.15's file-only open: a directory of
+    // that name is not the proxy DLL.
+    const proxy_file = std.Io.Dir.openFileAbsolute(global.io(), proxy_path, .{ .allow_directory = false }) catch return error.ProxyDllMissing;
+    proxy_file.close(global.io());
 
     const console_text = try consoleHalfTextAlloc(alloc);
     defer if (console_text) |value| alloc.free(value);
@@ -1908,7 +1923,7 @@ test "handoff is visible before the UI can defer adopting it" {
         fn offer(raw: *anyopaque, _: *PendingSession) bool {
             const self: *@This() = @ptrCast(@alignCast(raw));
             var available: DWORD = 0;
-            self.primed_at_offer = @import("../os/main.zig").windows.exp.kernel32.PeekNamedPipe(self.signal_read, null, 0, null, &available, null) != 0 and available == 4;
+            self.primed_at_offer = @import("../os/main.zig").windows.exp.kernel32.PeekNamedPipe(self.signal_read, null, 0, null, &available, null).toBool() and available == 4;
             // Deliberately leave the UI idle; no Surface or IO thread starts.
             return true;
         }
@@ -2310,7 +2325,7 @@ test "handoff failure trace stays within its byte budget" {
     {
         var file = try tmp.dir.createFile(std.testing.io, "handoff.log", .{});
         defer file.close(std.testing.io);
-        try file.setEndPos(handoff_trace_max_bytes);
+        try file.setLength(std.testing.io, handoff_trace_max_bytes);
     }
     const path = try tmp.dir.realPathFileAlloc(std.testing.io, "handoff.log", std.testing.allocator);
     defer std.testing.allocator.free(path);
@@ -2420,7 +2435,7 @@ const ScratchHive = struct {
     fn init(alloc: Allocator) !ScratchHive {
         const prefix = try std.fmt.allocPrint(alloc, name_start ++ "handoff-{d}-{d}", .{
             windows.GetCurrentProcessId(),
-            std.time.milliTimestamp(),
+            std.Io.Timestamp.now(std.testing.io, .real).toMilliseconds(),
         });
         test_registry_prefix = prefix;
         return .{ .alloc = alloc, .prefix = prefix };
@@ -2467,8 +2482,8 @@ const ScratchInstall = struct {
     fn init(alloc: Allocator) !ScratchInstall {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        (try tmp.dir.createFile(proxy_filename, .{})).close();
-        const dir = try tmp.dir.realpathAlloc(alloc, ".");
+        (try tmp.dir.createFile(std.testing.io, proxy_filename, .{})).close(std.testing.io);
+        const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
         defer alloc.free(dir);
         return .{ .tmp = tmp, .exe_path = try std.fs.path.join(alloc, &.{ dir, "noctty.exe" }) };
     }

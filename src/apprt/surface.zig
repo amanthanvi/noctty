@@ -11,6 +11,15 @@ const semantic_output = @import("../terminal/semantic_output.zig");
 const Config = @import("../config.zig").Config;
 const MessageData = @import("../datastruct/main.zig").MessageData;
 
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 /// Fixed-memory semantic terminal-output handoff from the PTY thread to the UI
 /// thread. Producers never block: lock contention and capacity exhaustion
 /// become one ordered omission barrier. While that barrier is pending, newer
@@ -43,7 +52,7 @@ pub const TerminalOutputTransport = struct {
 
     interest_state: std.atomic.Value(u64) = .init(0),
     omission_pending: std.atomic.Value(u64) = .init(0),
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     chunks: [max_chunks][chunk_bytes]u8 = undefined,
     lengths: [max_chunks]usize = @splat(0),
     resets_before: [max_chunks]bool = @splat(false),
@@ -55,8 +64,8 @@ pub const TerminalOutputTransport = struct {
         const state = self.interest_state.load(.acquire);
         if ((state & 1 != 0) == interested) return;
         if (!interested) self.interest_state.store(state +% 1, .release);
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         self.head = 0;
         self.count = 0;
         self.trailing_reset = false;
@@ -118,7 +127,7 @@ pub const TerminalOutputTransport = struct {
             if (!self.markOmissionForEpoch(epoch)) return .stale;
             return .contended;
         }
-        defer self.mutex.unlock();
+        defer self.mutex.unlock(mutexIo());
 
         if (self.interest_state.load(.acquire) != epoch) return .stale;
         if (self.omissionPendingForEpoch(epoch)) return .rejecting;
@@ -244,9 +253,9 @@ pub const TerminalOutputTransport = struct {
         var lengths: [max_chunks]usize = @splat(0);
         var resets_before: [max_chunks]bool = @splat(false);
         var count: usize = 0;
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         if (self.interest_state.load(.acquire) != epoch) {
-            self.mutex.unlock();
+            self.mutex.unlock(mutexIo());
             return;
         }
         while (self.count != 0) {
@@ -271,7 +280,7 @@ pub const TerminalOutputTransport = struct {
             .acq_rel,
             .acquire,
         ) == null;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
 
         for (0..count) |index| {
             if (resets_before[index]) callback(ctx, .reset);
@@ -815,11 +824,11 @@ test "terminal output transport lock contention returns immediately" {
 
     var transport: TerminalOutputTransport = .{};
     transport.setInterested(true);
-    transport.mutex.lock();
+    transport.mutex.lockUncancelable(mutexIo());
     var parsing_continued = false;
     const result = transport.push("cannot wait");
     parsing_continued = true;
-    transport.mutex.unlock();
+    transport.mutex.unlock(mutexIo());
     try std.testing.expectEqual(TerminalOutputTransport.PushResult.contended, result);
     try std.testing.expect(parsing_continued);
     try std.testing.expectEqual(
@@ -859,9 +868,9 @@ test "terminal output transport reentrant callbacks preserve epochs and contenti
                     self.events.appendSlice(std.testing.allocator, "<omitted>|") catch unreachable;
                     if (self.reenter) {
                         self.pushed_from_omission = self.transport.push("during-omission|");
-                        self.transport.mutex.lock();
+                        self.transport.mutex.lockUncancelable(mutexIo());
                         self.contended_after_clear = self.transport.push("dropped-after-clear");
-                        self.transport.mutex.unlock();
+                        self.transport.mutex.unlock(mutexIo());
                         self.reenter = false;
                     }
                 },
@@ -875,9 +884,9 @@ test "terminal output transport reentrant callbacks preserve epochs and contenti
         TerminalOutputTransport.PushResult.enqueued,
         transport.push("old|"),
     );
-    transport.mutex.lock();
+    transport.mutex.lockUncancelable(mutexIo());
     const initial_contention = transport.push("initially-dropped");
-    transport.mutex.unlock();
+    transport.mutex.unlock(mutexIo());
     try std.testing.expectEqual(
         TerminalOutputTransport.PushResult.contended,
         initial_contention,

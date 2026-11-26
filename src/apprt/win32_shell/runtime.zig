@@ -246,7 +246,6 @@ pub const Prepared = struct {
                 if (self.next) |*stale| stale.deinit();
                 self.next = null;
             },
-            else => return err,
         };
     }
 };

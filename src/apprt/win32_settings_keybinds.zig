@@ -126,7 +126,7 @@ fn actionHash(action: Binding.Action) u64 {
                 const same: Float = if (std.math.isNan(value)) std.math.nan(Float) else if (value == 0) 0 else value;
                 var hasher = std.hash.Wyhash.init(0);
                 std.hash.autoHash(&hasher, tag);
-                std.hash.autoHash(&hasher, @as(std.meta.Int(.unsigned, @bitSizeOf(Float)), @bitCast(same)));
+                std.hash.autoHash(&hasher, @as(@Int(.unsigned, @bitSizeOf(Float)), @bitCast(same)));
                 break :hash hasher.final();
             },
             else => action.hash(),
@@ -336,7 +336,15 @@ fn writeFlags(writer: *std.Io.Writer, flags: Binding.Flags) !void {
     if (flags.performable) try writer.writeAll("performable:");
 }
 
-const action_tags = std.meta.fields(std.meta.Tag(Binding.Action));
+/// Binding.Action's tags as name and value pairs (0.17's `@typeInfo` keeps
+/// the names and the values in two parallel lists).
+const action_tags = tags: {
+    @setEvalBranchQuota(100_000);
+    const info = @typeInfo(std.meta.Tag(Binding.Action)).@"enum";
+    var result: [info.field_names.len]struct { name: [:0]const u8, value: comptime_int } = undefined;
+    for (info.field_names, info.field_values, &result) |name, value, *tag| tag.* = .{ .name = name, .value = value };
+    break :tags result;
+};
 const action_count = action_tags.len;
 
 /// Each action's documentation as `help_strings` holds it (Markdown-ish text

@@ -1903,7 +1903,7 @@ fn pwshReplay(
     cols: u16,
     steps: []const []const u8,
 ) !terminal_for_tests.Terminal {
-    var t = try terminal_for_tests.Terminal.init(alloc, .{ .cols = cols, .rows = 8 });
+    var t = try terminal_for_tests.Terminal.init(std.testing.io, alloc, .{ .cols = cols, .rows = 8 });
     errdefer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();

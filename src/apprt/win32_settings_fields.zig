@@ -390,12 +390,12 @@ pub fn assertCoverage(comptime owned_keys: anytype) void {
 }
 
 pub fn settingValue(config: *const Config, field: SettingField) SettingValue {
-    inline for (std.meta.fields(SettingValue)) |tag| {
-        const candidate: SettingField = @field(SettingField, tag.name);
+    inline for (@typeInfo(SettingValue).@"union".field_names) |tag_name| {
+        const candidate: SettingField = @field(SettingField, tag_name);
         const spec = comptime descriptor(candidate);
         if (field == candidate) {
             const value = if (comptime projection(candidate)) |part| @field(spec.read(config), part.member) else spec.read(config);
-            return @unionInit(SettingValue, tag.name, value);
+            return @unionInit(SettingValue, tag_name, value);
         }
     }
     unreachable;
@@ -507,7 +507,7 @@ pub fn Combo(comptime field: SettingField) type {
             for (options[i + 1 ..]) |other| if (std.meta.eql(option.value, other.value)) @compileError("Duplicate Settings option");
         }
         const E = if (@typeInfo(T) == .optional) @typeInfo(T).optional.child else T;
-        const count: usize = if (@typeInfo(E) == .@"enum") @typeInfo(E).@"enum".fields.len else 2;
+        const count: usize = if (@typeInfo(E) == .@"enum") @typeInfo(E).@"enum".field_names.len else 2;
         if (options.len != count + @intFromBool(@typeInfo(T) == .optional)) @compileError("Settings dropdown must cover every Config variant");
     }
     return struct {
@@ -679,8 +679,8 @@ pub fn testRoundTrips(alloc: std.mem.Allocator) !void {
     defer defaults.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "source", .data = round_trip_config });
-    const path = try tmp.dir.realpathAlloc(alloc, "source");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source", .data = round_trip_config });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "source", alloc);
     defer alloc.free(path);
     try source.loadFile(alloc, path);
     try std.testing.expect(source._diagnostics.empty());
@@ -689,7 +689,7 @@ pub fn testRoundTrips(alloc: std.mem.Allocator) !void {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
         try spec.writeTestEntry(&out.writer, &source);
-        try tmp.dir.writeFile(.{ .sub_path = "source", .data = out.written() });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source", .data = out.written() });
         var loaded = try Config.default(alloc);
         defer loaded.deinit();
         try loaded.loadFile(alloc, path);

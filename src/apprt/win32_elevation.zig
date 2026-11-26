@@ -83,15 +83,25 @@ const ElevationCache = union(enum) {
 };
 
 var elevation_cache: ElevationCache = .unknown;
-var elevation_cache_mutex: std.Thread.Mutex = .{};
+
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+var elevation_cache_mutex: std.Io.Mutex = .init;
 
 /// Return whether the current process token is elevated.
 ///
 /// A successful result or query failure is cached for the process lifetime so
 /// callers on static CLI paths do not repeatedly open and inspect the token.
 pub fn isProcessElevated() !bool {
-    elevation_cache_mutex.lock();
-    defer elevation_cache_mutex.unlock();
+    elevation_cache_mutex.lockUncancelable(mutexIo());
+    defer elevation_cache_mutex.unlock(mutexIo());
 
     switch (elevation_cache) {
         .unknown => {},
