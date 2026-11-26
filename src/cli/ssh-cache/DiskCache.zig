@@ -66,11 +66,19 @@ pub fn add(
     if (!isValidCacheKey(key)) return error.InvalidCacheKey;
 
     // Create cache directory if needed
+    // Zig 0.17's `createDirPath` does not follow a link it finds on the way
+    // (0.15's `makePath` did), so an existing folder, a link to one included,
+    // is opened first and created only when it is missing.
     if (std.fs.path.dirname(self.path)) |dir| {
-        std.Io.Dir.cwd().createDirPath(global.io(), dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        if (std.Io.Dir.cwd().openDir(global.io(), dir, .{ .follow_symlinks = true })) |existing| {
+            existing.close(global.io());
+        } else |open_err| switch (open_err) {
+            error.FileNotFound => std.Io.Dir.cwd().createDirPath(global.io(), dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            },
+            else => return open_err,
+        }
     }
 
     // Open or create cache file with secure permissions

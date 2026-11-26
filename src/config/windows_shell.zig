@@ -335,6 +335,18 @@ pub const UserProfiles = struct {
     }
 };
 
+/// One variable of the live environment, as 0.15's `getEnvVarOwned` read it
+/// on Windows: that entry alone, as WTF-8. `Environ.getAlloc` copies the whole
+/// block into a map for each lookup, which an arena (profile discovery's)
+/// keeps until it is freed.
+fn envVarOwned(alloc: Allocator, name: []const u8) error{ OutOfMemory, EnvironmentVariableMissing, InvalidWtf8 }![]u8 {
+    if (comptime builtin.os.tag != .windows) return global.environ().getAlloc(alloc, name);
+    const name_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, name);
+    defer alloc.free(name_w);
+    const value = global.environ().getWindows(name_w) orelse return error.EnvironmentVariableMissing;
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, value);
+}
+
 /// noctty's own environment, read by name for `%NAME%` in a user profile
 /// (`expandProfileText`). The seam `appendUserProfiles` takes; tests pass a
 /// table of their own.
@@ -342,7 +354,7 @@ pub const ProcessEnvironment = struct {
     /// The value of `name` (compared without case, as Windows does), or null
     /// when it is not set.
     pub fn get(_: ProcessEnvironment, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
-        return global.environ().getAlloc(alloc, name) catch |err| switch (err) {
+        return envVarOwned(alloc, name) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.EnvironmentVariableMissing, error.InvalidWtf8 => null,
         };
@@ -3283,7 +3295,7 @@ fn deinitProfileList(alloc: Allocator, profiles: *std.ArrayList(Profile)) void {
 }
 
 fn detectProfileOrderHint(alloc: Allocator) ?[]u8 {
-    const raw = global.environ().getAlloc(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
+    const raw = envVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
         return null;
     errdefer alloc.free(raw);
 
@@ -4415,7 +4427,7 @@ fn lookupExecutable(alloc: Allocator, exe: []const u8) !?[]u8 {
     } else if (std.ascii.eqlIgnoreCase(exe, "powershell.exe")) {
         return try DefaultShellHost.systemShell(alloc, windows_powershell_relative);
     }
-    const path = global.environ().getAlloc(alloc, "PATH") catch |err| switch (err) {
+    const path = envVarOwned(alloc, "PATH") catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
@@ -4464,7 +4476,7 @@ const GitBashHost = struct {
     }
 
     fn systemRoot(alloc: Allocator) ![]u8 {
-        return global.environ().getAlloc(alloc, "SystemRoot") catch |err| switch (err) {
+        return envVarOwned(alloc, "SystemRoot") catch |err| switch (err) {
             error.EnvironmentVariableMissing, error.InvalidWtf8 => try alloc.dupe(u8, "C:\\Windows"),
             else => |e| return e,
         };

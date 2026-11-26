@@ -399,8 +399,18 @@ fn hasGlobMetacharacter(path: []const u8) bool {
     return std.mem.indexOfAny(u8, path, "*?[]") != null;
 }
 
+/// The Io of the SSH config read and its wait. The reader thread is detached
+/// and can outlive its caller, and the global state at exit (`global.deinit`
+/// tears its Io down), so both sides take std's blocking process-lifetime
+/// instance rather than `global.io()`; 0.15's mutex, condition and file calls
+/// needed no Io. Tests take `std.testing.io`.
+fn readerIo() std.Io {
+    if (builtin.is_test) return std.testing.io;
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 fn readFile(alloc: Allocator, path: []const u8) ![]u8 {
-    const io = global.io();
+    const io = readerIo();
     const file = try std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false });
     defer file.close(io);
     const stat = try file.stat(io);
@@ -439,7 +449,7 @@ const AsyncSshConfigRead = struct {
         const alloc = std.heap.page_allocator;
         const result = self.read_fn(alloc, self.path);
 
-        const io = global.io();
+        const io = readerIo();
         self.mutex.lockUncancelable(io);
         if (result) |data| {
             self.data = data;
@@ -491,7 +501,7 @@ fn readSshConfigFileBounded(
     thread.detach();
     defer request.release();
 
-    const io = global.io();
+    const io = readerIo();
     request.mutex.lockUncancelable(io);
     if (!request.done) {
         request.done_cond.waitTimeout(io, &request.mutex, .{ .duration = .{

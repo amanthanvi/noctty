@@ -276,7 +276,9 @@ pub fn open(
     const cwd = std.Io.Dir.cwd();
     while (try it.next()) |loc| {
         const path = try std.fs.path.join(arena_alloc, &.{ loc.dir, theme });
-        if (cwd.openFile(global.io(), path, .{})) |file| {
+        // 0.15's openFile refused a directory (`IsDir`); 0.17's opens one
+        // unless told not to.
+        if (cwd.openFile(global.io(), path, .{ .allow_directory = false })) |file| {
             const stat = file.stat(global.io()) catch |err| {
                 try diags.append(arena_alloc, .{
                     .message = try arena_alloc.printSentinel(
@@ -368,7 +370,7 @@ pub fn openAbsolute(
     theme: []const u8,
     diags: *cli_diags.DiagnosticList,
 ) error{OutOfMemory}!?std.Io.File {
-    return std.Io.Dir.openFileAbsolute(global.io(), theme, .{}) catch |err| {
+    return std.Io.Dir.openFileAbsolute(global.io(), theme, .{ .allow_directory = false }) catch |err| {
         switch (err) {
             error.FileNotFound => try diags.append(arena_alloc, .{
                 .message = try arena_alloc.printSentinel(

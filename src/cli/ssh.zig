@@ -380,9 +380,12 @@ fn resolveDestination(
         &.{ ssh, "-G" },
         args,
     }) catch return null;
-    // 0.15's `Child.run` never set CREATE_NO_WINDOW; 0.17's defaults it on.
+    // 0.15's `Child.run` never set CREATE_NO_WINDOW (0.17's defaults it on)
+    // and capped each stream at 50 KiB (0.17's leaves them unlimited).
     const result = std.process.run(alloc, global.io(), .{
         .argv = argv,
+        .stdout_limit = .limited(50 * 1024),
+        .stderr_limit = .limited(50 * 1024),
         .create_no_window = false,
     }) catch |err| {
         log.warn("ssh -G spawn failed: {}", .{err});
