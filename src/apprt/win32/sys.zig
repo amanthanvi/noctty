@@ -1418,10 +1418,17 @@ pub const GetFinalPathNameByHandleError = error{
 };
 
 /// The canonical path of `handle` with a DOS volume name and no `\\?\` prefix
-/// (`C:\dir\file`, `\\server\share\file`), as std's former
-/// `GetFinalPathNameByHandle(.{})` returned it, written into `out_buffer`.
-/// A volume mounted only at a folder has no DOS name here: the answer keeps
-/// the `\\?\Volume{...}` form.
+/// (`C:\dir\file`, `\\server\share\file`), written into `out_buffer`: the form
+/// std 0.15.2's `GetFinalPathNameByHandle(.{})` returned.
+///
+/// **Where it differs from std.** Std read the NT name and asked the mount
+/// manager for a DOS name. For a volume with a drive letter or a UNC share it
+/// gets the same answer as the Win32 call used here. For a volume mounted only
+/// at a folder (a `\\?\Volume{GUID}\` path from Win32) std asked the mount
+/// manager again and returned the mount folder's path; this function has no
+/// such step and fails with `error.FileNotFound`, which is the error std
+/// itself returned when it found no DOS name at all. The two differ in result
+/// there (a path against an error), never in a wrong path.
 pub fn getFinalPathNameByHandle(handle: HANDLE, out_buffer: []u16) GetFinalPathNameByHandleError![]u16 {
     const volume_name_dos = 0x0;
     const capacity: DWORD = @intCast(@min(out_buffer.len, std.math.maxInt(DWORD)));
@@ -1436,23 +1443,48 @@ pub fn getFinalPathNameByHandle(handle: HANDLE, out_buffer: []u16) GetFinalPathN
     }
     // Too small: the call returns the size it needs, terminator included.
     if (written >= capacity) return error.NameTooLong;
-    const path = out_buffer[0..written];
-    const unc = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\UNC\\");
-    const verbatim = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
-    if (std.mem.startsWith(u16, path, unc)) {
-        // `\\?\UNC\server\share` is `\\server\share`: keep the leading `\\`.
-        const rest = path[unc.len..];
-        out_buffer[0] = '\\';
-        out_buffer[1] = '\\';
-        std.mem.copyForwards(u16, out_buffer[2..][0..rest.len], rest);
-        return out_buffer[0 .. 2 + rest.len];
+    return dosPathFromFinal(out_buffer[0..written]);
+}
+
+/// `path`, a final path as `GetFinalPathNameByHandleW` writes it, in std's DOS
+/// form, rewritten inside its own storage:
+///
+///   - `\\?\C:\a\b` becomes `C:\a\b`;
+///   - `\\?\UNC\server\share\a` becomes `\\server\share\a`;
+///   - a path already in one of those two forms is returned unchanged;
+///   - anything else (`\\?\Volume{...}\a`, a bare name, an empty path) has no DOS
+///     name here and is `error.FileNotFound`, never a different path.
+fn dosPathFromFinal(path: []u16) error{FileNotFound}![]u16 {
+    const unc_prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\UNC\\");
+    const verbatim_prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    if (std.mem.startsWith(u16, path, unc_prefix)) {
+        const rest_len = path.len - unc_prefix.len;
+        if (rest_len == 0) return error.FileNotFound;
+        // `\\?\UNC\server\share` is `\\server\share`: the last two characters of
+        // the prefix become the leading `\\`, so the rest stays where it is.
+        const out = path[unc_prefix.len - 2 ..];
+        out[0] = '\\';
+        out[1] = '\\';
+        std.mem.copyForwards(u16, path[0..out.len], out);
+        return path[0..out.len];
     }
-    if (std.mem.startsWith(u16, path, verbatim)) {
-        const rest = path[verbatim.len..];
-        std.mem.copyForwards(u16, out_buffer[0..rest.len], rest);
-        return out_buffer[0..rest.len];
+    if (std.mem.startsWith(u16, path, verbatim_prefix)) {
+        const rest = path[verbatim_prefix.len..];
+        if (!startsWithDrive(rest)) return error.FileNotFound;
+        std.mem.copyForwards(u16, path[0..rest.len], rest);
+        return path[0..rest.len];
     }
-    return path;
+    if (startsWithDrive(path)) return path;
+    if (path.len > 2 and path[0] == '\\' and path[1] == '\\' and path[2] != '?' and path[2] != '.') return path;
+    return error.FileNotFound;
+}
+
+/// A drive letter, a colon, and a separator or the end.
+fn startsWithDrive(path: []const u16) bool {
+    if (path.len < 2 or path[1] != ':') return false;
+    const letter = path[0];
+    if (!((letter >= 'A' and letter <= 'Z') or (letter >= 'a' and letter <= 'z'))) return false;
+    return path.len == 2 or path[2] == '\\';
 }
 
 pub extern "kernel32" fn SetEnvironmentVariableW(lpName: LPCWSTR, lpValue: ?LPCWSTR) callconv(.winapi) BOOL;
@@ -1665,8 +1697,7 @@ test "deviceIoControl maps a refused control code the way std did" {
     try std.testing.expectError(error.Unexpected, deviceIoControl(file.handle, win32_types.FSCTL_GET_REPARSE_POINT, null, &buffer));
 }
 
-test "the final path name keeps std's DOS form" {
-    const std_final = @field(windows, "GetFinalPathNameByHandle");
+test "the final path name is std's DOS form" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{ .sub_path = "present.txt", .data = "x" });
@@ -1675,14 +1706,25 @@ test "the final path name keeps std's DOS form" {
     var system_dir = try std.fs.openDirAbsolute("C:\\Windows", .{});
     defer system_dir.close();
 
-    for ([_]HANDLE{ file.handle, tmp.dir.fd, system_dir.fd }) |handle| {
-        var mine_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
-        var theirs_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
-        const mine = try getFinalPathNameByHandle(handle, &mine_buf);
-        const theirs = try std_final(handle, .{}, &theirs_buf);
-        try std.testing.expectEqualSlices(u16, theirs, mine);
+    // std's own `realpath` reads the DOS form of the same handles (it is the
+    // oracle: std's DOS-form final path, drive prefix stripped).
+    var file_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file_real = try tmp.dir.realpath("present.txt", &file_real_buf);
+    var dir_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_real = try tmp.dir.realpath(".", &dir_real_buf);
+    var system_real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const system_real = try system_dir.realpath(".", &system_real_buf);
+
+    const handles = [_]HANDLE{ file.handle, tmp.dir.fd, system_dir.fd };
+    const expected = [_][]const u8{ file_real, dir_real, system_real };
+    for (handles, expected) |handle, want| {
+        var buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+        const got = try getFinalPathNameByHandle(handle, &buf);
+        var utf8: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.unicode.utf16LeToUtf8(&utf8, got);
+        try std.testing.expectEqualStrings(want, utf8[0..n]);
         // No `\\?\` prefix, and an absolute drive path.
-        try std.testing.expect(mine.len > 3 and mine[1] == ':' and mine[2] == '\\');
+        try std.testing.expect(got.len > 3 and got[1] == ':' and got[2] == '\\');
     }
 
     var small: [4]u16 = undefined;
@@ -1715,4 +1757,43 @@ test "setLastError writes the thread's last error" {
     try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, windows.GetLastError());
     setLastError(.SUCCESS);
     try std.testing.expectEqual(windows.Win32Error.SUCCESS, windows.GetLastError());
+}
+
+fn expectDosForm(final: []const u8, expected: []const u8) !void {
+    var buf: [128]u16 = undefined;
+    const len = try std.unicode.utf8ToUtf16Le(&buf, final);
+    const got = try dosPathFromFinal(buf[0..len]);
+    var utf8: [128]u8 = undefined;
+    const n = try std.unicode.utf16LeToUtf8(&utf8, got);
+    try std.testing.expectEqualStrings(expected, utf8[0..n]);
+}
+
+fn expectNoDosForm(final: []const u8) !void {
+    var buf: [128]u16 = undefined;
+    const len = try std.unicode.utf8ToUtf16Le(&buf, final);
+    try std.testing.expectError(error.FileNotFound, dosPathFromFinal(buf[0..len]));
+}
+
+test "dosPathFromFinal strips the verbatim prefix and keeps UNC paths whole" {
+    // A drive path loses `\\?\`.
+    try expectDosForm("\\\\?\\C:\\a\\b", "C:\\a\\b");
+    try expectDosForm("\\\\?\\c:\\", "c:\\");
+    try expectDosForm("\\\\?\\D:", "D:");
+    // A UNC path keeps its two leading backslashes: stripping only `\\?\` would
+    // leave `UNC\server\share`, a path to a different place.
+    try expectDosForm("\\\\?\\UNC\\s\\sh\\a", "\\\\s\\sh\\a");
+    try expectDosForm("\\\\?\\UNC\\server\\share", "\\\\server\\share");
+    // A path already in DOS form is unchanged.
+    try expectDosForm("C:\\a\\b", "C:\\a\\b");
+    try expectDosForm("\\\\server\\share\\a", "\\\\server\\share\\a");
+    // Without a drive letter there is no DOS name: an error, never another path.
+    try expectNoDosForm("\\\\?\\Volume{383da0b0-717f-41b6-8c36-00500992b58d}\\a");
+    try expectNoDosForm("\\\\?\\Volume{383da0b0-717f-41b6-8c36-00500992b58d}");
+    try expectNoDosForm("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\a");
+    try expectNoDosForm("\\\\?\\1:\\a");
+    try expectNoDosForm("\\\\?\\UNC\\");
+    try expectNoDosForm("\\\\?\\");
+    try expectNoDosForm("\\\\.\\C:\\a");
+    try expectNoDosForm("relative\\a");
+    try expectNoDosForm("");
 }
