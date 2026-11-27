@@ -380,10 +380,9 @@ setting them changes nothing on Windows:
   active tab takes the terminal's background instead.
 - `window-subtitle` and `window-step-resize`: a forwarded command line may set
   them (`ipc_server.zig`), and nothing reads them after that.
-- `drag-handle` and `scrollback-compression`: upstream Ghostty 1.4 added them
-  for the split drag handles of its macOS and GTK apps and for compressing
-  idle scrollback, neither of which this build has. They were added after the
-  search above, and nothing reads them either.
+- `drag-handle`: upstream Ghostty 1.4 added it for the split drag handles of
+  its macOS and GTK apps, which this build does not have. It was added after
+  the search above, and nothing reads it either.
 - The GTK and X11 keys: `gtk-opengl-debug`,
   `gtk-custom-css`, `gtk-quick-terminal-layer`, `gtk-quick-terminal-namespace`,
   `gtk-titlebar`, `gtk-titlebar-style`, `gtk-titlebar-hide-when-maximized`,

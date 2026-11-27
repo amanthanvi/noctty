@@ -1475,9 +1475,7 @@ input: RepeatableReadableIO = .{},
 /// memory. On supported systems with scrollback compression enabled, Ghostty
 /// attempts to compress fully historical pages which are not currently visible
 /// while the terminal is idle. This can reduce physical memory usage, depending
-/// on the contents of the scrollback. Windows builds do not compress
-/// scrollback (see `scrollback-compression`), so on Windows the history
-/// this limit retains stays resident.
+/// on the contents of the scrollback.
 ///
 /// This limit always measures the uncompressed logical size of the terminal
 /// pages. Compression does not allow Ghostty to retain more history than the
@@ -14021,9 +14019,9 @@ test "scrollback limits" {
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
-    // The fork keeps 10 MB where upstream 1.4 has 50 MB: Windows does not
-    // compress scrollback, so the history the limit allows stays resident
-    // (the field's documentation).
+    // The fork keeps its 1.3 default of 10 MB where upstream 1.4 has 50 MB.
+    // Whether to take 50 MB is still open (Qg10-1 in
+    // plans/stone-1a/drift-decisions.tsv).
     try testing.expectEqual(
         @as(usize, 10_000_000),
         cfg.@"scrollback-limit-bytes".value,
