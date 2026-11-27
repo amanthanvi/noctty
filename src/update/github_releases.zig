@@ -1222,7 +1222,7 @@ fn identityFrom(info: FILE_ID_INFO) ?DirectoryIdentity {
     return .{ .volume = info.VolumeSerialNumber, .file_id = info.FileId };
 }
 
-test "the identity fallback goes through the root check before it opens anything (council V1)" {
+test "the identity fallback's root check refuses an image's device form under the stage and accepts its plain form (council V1, X3)" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const alloc = std.testing.allocator;
