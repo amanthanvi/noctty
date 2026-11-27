@@ -153,15 +153,13 @@ New or renamed head paths absent from the list are covered immediately,
 including Phase 1A adaptation files; the Phase 0b allow-list does not restrict
 this lint.
 
-**Phase 0b switch:** in `.github/workflows/test.yml`, change only
+**Phase 0b switch:** #753 changed `.github/workflows/test.yml`'s
 `run: python -I ci/run_lints.py --win32-mode report` to
-`run: python -I ci/run_lints.py --win32-mode enforce`. The Zig lint already
-enforces. Report mode still reports Win32 violations, and input/tool errors
-still fail. **Land this single-token flip as its own small PR immediately
-before the first Phase 0b PR.** Section 5 excludes `test.yml` from 0b membership.
-The workflow contract accepts both positions now and tests its weakening
-mutations in both positions. The activation PR can then require `enforce` for
-subsequent changes.
+`run: python -I ci/run_lints.py --win32-mode enforce`, as its own small PR
+before the first Phase 0b PR. The Zig lint already enforced. Report mode still
+reports Win32 violations, and input/tool errors still fail. Section 5 excludes
+`test.yml` from 0b membership. The workflow contract now accepts only
+`enforce`, and counts `report` among its weakening mutations.
 
 ## Diff bases
 
