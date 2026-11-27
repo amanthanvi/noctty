@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lint_common import emit, line_changes, paths, sources
 from zig_bindings import Bindings as LiteralBindings
+import zigtok
 
 
 class Bindings(LiteralBindings):
@@ -44,6 +45,15 @@ def reexports(text):
         LiteralBindings(text, path="src/os/windows.zig"))}
 
 
+def same_zig_code(removed, added):
+    """Whether a hunk's removed and added lines hold the same Zig tokens, comments dropped: an edit to comments or
+    whitespace only, which adds no reference and changes no binding (council no-seat N3). No Zig token spans a
+    line, so a hunk's lines tokenize as they do in the file."""
+    def tokens(lines):
+        return [(t.kind, t.text) for t in zigtok.code("\n".join(lines))]
+    return tokens(removed) == tokens(added)
+
+
 def fork_added(repo, head, upstream):
     """Head paths absent from the three-tree union (upstream rename sources included)."""
     return paths(repo, head) - set(upstream)
@@ -61,7 +71,7 @@ def check(repo, base, head, upstream_path, removed_path):
     if not upstream or not rows or rows != sorted(set(rows)):
         raise ValueError("missing upstream paths or malformed removed-name inventory")
     removed = frozenset(rows)
-    changes = line_changes(repo, base, head)
+    changes = line_changes(repo, base, head, same_code=same_zig_code)
     module = "src/os/windows.zig"
     new_module = sources(repo, head, {module})[module]
     bindings = LiteralBindings(new_module, path=module)

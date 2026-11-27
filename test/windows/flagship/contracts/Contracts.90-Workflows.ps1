@@ -151,8 +151,9 @@ foreach ($mutation in $selftestSplitControls) {
 }
 Write-Host "Thread gate workflow split: $($selftestSplitControls.Count)/$($selftestSplitControls.Count) mutations rejected"
 
-# Pin the interpreter, isolated invocation, event inputs and the one Phase 0b
-# switch. Compare whole steps so extra arguments cannot override enforcement.
+# Pin the interpreter, isolated invocation, event inputs and the Win32 lint's
+# enforce mode, which the Phase 0b switch (#753) set. Compare whole steps so
+# extra arguments cannot override enforcement.
 function Test-MigrationLintSteps {
     param([Parameter(Mandatory)] [string] $JobText)
     $python = Get-YamlStepBlock -Content $JobText -Name 'Setup Python' -Source 'migration lints'
@@ -184,19 +185,16 @@ function Test-MigrationLintSteps {
           LINT_BASE: ${{ github.event.pull_request.base.sha }}
           LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           LINT_BEFORE: ${{ github.event.before }}
-        run: python -I ci/run_lints.py --win32-mode report
+        run: python -I ci/run_lints.py --win32-mode enforce
 '@
-    # A separate activation PR just before Phase 0b flips this one token.
-    return $activeLines -ceq $expectedLints.TrimEnd() -or
-        $activeLines -ceq $expectedLints.Replace('--win32-mode report', '--win32-mode enforce').TrimEnd()
+    # The Phase 0b switch (#753) made the lint blocking: report mode, which only prints its findings, is a weakening.
+    return $activeLines -ceq $expectedLints.TrimEnd()
 }
 if (-not (Test-MigrationLintSteps -JobText $checksJob)) {
-    throw 'Migration lints must pin Python 3.13, use isolated mode and exact event inputs, and retain the Phase 0b switch.'
+    throw 'Migration lints must pin Python 3.13, use isolated mode and exact event inputs, and enforce the Win32 lint.'
 }
 function Assert-MigrationLintMutations {
     param([Parameter(Mandatory)] [string] $JobText)
-    $selectedMode = [regex]::Match($JobText, '--win32-mode (report|enforce)').Groups[1].Value
-    if (-not $selectedMode) { throw 'Migration lint mode was not found.' }
     $pythonStep = Get-YamlStepBlock -Content $JobText -Name 'Setup Python' -Source 'migration lint controls'
     $lintStep = Get-YamlStepBlock -Content $JobText -Name 'Migration diff lints' -Source 'migration lint controls'
     $mutations = @(
@@ -207,7 +205,8 @@ function Assert-MigrationLintMutations {
         $JobText.Replace('LINT_BASE: ${{ github.event.pull_request.base.sha }}', 'LINT_BASE: ${{ github.sha }}'),
         $JobText.Replace('LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}', 'LINT_HEAD: main'),
         $JobText.Replace('LINT_BEFORE: ${{ github.event.before }}', 'LINT_BEFORE: main'),
-        $JobText.Replace("--win32-mode $selectedMode", "--win32-mode $selectedMode --win32-mode $selectedMode"),
+        $JobText.Replace('--win32-mode enforce', '--win32-mode enforce --win32-mode enforce'),
+        $JobText.Replace('--win32-mode enforce', '--win32-mode report'),
         $JobText.Replace($pythonStep, '').Replace($lintStep, $lintStep + $pythonStep)
     )
     foreach ($mutation in $mutations) {
@@ -217,13 +216,8 @@ function Assert-MigrationLintMutations {
     }
     return $mutations.Count
 }
-$lintMutationCount = 0
-foreach ($migrationMode in @('report', 'enforce')) {
-    $migrationVariant = [regex]::Replace($checksJob, '--win32-mode (report|enforce)', "--win32-mode $migrationMode")
-    if (-not (Test-MigrationLintSteps -JobText $migrationVariant)) { throw 'Migration lint switch position failed its contract.' }
-    $lintMutationCount += Assert-MigrationLintMutations -JobText $migrationVariant
-}
-Write-Host "Migration lint workflow: $lintMutationCount/$lintMutationCount weakening mutations rejected (report and enforce)"
+$lintMutationCount = Assert-MigrationLintMutations -JobText $checksJob
+Write-Host "Migration lint workflow: $lintMutationCount/$lintMutationCount weakening mutations rejected (enforce; report is one of them)"
 foreach ($controlCase in @(
         @{ Name = 'Harness provenance and state controls (PowerShell 7)'; Shell = 'pwsh' },
         @{ Name = 'Harness provenance and state controls (Windows PowerShell 5.1)'; Shell = 'powershell' }

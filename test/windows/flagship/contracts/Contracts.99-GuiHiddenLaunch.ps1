@@ -835,6 +835,10 @@ foreach ($case in @(
 $guiVerdictToken = [guid]::NewGuid().ToString('N')
 $guiGui = @('noctty.exe', '--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e', 'cmd')
 $guiIpc = @('noctty.com', '+list-windows', "--class=noctty-automation-x-$guiVerdictToken")
+# Council Q2 on #768: the forward N7 is for. A noctty.com with no action (no `+name`) returns right after it creates
+# its noctty.exe, which gets these arguments verbatim: the run's GUI launch, which the argument rule accepts. An IPC
+# action such as +list-windows makes the wrapper wait for its child instead.
+$guiActionless = @('noctty.com') + @($guiGui | Select-Object -Skip 1)
 $guiRow = { param($Id, $Image, $Parent, $Creation, [bool] $IsCmd = $false, [bool] $Read = $false, [bool] $System = $false, [bool] $Off = $false, [bool] $OpenFailed = $false, [string[]] $Argv = $null, [bool] $InCopy = $true, [bool] $Exited = $false, [bool] $Unpinned = $false)
     $isNoctty = $Image -ieq 'noctty.exe' -or $Image -ieq 'noctty.com'
     [pscustomobject]@{ Pid = $Id; Image = $Image; Parent = $Parent; Creation = $Creation; IsCmd = $IsCmd; CmdRead = $Read; CmdSystem = $System; CmdImageSystem = $System
@@ -890,13 +894,40 @@ foreach ($bad in @(
         # TD D112: a joiner that had exited before the read is counted apart, but an exited one vouches for no child,
         # matches no launcher record by another creation time, and leaves the shell rule as it was.
         @{ Name = 'a noctty forwarded by a launched CLI that had exited before its image was read'; Rows = (& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true)); Total = 11; Shells = 1 }
-        # CodeRabbit and Sourcery on #752: its image read and its command line not, an exited CLI is still in the read
-        # set, and must not vouch for the noctty.exe it forwarded (700); its launcher record still accounts for it.
-        @{ Name = 'a noctty forwarded by a launched CLI whose image was read and that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true)); Total = 11; Shells = 1 }
+        # Council no-seat N7: a launched CLI whose image was read and that had exited before its command line was read
+        # vouches for the noctty.exe it forwarded (700) only when 700's own arguments were read, and only for its exact
+        # child; an exited CLI the leaf started itself vouches for nothing.
+        @{ Name = 'a noctty forwarded by an exited launched CLI, its own command line unread'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Exited $true } else { $_ } }); Total = 11; Shells = 1 }
+        @{ Name = 'a noctty created before the exited launched CLI that is its parent'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 59 -Argv $guiActionless } else { $_ } }); Total = 11; Shells = 1; Unaccounted = 1 }
+        @{ Name = 'a noctty forwarded by an exited CLI the leaf started itself'; Rows = (& $guiWith @((& $guiRow 900 'noctty.com' 100 90 -Exited $true), (& $guiRow 910 'noctty.exe' 900 91 -Argv $guiActionless))); Total = 13; Shells = 1; Unaccounted = 2 }
+        # Council S3 on #768 (Opus's row): the forwarder's creation guard under PID reuse. $accounted is keyed by PID, so
+        # a CLI (950, created 98, exited, command line unread) whose PID an older, accounted CLI (950, created 95, from
+        # shell 400) once held looks accounted. Its noctty.exe (970, created 97) is older than it, so it may not vouch:
+        # 2 stay unaccounted, and 1 without `$cli.Creation -gt $Row.Creation`. It changes only the count, never `passed`,
+        # since two noctty rows with one PID already fail it.
+        @{ Name = 'a noctty older than an exited CLI that reuses an accounted CLI''s PID'; Rows = (& $guiWith @((& $guiRow 950 'noctty.com' 400 95 -Argv @('noctty', '+help')), (& $guiRow 970 'noctty.exe' 950 97 -Argv $guiActionless), (& $guiRow 950 'noctty.com' 400 98 -Exited $true))); Total = 14; Shells = 1; Unaccounted = 2 }
+        # Council no-seat N6: a stray noctty that exits fast, its image read through class 27 after the Win32 read
+        # failed, is a read noctty, and the accounting and copy rules fail it.
+        @{ Name = 'a stray noctty.exe read through class 27 after it exited'; Rows = (& $guiWith @((& $guiRow 930 'noctty.exe' 100 93 -Exited $true))); Total = 12; Shells = 1 }
+        @{ Name = 'a forwarded noctty.exe outside the copy, read through class 27 after it exited'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Exited $true -InCopy $false)); Total = 11; Shells = 1 }
         @{ Name = 'a cmd that had exited before its command line was read'; Rows = (& $guiReplace 400 (& $guiRow 400 'cmd.exe' 200 40 $true $false $false $false -Exited $true)); Total = 11; Shells = 1 }
         @{ Name = 'a launcher record matched only by an exited joiner of another creation time'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 61 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Shells = 1 }
     )) {
-    if ((& $guiVerdict $bad.Rows $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
+    $verdict = & $guiVerdict $bad.Rows $bad.Total $bad.Shells
+    if ($verdict.passed) { throw "The process verdict passed $($bad.Name)." }
+    # Council R4 on #768: where a row pins how many noctty processes stay unaccounted, a guard that let one more
+    # through shows (the leaf-started CLI and its child: 2, since the exited CLI is not accounted and may not vouch).
+    if ($bad.ContainsKey('Unaccounted') -and $verdict.nocttyUnaccounted -ne $bad.Unaccounted) {
+        throw "The process verdict left $($verdict.nocttyUnaccounted) noctty processes unaccounted for $($bad.Name), not $($bad.Unaccounted)."
+    }
+}
+# Council P5 on #768: only a noctty.com forwards. A launched noctty.exe (960, accounted by the launcher's record) that
+# exited with its command line unread does not vouch for a noctty.exe child (970) whose arguments were read and kept:
+# that child stays unaccounted, its only failure here.
+$guiExitedApp = Get-GuiHiddenProcessVerdict (& $guiWith @((& $guiRow 960 'noctty.exe' 100 96 -Exited $true), (& $guiRow 970 'noctty.exe' 960 97 -Argv $guiIpc))) `
+    @{ 200 = [long]20; 600 = [long]60; 960 = [long]96 } 13 1 $guiVerdictToken 100
+if ($guiExitedApp.passed -or $guiExitedApp.nocttyUnaccounted -ne 1 -or $guiExitedApp.nocttyArgvUnreadExited -ne 1 -or $guiExitedApp.nocttyArgumentRefused -ne 0) {
+    throw 'The process verdict let an exited noctty.exe vouch for a noctty.exe child, or failed it for another reason.'
 }
 
 # ---- (9b) a joiner the reader could not read because it had already exited is counted apart and passes (TD D112;
@@ -908,12 +939,40 @@ foreach ($good in @(
         @{ Name = 'a joiner whose PID named another process when it was opened'; Rows = (& $guiWith @((& $guiRow 805 $null 0 0 -Unpinned $true -Exited $true))); Total = 12; Exited = 'unpinnedExited'; Live = 'unpinned' }
         @{ Name = 'a joiner that had exited before its image was read'; Rows = (& $guiWith @((& $guiRow 810 $null 100 81 -Exited $true))); Total = 12; Exited = 'imageUnreadExited'; Live = 'imageUnread' }
         @{ Name = 'a noctty that had exited before its command line was read'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Exited $true)); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyArgvUnread' }
+        # Council no-seat N7: a real forward keeps its child row. The launched CLI (600) exited before its command line
+        # was read; the noctty.exe it forwarded (700), its own arguments read and kept, is still accounted. The forward
+        # is an actionless one, the kind that returns at once (council Q2 on #768).
+        @{ Name = 'a noctty forwarded by a launched CLI that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Argv $guiActionless } else { $_ } }); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyUnaccounted'; Actionless = 700 }
         @{ Name = 'a launched CLI that had exited before its image was read'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
         # Sourcery on #752: the exited rows are keyed by PID and creation time, so a later generation of the same PID
         # (creation 61) after the launcher's (60) does not hide it.
         @{ Name = 'a launched CLI that had exited before its image was read, its PID reused by a later exited joiner'; Rows = (@(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }) + @(& $guiRow 600 $null 100 61 -Exited $true)); Total = 11; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
     )) {
     $verdict = & $guiVerdict $good.Rows $good.Total 1
+    # Council R2 and S2 on #768: N7's positive row is the forward that returns at once, so its child's arguments up to
+    # and including `-e` are exactly the run's known actionless GUI launch. The wrapper waits for its child on anything
+    # its action detector reads as an action before `-e`: a `+name`, `--version`, `--help` or `-h` among them.
+    # Council U1 on #768: compared ordinally, argument by argument, as the wrapper compares bytes; PowerShell's -cne
+    # compares by culture and ignores a soft hyphen (U+00AD), so `-e` plus one, then `--version`, would pass it.
+    $guiActionlessHead = @('--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e')
+    $guiIsActionlessHead = {
+        param([string[]] $Arguments)
+        if (@($Arguments).Count -lt $guiActionlessHead.Count) { return $false }
+        for ($i = 0; $i -lt $guiActionlessHead.Count; $i++) {
+            if (-not [string]::Equals($Arguments[$i], $guiActionlessHead[$i], [StringComparison]::Ordinal)) { return $false }
+        }
+        return $true
+    }
+    if (-not (& $guiIsActionlessHead @($guiActionless | Select-Object -Skip 1)) -or
+        (& $guiIsActionlessHead @($guiActionlessHead[0], $guiActionlessHead[1], ('-e' + [char]0x00AD), '--version', 'cmd'))) {
+        throw 'The N7 actionless-launch check refused the known launch, or accepted a soft hyphen after -e.'
+    }
+    if ($good.Actionless) {
+        $guiForwardArgv = @(@(@($good.Rows | Where-Object { $_.Pid -eq $good.Actionless })[0].Argv) | Select-Object -Skip 1)
+        if (-not (& $guiIsActionlessHead $guiForwardArgv)) {
+            throw "The N7 forward fixture ($($good.Name)) is not the known actionless launch up to -e, so its wrapper may not return at once."
+        }
+    }
     if (-not $verdict.passed -or $verdict[$good.Exited] -ne 1 -or $verdict[$good.Live] -ne 0) {
         throw "The process verdict did not count $($good.Name) apart ($($good.Exited) $($verdict[$good.Exited]), $($good.Live) $($verdict[$good.Live]), passed $($verdict.passed))."
     }
@@ -1007,12 +1066,6 @@ public static class GuiHiddenContractJoiner {
     // Creation and exit time of `process`, or null.
     public static long[] Times(IntPtr process) { long c, e, k, u; return GetProcessTimes(process, out c, out e, out k, out u) ? new long[] { c, e } : null; }
     public static long Now() { long t; GetSystemTimePreciseAsFileTime(out t); return t; }
-    // The runner's end of the job during ExitedBy's wait: after `delayMs`, note the stop time in `cell[0]` and then
-    // terminate `process`, the order StopRunJob keeps (NoteStop, then TerminateJobObject).
-    public static Thread StopAndTerminateAfter(IntPtr process, int delayMs, long[] cell) {
-        var thread = new Thread(() => { Thread.Sleep(delayMs); Interlocked.Exchange(ref cell[0], Now()); TerminateProcess(process, 1); });
-        thread.IsBackground = true; thread.Start(); return thread;
-    }
     public static long ReadStop(long[] cell) { return Interlocked.Read(ref cell[0]); }
     // The error of opening `pid` for SYNCHRONIZE alone, 0 when it opens: ERROR_INVALID_PARAMETER (87) when no process
     // holds the PID, anything else when one does.
@@ -1078,8 +1131,12 @@ if (-not [string]::Equals([GuiHiddenContractJoiner]::Layout(), $guiJoinerLayout,
 foreach ($site in @(
         @{ Name = 'the open'; Pattern = 'row\.Handle = OpenJoiner\(row\.Pid, out gone\);\s*long openedAt; GetSystemTimePreciseAsFileTime\(out openedAt\);\s*if \(row\.Handle == IntPtr\.Zero\) \{ row\.OpenFailed = true; row\.ExitedBeforeRead = GoneBeforeStop\(gone, openedAt, StopAt\); \}' }
         @{ Name = 'the pin'; Pattern = 'bool asked = IsProcessInJob\(h, job, out member\);\s*long checkedAt; GetSystemTimePreciseAsFileTime\(out checkedAt\);\s*bool exitedFirst;\s*if \(!Pinned\(timed, asked, member, c, row\.Taken, checkedAt, StopAt, out exitedFirst\)\) \{\s*row\.ExitedBeforeRead = exitedFirst;\s*row\.Unpinned = true;' }
-        @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, ImageReadEnded\(readError\), \(\) => StopAt\); \}' }
-        @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, CommandLineReadEnded\(readError\), \(\) => StopAt\); \}' }
+        @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, ImageReadEnded\(readError\), \(\) => StopAt, OpenWaiting\); \}' }
+        # Council no-seat N6: a failed Win32 image read falls back to class 27 on the same pinned handle.
+        @{ Name = 'the image read''s class-27 fallback'; Pattern = 'int imageStatus;\s*if \(imagePath == null\) imagePath = NtImagePathOf\(h, out imageStatus\);\s*row\.Image = imagePath == null \? null : Path\.GetFileName\(imagePath\);' }
+        @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, CommandLineReadEnded\(readError\), \(\) => StopAt, OpenWaiting\); \}' }
+        # Council no-seat N1: the pump the two reads' waits run takes every waiting message.
+        @{ Name = 'the wait''s pump'; Pattern = 'void OpenWaiting\(\) \{ while \(!stopping && TakeMessage\(0\)\) \{ \} \}' }
         @{ Name = 'the stop'; Pattern = 'public static int StopRunJob\(IntPtr job, JobWatch watch\) \{\s*if \(watch != null\) watch\.NoteStop\(\);\s*return StopRunJob\(job\);' }
     )) {
     if ($guiRunnerSource -notmatch $site.Pattern) { throw "The reader's exited mark at $($site.Name) no longer goes through its predicate." }
@@ -1150,6 +1207,17 @@ try {
     if ($null -ne [GuiHiddenRunnerNative]::CommandLineOf($exited.process, [ref]$readError) -or -not [GuiHiddenRunnerNative]::CommandLineReadEnded($readError)) {
         throw ("An exited process's command-line read did not fail with a termination kind (status 0x{0:x8})." -f $readError)
     }
+    # Council no-seat N6: class 27 (NtImagePathOf) still reads that exited process's image, as a device path behind
+    # \\?\GLOBALROOT that SameImage judges by path and identity: System32's cmd.exe, and not another file. No handle
+    # reads nothing.
+    $ntStatus = 0
+    $ntImage = [GuiHiddenRunnerNative]::NtImagePathOf($exited.process, [ref]$ntStatus)
+    if ($null -eq $ntImage -or $ntStatus -ne 0 -or [IO.Path]::GetFileName($ntImage) -ine 'cmd.exe') {
+        throw ("Class 27 did not read an exited process's image (status 0x{0:x8})." -f $ntStatus)
+    }
+    if (-not [GuiHiddenRunnerNative]::SameImage($ntImage, $guiJoinerCmd, [GuiHiddenRunnerNative]::FileId($guiJoinerCmd))) { throw 'SameImage refused an exited cmd''s class-27 image as System32''s cmd.exe.' }
+    if ([GuiHiddenRunnerNative]::SameImage($ntImage, $guiRunnerPath, [GuiHiddenRunnerNative]::FileId($guiRunnerPath))) { throw 'SameImage accepted an exited cmd''s class-27 image as another file.' }
+    if ($null -ne [GuiHiddenRunnerNative]::NtImagePathOf([IntPtr]::Zero, [ref]$ntStatus) -or $ntStatus -eq 0) { throw 'Class 27 read an image through no handle.' }
     foreach ($case in @(
             @{ Name = 'an exit before the failure'; Creation = $times[0]; FailedAt = [GuiHiddenContractJoiner]::Now(); Terminating = $true; Stop = $guiMax; Exited = $true }
             @{ Name = 'an exit at the failure sample plus the wait'; Creation = $times[0]; FailedAt = $times[1] - $guiWait; Terminating = $true; Stop = $guiMax; Exited = $true }
@@ -1169,22 +1237,103 @@ try {
     if (-not [GuiHiddenRunnerNative]::ExitedBeforeStop($exited.process, $times[0], [GuiHiddenContractJoiner]::Now(), $true, [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) })) {
         throw 'ExitedBeforeStop refused an exited process with no stop.'
     }
-    $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
-    $guiJoinerOpen.Add($stopped)
-    $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
-    $stopper = [GuiHiddenContractJoiner]::StopAndTerminateAfter($stopped.process, 30, $guiStopCell)
-    $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, [GuiHiddenContractJoiner]::Now(), $true, [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) })
-    if (-not $stopper.Join(5000)) { throw 'The stop control''s thread did not finish.' }
-    if ([GuiHiddenContractJoiner]::ReadStop($guiStopCell) -eq $guiMax) { throw 'The stop control never noted its stop.' }
-    if ($stoppedExited) { throw 'ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop.' }
-    # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When a process holds the PID
-    # again (it opens, or refuses the open), the control is skipped and says so.
+    # Council P2 on #768 (Sol's 2 and Opus L1): the runner's end of the job lands inside the wait, synchronized through
+    # the wait's own `between`, which runs only after a slice in which the live, suspended child did not signal: on its
+    # first call it notes the stop and then ends the child, the order StopRunJob keeps (NoteStop, then
+    # TerminateJobObject). So the stop is always noted after ExitedBeforeStop began and before the child exits; a stop
+    # time read on entry (long.MaxValue then) would excuse the child, and only one read after the wait refuses it.
+    # Council T1 on #768: an attempt counts only when its precondition held, the child exiting inside ExitedBy's window
+    # (the same ExitedBy with no stop bound holds after the call). A host stall that pushes the exit past the window is
+    # not a verdict, so that attempt is skipped and run again, three attempts in all. The retry cannot hide the bug: a
+    # stall only skips an attempt, it never turns a verdict into a pass. Every counted attempt must refuse, so an
+    # early-read implementation fails on its first counted one, and with no attempt counted the control fails too.
+    $guiStopCounted = 0
+    for ($guiStopAttempt = 1; $guiStopAttempt -le 3 -and $guiStopCounted -eq 0; $guiStopAttempt++) {
+        $guiStopCell[0] = $guiMax
+        $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+        $guiJoinerOpen.Add($stopped)
+        $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
+        $stoppedFailedAt = [GuiHiddenContractJoiner]::Now()
+        $guiStoppedProcess = $stopped.process
+        $guiStopCalls = [int[]]@(0)
+        $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, $stoppedFailedAt, $true,
+            [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) },
+            [Action] {
+                $guiStopCalls[0]++
+                if ($guiStopCalls[0] -eq 1) { $guiStopCell[0] = [GuiHiddenContractJoiner]::Now(); [void][GuiHiddenContractJoiner]::TerminateProcess($guiStoppedProcess, 1) }
+            })
+        if ($guiStopCalls[0] -lt 1 -or $guiStopCell[0] -eq $guiMax) { throw 'The stop control''s pump never noted its stop inside the wait.' }
+        if (-not [GuiHiddenRunnerNative]::ExitedBy($stopped.process, $stoppedCreation, $stoppedFailedAt, $true, $guiMax)) {
+            Write-Host "Contracts.99-GuiHiddenLaunch stop control: attempt $guiStopAttempt stalled (the child exited after ExitedBy's window); not counted"
+            continue
+        }
+        $guiStopCounted++
+        if ($stoppedExited) { throw "ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop (attempt $guiStopAttempt, the first counted)." }
+    }
+    if ($guiStopCounted -eq 0) { throw 'The stop control had 3 stalls, no attempt counted: the child never exited inside ExitedBy''s window.' }
+    # Council no-seat N1: with a `between`, the wait (WaitExit) calls it between slices while the handle has not
+    # signalled, as the reader opens queued joiners there; a handle that signals ends the wait at the next slice. A live,
+    # suspended process: the wait runs its whole bound with `between` called inside it; then `between` ends the process
+    # on its second call, and the wait returns signalled without a third.
+    # Council CodeRabbit thread on #768 (T1's pattern): each control needs two calls before the wait's deadline, so a
+    # host pause of ExitWaitMs or more after the first call fails it on a sound tree. Up to 3 attempts; an attempt whose
+    # timing precondition failed is a stall and is skipped; a counted attempt with the wrong result fails, and so does
+    # having no counted attempt. The stall shape is narrow, so no mutant can look like one: the wait ended unsignalled at
+    # its deadline after exactly one call, with a measured pause of at least ExitWaitMs between that call's start and the
+    # wait's return (a pause inside or after the call). A wait that never calls its pump makes no call, so it fails on its first attempt.
+    $guiPumpRun = {
+        param([IntPtr] $Process, [scriptblock] $OnCall)
+        $calls = [Collections.Generic.List[long]]::new()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $pump = { $calls.Add($clock.ElapsedMilliseconds); & $OnCall $calls.Count }.GetNewClosure()
+        $signalled = [GuiHiddenRunnerNative]::WaitExit($Process, [Action] $pump)
+        $end = $clock.ElapsedMilliseconds
+        [pscustomobject]@{ Signalled = $signalled; Calls = $calls.Count; Elapsed = $end
+            Stalled = (-not $signalled -and $calls.Count -eq 1 -and ($end - $calls[0]) -ge [GuiHiddenRunnerNative]::ExitWaitMs) }
+    }
+    $pumped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+    $guiJoinerOpen.Add($pumped)
+    $guiPumpCounted = 0
+    for ($guiPumpAttempt = 1; $guiPumpAttempt -le 3 -and $guiPumpCounted -eq 0; $guiPumpAttempt++) {
+        $run = & $guiPumpRun $pumped.process { param($Call) }
+        if ($run.Stalled) { Write-Host "Contracts.99-GuiHiddenLaunch pump control: attempt $guiPumpAttempt stalled; not counted"; continue }
+        $guiPumpCounted++
+        if ($run.Signalled) { throw 'WaitExit counted a live process as signalled.' }
+        if ($run.Calls -lt 2 -or $run.Elapsed -lt ([GuiHiddenRunnerNative]::ExitWaitMs - 10)) {
+            throw "WaitExit did not run its pump inside its whole wait ($($run.Calls) calls, $($run.Elapsed) ms; attempt $guiPumpAttempt, the first counted)."
+        }
+    }
+    if ($guiPumpCounted -eq 0) { throw 'The pump control had 3 stalls, no attempt counted.' }
+    # TerminateProcess returns before the process signals, so the second call waits on its own handle until it has
+    # (council P3 on #768): a child slower than one slice to signal would otherwise rightly earn a third call.
+    $guiPumpCounted = 0
+    for ($guiPumpAttempt = 1; $guiPumpAttempt -le 3 -and $guiPumpCounted -eq 0; $guiPumpAttempt++) {
+        $ending = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+        $guiJoinerOpen.Add($ending)
+        $guiPumpedProcess = $ending.process
+        $run = & $guiPumpRun $ending.process {
+            param($Call)
+            if ($Call -eq 2) {
+                [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7)
+                if ([GuiHiddenContractJoiner]::WaitForSingleObject($guiPumpedProcess, 5000) -ne 0) { throw 'The pumped process did not signal after its end.' }
+            }
+        }.GetNewClosure()
+        if ($run.Stalled) { Write-Host "Contracts.99-GuiHiddenLaunch pump-end control: attempt $guiPumpAttempt stalled; not counted"; continue }
+        $guiPumpCounted++
+        if (-not $run.Signalled -or $run.Calls -ne 2) {
+            throw "WaitExit did not end at the slice after its pump ended the process ($($run.Calls) calls; attempt $guiPumpAttempt, the first counted)."
+        }
+    }
+    if ($guiPumpCounted -eq 0) { throw 'The pump-end control had 3 stalls, no attempt counted.' }
+    # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When the PID opens (reused,
+    # or the exited process kept alive by another process's open handle) or a process refuses the open, the control is
+    # skipped and says so.
     $gonePid = $exited.pid
     [void][GuiHiddenContractJoiner]::CloseHandle($exited.thread); [void][GuiHiddenContractJoiner]::CloseHandle($exited.process)
     [void]$guiJoinerOpen.Remove($exited)
     $gone = $false
     $handle = [GuiHiddenRunnerNative]::OpenJoiner($gonePid, [ref]$gone)
-    if ($handle -ne [IntPtr]::Zero) { [void][GuiHiddenContractJoiner]::CloseHandle($handle); Write-Host 'Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (the PID was reused at once)' }
+    if ($handle -ne [IntPtr]::Zero) { [void][GuiHiddenContractJoiner]::CloseHandle($handle); Write-Host 'Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (the PID opened: it was reused at once, or another process holds an open handle to the exited one)' }
     elseif (-not $gone) {
         $heldError = [GuiHiddenContractJoiner]::OpenError($gonePid)
         if ($heldError -ne 87) { Write-Host "Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (a process holds the PID again, open error $heldError)" }

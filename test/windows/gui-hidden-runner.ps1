@@ -112,7 +112,7 @@ $script:GuiHiddenNativeLayout = 'FileInfo=52 attributes@0 createdLow@4 createdHi
     'BasicLimits=64 processTime@0 jobTime@8 flags@16 minWorking@24 maxWorking@32 activeProcesses@40 affinity@48 priority@56 scheduling@60; ' +
     'IoCounters=48 readOps@0 writeOps@8 otherOps@16 readBytes@24 writeBytes@32 otherBytes@40; ' +
     'JobLimits=144 basic@0 io@64 processMemory@112 jobMemory@120 peakProcessMemory@128 peakJobMemory@136; JobPort=16 key@0 port@8; ' +
-    'ProcessBasic=48 exitStatus@0 peb@8 affinity@16 basePriority@24 pid@32 parentPid@40'
+    'ProcessBasic=48 exitStatus@0 peb@8 affinity@16 basePriority@24 pid@32 parentPid@40; UnicodeString=16 length@0 maximumLength@2 buffer@8'
 
 if (-not ('GuiHiddenRunnerNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -144,6 +144,8 @@ public static class GuiHiddenRunnerNative {
     }
     [StructLayout(LayoutKind.Sequential)] struct JobPort { public IntPtr key, port; }
     [StructLayout(LayoutKind.Sequential)] struct ProcessBasic { public IntPtr exitStatus, peb, affinity, basePriority, pid, parentPid; }
+    // UNICODE_STRING (winternl.h): Length and MaximumLength in bytes, then the buffer pointer at its natural alignment.
+    [StructLayout(LayoutKind.Sequential)] struct UnicodeString { public ushort length, maximumLength; public IntPtr buffer; }
     public delegate bool EnumWindow(IntPtr window, IntPtr parameter);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -208,7 +210,8 @@ public static class GuiHiddenRunnerNative {
             LayoutOf(typeof(IoCounters), "readOps", "writeOps", "otherOps", "readBytes", "writeBytes", "otherBytes"),
             LayoutOf(typeof(JobLimits), "basic", "io", "processMemory", "jobMemory", "peakProcessMemory", "peakJobMemory"),
             LayoutOf(typeof(JobPort), "key", "port"),
-            LayoutOf(typeof(ProcessBasic), "exitStatus", "peb", "affinity", "basePriority", "pid", "parentPid") });
+            LayoutOf(typeof(ProcessBasic), "exitStatus", "peb", "affinity", "basePriority", "pid", "parentPid"),
+            LayoutOf(typeof(UnicodeString), "length", "maximumLength", "buffer") });
     }
 
     // A path's canonical spelling, read through an opened handle (GetFinalPathNameByHandleW, VOLUME_NAME_DOS): an 8.3
@@ -432,6 +435,31 @@ public static class GuiHiddenRunnerNative {
         return null;
     }
 
+    // The image path of `process` as ProcessImageFileName (NtQueryInformationProcess class 27) gives it: an NT device
+    // path (\Device\HarddiskVolumeN\...), returned behind \\?\GLOBALROOT so that FinalPath and FileId open it and
+    // SameImage judges it as it does a Win32 path. Null with the NTSTATUS in `status` (-1 for a length or text the
+    // reader refuses; 0 once read). The reader's fallback when ImagePathOf fails (council no-seat N6): measured on
+    // Windows 11 build 26300 with System32 `cmd /D /C exit 7` children and a handle of the reader's rights, after the
+    // exit QueryFullProcessImageNameW failed with 31 for 20 of 20 and this read gave the image for 20 of 20; inside the
+    // exit, polled until the first QueryFullProcessImageNameW failure (5 in 99, 31 in 1), this read at once gave the
+    // image for 100 of 100. The buffer the call fills holds the UNICODE_STRING and then its text.
+    public static string NtImagePathOf(IntPtr process, out int status) {
+        int length, head = Marshal.SizeOf(typeof(UnicodeString));
+        status = NtQueryInformationProcess(process, 27, IntPtr.Zero, 0, out length);
+        if (length <= head || length > (1 << 20)) { if (status == 0) status = -1; return null; }
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try {
+            status = NtQueryInformationProcess(process, 27, buffer, length, out length);
+            if (status != 0) return null;
+            var name = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
+            long at = name.buffer.ToInt64() - buffer.ToInt64();
+            if (name.length == 0 || (name.length & 1) != 0 || at < head || at + name.length > length) { status = -1; return null; }
+            string path = Marshal.PtrToStringUni(name.buffer, name.length / 2);
+            if (!path.StartsWith(@"\Device\", StringComparison.Ordinal) || path.IndexOf('\0') >= 0) { status = -1; return null; }
+            return @"\\?\GLOBALROOT" + path;
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
+
     // One joiner. Only facts leave the reader: an image's leaf name and booleans. A noctty's split command line
     // (`Argv`) stays in memory for the argument rule and is never written. `ExitedBeforeRead`: the read that left the
     // joiner unopened, unpinned, without its image or (a noctty) without its command line failed after the joiner
@@ -477,12 +505,32 @@ public static class GuiHiddenRunnerNative {
     // `cmd /D /C exit 7` children whose handle was held, each polled with these reads until the first one failed (#752):
     // the image read, QueryFullProcessImageNameW, failed with ERROR_ACCESS_DENIED (5) in 99 of 100 and ERROR_GEN_FAILURE
     // (31) in 1, the one already signalled; the command-line read, ProcessCommandLineInformation, with
-    // STATUS_PROCESS_IS_TERMINATING in 86 of 100 and STATUS_PARTIAL_COPY in 14. Every read before those failures
+    // STATUS_PROCESS_IS_TERMINATING in 86 of 100 and STATUS_PARTIAL_COPY in 14 (one run of 100; the 88 and 12 that
+    // GUI-HIDDEN-EXITED-READ-01 records are another run's). Every read before those failures
     // succeeded: on a handle opened with these rights a live process does not fail them. Any other failure is a live one.
     public static bool ImageReadEnded(int error) { return error == 31 || error == 5; }
     public static bool CommandLineReadEnded(int status) { return status == unchecked((int)0xC000010A) || status == unchecked((int)0x8000000D); }
     // How long ExitedBy waits for a terminating process's handle to signal.
     public const uint ExitWaitMs = 100;
+    // The slices of that wait when the caller has work for between them (`WaitExit`'s `between`). A 5 ms wait lasts
+    // about one timer tick, some 16 ms at the default timer resolution, so the 100 ms wait has about six slices, not
+    // twenty (the #768 council's Opus seat measured 6 pump calls in 114 ms).
+    public const uint ExitWaitSliceMs = 5;
+
+    // Whether `handle` signals within ExitWaitMs. With `between`, the wait runs in slices of ExitWaitSliceMs and calls
+    // `between` after each one that timed out: the reader opens the joiners queued meanwhile there, so one that starts
+    // and exits during the wait is opened before its last handle closes, not read too late to open (council no-seat N1).
+    public static bool WaitExit(IntPtr handle, Action between) {
+        if (between == null) return WaitForSingleObject(handle, ExitWaitMs) == 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (true) {
+            long left = ExitWaitMs - clock.ElapsedMilliseconds;
+            uint result = WaitForSingleObject(handle, left <= 0 ? 0u : (uint)Math.Min(left, (long)ExitWaitSliceMs));
+            if (result == 0) return true;
+            if (result != 0x102 || left <= 0) return false; // anything but WAIT_TIMEOUT, or the wait is over
+            between();
+        }
+    }
 
     // Whether a read of the process behind `handle`, pinned at creation time `creation`, failed because the process
     // was ending: all of
@@ -496,8 +544,12 @@ public static class GuiHiddenRunnerNative {
     // command-line reads of exiting `cmd /D /C exit 7` children live, some command-line reads failing up to 13.4 ms
     // before the exit time; here 99 of 100 image and 100 of 100 command-line failures came before the handle signalled.
     // (a) is what makes the failure an exit's, so when the time is sampled does not matter.
+    // `between` runs inside the wait (WaitExit).
     public static bool ExitedBy(IntPtr handle, long creation, long failedAt, bool terminating, long stopAt) {
-        if (!terminating || handle == IntPtr.Zero || WaitForSingleObject(handle, ExitWaitMs) != 0) return false;
+        return ExitedBy(handle, creation, failedAt, terminating, stopAt, null);
+    }
+    public static bool ExitedBy(IntPtr handle, long creation, long failedAt, bool terminating, long stopAt, Action between) {
+        if (!terminating || handle == IntPtr.Zero || !WaitExit(handle, between)) return false;
         uint code; long c, e, k, u;
         if (!GetExitCodeProcess(handle, out code) || !GetProcessTimes(handle, out c, out e, out k, out u)) return false;
         return c == creation && e != 0 && e <= failedAt + ExitWaitMs * 10000L && e < stopAt;
@@ -508,12 +560,16 @@ public static class GuiHiddenRunnerNative {
     // CodeRabbit on #752). The first call waits with no stop bound; the second, on a handle already signalled, returns
     // at once and reads `stopAt` only then.
     public static bool ExitedBeforeStop(IntPtr handle, long creation, long failedAt, bool terminating, Func<long> stopAt) {
-        return ExitedBy(handle, creation, failedAt, terminating, long.MaxValue) && ExitedBy(handle, creation, failedAt, terminating, stopAt());
+        return ExitedBeforeStop(handle, creation, failedAt, terminating, stopAt, null);
+    }
+    public static bool ExitedBeforeStop(IntPtr handle, long creation, long failedAt, bool terminating, Func<long> stopAt, Action between) {
+        return ExitedBy(handle, creation, failedAt, terminating, long.MaxValue, between) && ExitedBy(handle, creation, failedAt, terminating, stopAt());
     }
 
     // The job's completion-port reader (gui-hosted-probe.ps1's JobWatch, #738, PROBE-JOB-WATCH-OPEN-FIRST-01): every
     // waiting message's process is opened first and its handle held; one opened process is read only when no message
-    // waits; the reader runs above normal priority, and a fault ends the reading, never the process.
+    // waits, and a read that waits for its process's exit opens the messages that arrive meanwhile (OpenWaiting); the
+    // reader runs above normal priority, and a fault ends the reading, never the process.
     public sealed class JobWatch : IDisposable {
         readonly IntPtr port; readonly IntPtr job; readonly Thread reader; readonly string systemCmd; readonly string flagDirectory;
         readonly string systemCmdId, appPath, appId, cliPath, cliId;
@@ -546,25 +602,32 @@ public static class GuiHiddenRunnerNative {
         void Loop() { try { Run(); } catch (Exception) { Faulted = true; } }
         void Run() {
             while (!stopping || opened.Count > 0) {
-                uint message; UIntPtr key; IntPtr overlapped;
-                if (!stopping && GetQueuedCompletionStatus(port, out message, out key, out overlapped, opened.Count > 0 ? 0u : 50u)) {
-                    if (message != 6) continue; // JOB_OBJECT_MSG_NEW_PROCESS: overlapped carries the PID
-                    long at; GetSystemTimePreciseAsFileTime(out at);
-                    var row = new JoinedProcess { Pid = (int)overlapped.ToInt64(), Taken = at };
-                    Interlocked.Increment(ref taken);
-                    bool gone;
-                    row.Handle = OpenJoiner(row.Pid, out gone);
-                    long openedAt; GetSystemTimePreciseAsFileTime(out openedAt);
-                    if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = GoneBeforeStop(gone, openedAt, StopAt); }
-                    opened.Add(row);
-                    continue;
-                }
+                if (!stopping && TakeMessage(opened.Count > 0 ? 0u : 50u)) continue;
                 if (opened.Count == 0) continue;
                 var next = opened[0];
                 ReadOpened(next);
                 opened.RemoveAt(0); lock (joined) joined.Add(next);
             }
         }
+        // Takes one message from the port within `timeoutMs`, false when none came: a new process's PID is opened at
+        // once, its handle held, and queued for its read behind the others.
+        bool TakeMessage(uint timeoutMs) {
+            uint message; UIntPtr key; IntPtr overlapped;
+            if (!GetQueuedCompletionStatus(port, out message, out key, out overlapped, timeoutMs)) return false;
+            if (message != 6) return true; // JOB_OBJECT_MSG_NEW_PROCESS: overlapped carries the PID
+            long at; GetSystemTimePreciseAsFileTime(out at);
+            var row = new JoinedProcess { Pid = (int)overlapped.ToInt64(), Taken = at };
+            Interlocked.Increment(ref taken);
+            bool gone;
+            row.Handle = OpenJoiner(row.Pid, out gone);
+            long openedAt; GetSystemTimePreciseAsFileTime(out openedAt);
+            if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = GoneBeforeStop(gone, openedAt, StopAt); }
+            opened.Add(row);
+            return true;
+        }
+        // Every message waiting on the port, taken: ExitedBy's wait for one joiner's exit runs this between its slices,
+        // so the reader keeps opening queued PIDs while it polls an open handle (council no-seat N1).
+        void OpenWaiting() { while (!stopping && TakeMessage(0)) { } }
         void ReadOpened(JoinedProcess row) {
             IntPtr h = row.Handle;
             if (h == IntPtr.Zero) return;
@@ -582,13 +645,18 @@ public static class GuiHiddenRunnerNative {
             if (NtQueryInformationProcess(h, 0, out basic, Marshal.SizeOf(typeof(ProcessBasic)), out returned) == 0) row.Parent = (int)basic.parentPid.ToInt64();
             long failedAt; int readError;
             string imagePath = ImagePathOf(h, out readError);
-            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, ImageReadEnded(readError), () => StopAt); }
+            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, ImageReadEnded(readError), () => StopAt, OpenWaiting); }
+            // The image name outlives the exit where QueryFullProcessImageNameW does not (council no-seat N6): read it
+            // through class 27 on the same pinned handle, so the copy, accounting and argument rules apply to the
+            // joiner, as the shell rule does to a cmd. Only its command line may then go unread.
+            int imageStatus;
+            if (imagePath == null) imagePath = NtImagePathOf(h, out imageStatus);
             row.Image = imagePath == null ? null : Path.GetFileName(imagePath);
             if (row.Image != null && (string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) || string.Equals(row.Image, "noctty.com", StringComparison.OrdinalIgnoreCase))) {
                 row.IsNoctty = true;
                 row.InCopy = string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) ? SameImage(imagePath, appPath, appId) : SameImage(imagePath, cliPath, cliId);
                 string commandLine = CommandLineOf(h, out readError);
-                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, CommandLineReadEnded(readError), () => StopAt); }
+                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, CommandLineReadEnded(readError), () => StopAt, OpenWaiting); }
                 row.Argv = SplitCommandLine(commandLine);
                 commandLine = null;
             }
@@ -855,14 +923,19 @@ function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPi
 # its PID, its PID already named a process outside the job, or its read failed with the termination kind and its
 # pinned handle signalled within ExitWaitMs with a matching exit time, each before the runner ended the job;
 # JobWatch's `GoneBeforeStop`, `Pinned` and `ExitedBy`) is counted apart and does not fail the leaf: on `main`, push run 45561987608 failed twice, and push run 44997457453 once, on unread joiners alone (TD
-# D112). A live joiner the reader could not read still fails it. An exited one vouches for no child (`parentOf`), not
+# D112). A live joiner the reader could not read still fails it. One whose image class 27 read after the Win32 read
+# failed (NtImagePathOf) is read, exited or not, so every rule applies to it: a stray noctty that exits fast fails the
+# copy or accounting rule (council no-seat N6). Of the rules that need its command line, a noctty's argument rule is
+# excused when that read failed on its exit, but a cmd's shell rule, which is one too, applies and fails it. An exited one vouches for no child (`parentOf`), not
 # even a noctty whose image was read and whose command line was not, though a launcher record still accounts for that
-# noctty itself (CodeRabbit and Sourcery on #752). A cmd whose command line was not read still fails the leaf whether
+# noctty itself (CodeRabbit and Sourcery on #752). The one exception: an accounted noctty.com so exited still vouches
+# for the exact child noctty.exe it forwarded when that child's own arguments were read and kept the argument rule,
+# since noctty.com forwards its command line verbatim (`exitedForwarder`, council no-seat N7). A cmd whose command line was not read still fails the leaf whether
 # or not it had exited, since its /D is what the shell rule proves.
 function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalProcesses, [int] $ExpectedShells, [string] $Token, [int] $LeafPid) {
     # A joiner counts as read only with its image too: one whose image could not be read (opened and pinned, but
-    # QueryFullProcessImageName failed) could be a cmd or a noctty, so it is unreadable, and the verdict fails unless
-    # it had exited first.
+    # neither QueryFullProcessImageName nor class 27, NtImagePathOf, read it) could be a cmd or a noctty, so it is
+    # unreadable, and the verdict fails unless it had exited first. One that class 27 read is read, exited or not.
     $isRead = { param($Row) -not $Row.OpenFailed -and -not $Row.Unpinned -and -not [string]::IsNullOrEmpty($Row.Image) }
     $byPid = @{}
     foreach ($row in $Rows) { if (& $isRead $row) { $byPid[$row.Pid] = $row } }
@@ -876,12 +949,25 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         if ($null -eq $parent -or $parent.ExitedBeforeRead -eq $true -or $parent.Pid -eq $Row.Pid -or $parent.Creation -gt $Row.Creation) { return $null }
         return $parent
     }
+    # Council no-seat N7: a noctty.com not running a CLI action returns right after CreateProcessW, so it may exit before
+    # its command line is read, and `parentOf` drops it. It forwards its command line verbatim, so such a CLI, read
+    # (its image) and exited with its command line unread, is the exact parent the forward rule may still take for a
+    # noctty.exe whose own arguments were read and kept the argument rule.
+    $exitedForwarder = {
+        param($Row)
+        $cli = $byPid[$Row.Parent]
+        if ($null -eq $cli -or $cli.Pid -eq $Row.Pid -or $cli.Creation -gt $Row.Creation -or $cli.Image -ine 'noctty.com' -or
+            $cli.ExitedBeforeRead -ne $true -or ($null -ne $cli.Argv -and $cli.Argv.Count -ge 1)) { return $null }
+        return $cli
+    }
     $accounted = @{}
     $argumentRefused = 0; $argvUnread = 0; $argvExited = 0; $outsideCopy = 0
     foreach ($row in @($nocttyRows | Sort-Object Creation)) {
         if (-not $row.InCopy) { $outsideCopy++ }
+        $argvKept = $false
         if ($null -eq $row.Argv -or $row.Argv.Count -lt 1) { if ($row.ExitedBeforeRead -eq $true) { $argvExited++ } else { $argvUnread++ } }
         elseif (Get-InteractiveWin11HostedArgumentRefusal -Arguments @($row.Argv | Select-Object -Skip 1) -Token $Token) { $argumentRefused++ }
+        else { $argvKept = $true }
         $recorded = $Launcher.ContainsKey($row.Pid) -and $Launcher[$row.Pid] -eq $row.Creation
         $parent = & $parentOf $row
         $viaShell = $false; $forwarded = $false
@@ -892,6 +978,10 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         }
         if ($null -ne $parent -and $row.Image -ieq 'noctty.exe') {
             $forwarded = $parent.Image -ieq 'noctty.com' -and $accounted.ContainsKey($parent.Pid)
+        }
+        elseif ($row.Image -ieq 'noctty.exe' -and $argvKept) {
+            $cli = & $exitedForwarder $row
+            $forwarded = $null -ne $cli -and $accounted.ContainsKey($cli.Pid)
         }
         if ($row.InCopy -and ($recorded -or $viaShell -or $forwarded)) { $accounted[$row.Pid] = $true }
     }

@@ -76,31 +76,55 @@ def changed_paths(repo, base, head, *pathspecs):
     ]
 
 
-def line_changes(repo, base, head):
+def line_changes(repo, base, head, same_code=None):
     """Added head lines and deletion gaps (number of head lines before the gap).
 
     A zero-length head hunk starts after its numbered line. Other hunks start
     on that line; each deleted run is at the gap before the next head line.
+    With `same_code`, a hunk whose removed and added line texts it calls equal
+    (the Win32 lint's Zig token comparison: a comment or whitespace edit)
+    records neither its added lines nor its deletion gaps. Before that, a
+    file present at both commits whose whole texts it calls equal records
+    nothing, whatever lines git aligns: a file whose only changes are to
+    comments and whitespace (council S1 on #768).
     """
     base = merge_base(repo, base, head)
     names = changed_paths(repo, base, head, "*.zig")
     result = {}
+    if same_code:
+        both = set(names) & paths(repo, base) & paths(repo, head)
+        befores, afters = sources(repo, base, both), sources(repo, head, both)
+        names = [name for name in names
+                 if name not in both or not same_code(befores[name].split("\n"), afters[name].split("\n"))]
     for name in names:
         diff = git(repo, "diff", *DIFF_OPTIONS, base, head,
                    "--", ":(literal)" + name).decode("utf-8")
         rows, deleted, current, had_hunk = set(), set(), None, False
+        # The open hunk: its added rows, its deletion gaps, its removed and its added line texts.
+        hunk = None
+
+        def close(hunk):
+            if hunk and not (same_code and same_code(hunk[2], hunk[3])):
+                rows.update(hunk[0])
+                deleted.update(hunk[1])
+
         for line in diff.split("\n"):
             match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
             if match:
+                close(hunk)
+                hunk = (set(), set(), [], [])
                 current = int(match[1]) + (match[2] == "0")
                 had_hunk = True
             elif current is not None and line.startswith("+"):
-                rows.add(current)
+                hunk[0].add(current)
+                hunk[3].append(line[1:])
                 current += 1
             elif current is not None and line.startswith("-"):
-                deleted.add(current - 1)
+                hunk[1].add(current - 1)
+                hunk[2].append(line[1:])
             elif current is not None and line.startswith(" "):
                 current += 1
+        close(hunk)
         if not had_hunk and name in paths(repo, head):
             before = sources(repo, base, {name})[name] if name in paths(repo, base) else ""
             if sources(repo, head, {name})[name] != before:

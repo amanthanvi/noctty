@@ -1743,7 +1743,8 @@ killed it. That takes proof:
   - the failure is a termination kind: 5 or 31 for the image, or
     `STATUS_PROCESS_IS_TERMINATING` or `STATUS_PARTIAL_COPY` for the command
     line, as measured on exiting processes;
-  - the pinned handle signals within 100 ms;
+  - the pinned handle signals within 100 ms (the reader keeps opening the
+    joiners queued meanwhile, between slices of that wait);
   - the creation time is the pinned one;
   - the exit time is no later than the failure plus that wait, and before the
     stop as it stands after the wait (`ExitedBeforeStop`).
@@ -1756,12 +1757,27 @@ ones, and any of those fails the leaf. A launcher-recorded process gone at its
 open counts in `unopenedExited` and in `launcherNotSeen`, which fails the leaf:
 with no creation time it cannot match the launcher's record. An exited joiner
 vouches for no child, not even a noctty whose image was read (its own launcher
-record still counts),
+record still counts), with one exception: an accounted `noctty.com` whose
+command line went unread because it had exited still accounts for the exact
+child `noctty.exe` it forwarded, when that child's own arguments were read and
+kept the argument rule, since `noctty.com` forwards its command line verbatim
+(council no-seat N7);
 and a `cmd.exe` whose command line was not read fails whether or not it had
 exited. Such a joiner is no evidence either way: what was not read was not
-checked (its image, or a noctty's argument rule), so a short-lived stray
-process passes, counted. Any other failure, or an exit that does not signal
-within the wait, stays a live failure.
+checked (its image, or a noctty's argument rule). Any other failure, or an exit
+that does not signal within the wait, stays a live failure.
+
+An image outlives the exit where the Win32 read does not: when
+`QueryFullProcessImageNameW` fails on the pinned handle, the reader reads the
+image through `NtQueryInformationProcess` class 27 (`ProcessImageFileName`,
+`NtImagePathOf`), a device path that `SameImage` judges behind
+`\\?\GLOBALROOT` (council no-seat N6). A joiner read that way is read, exited
+or not, so every rule applies to it: a short-lived stray noctty fails the
+accounting or copy rule. Of the rules that need its command line, a noctty's
+argument rule is excused when that read failed on its exit, but the shell
+rule, a command-line rule too, applies and fails a short-lived `cmd.exe`
+whose command line went unread. Only a joiner whose class-27 read failed too counts in
+`imageUnreadExited`.
 
 **The real-input module.** `scripts/interactive-win11-realinput.ps1`
 (`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib

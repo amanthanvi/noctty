@@ -414,7 +414,9 @@ nothing for:
   `GhosttyI18n.zig`, `GhosttyXcodebuild.zig`, `MetallibStep.zig` and
   `xcframework.zig`;
 - three of upstream's workflows: `clean-artifacts.yml`, `milestone.yml` and
-  `publish-tag.yml`.
+  `publish-tag.yml`;
+- the Darwin-only `src/build/libsystem_override.sh`, which `v1.4.0` adds and
+  `**/LibsystemOverride*` does not match.
 
 The paths of this kind:
 
@@ -429,7 +431,8 @@ The paths of this kind:
   `LibtoolStep.zig`, `XCFrameworkStep.zig`; row Qg11-1 of
   `plans/stone-1a/drift-decisions.tsv`), so they are in this kind from then
   on, and the contract lists them;
-- `LibsystemOverride*`;
+- `LibsystemOverride*`, and `v1.4.0`'s Darwin-only
+  `src/build/libsystem_override.sh`;
 - `nix/package.nix`, `nix/tests.nix`, `nix/vm/**`,
   `nix/patches/zig-0.17-ios-process-replace.patch`;
 - `pkg/gtk4-layer-shell/**`;
@@ -451,15 +454,14 @@ equals the content before it, or the diff is reviewed.
   `nix/zigCacheHash.nix`, `nix/build-support/*`.
 
 **Track upstream.** The gate is that the directory's tree equals the merged
-revision's, with the allowances the table names and no others: fontconfig's
-listed adds, deletes and rename, and in `pkg/breakpad` one file,
+revision's, with one allowance and no others: in `pkg/breakpad` one file,
 `pkg/breakpad/build.zig`, whose diff against the merged revision must be
 exactly the fork changes its row names. Every other file in `pkg/breakpad`
-compares equal.
+compares equal, and `pkg/fontconfig` compares equal whole.
 
 | Directory                                                    | Stepping stone (`74d0c72fd`), as landed                                                                                                    | `v1.4.0`                                                                                                                                                                            |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pkg/fontconfig`                                             | 22 files, equal to the stone's                                                                                                             | 29 files: the gate allow-lists upstream's 11 adds, 4 deletes and 1 rename                                                                                                           |
+| `pkg/fontconfig`                                             | 22 files, equal to the stone's                                                                                                             | 29 files, equal to `v1.4.0`'s. From the stone, upstream adds 11, deletes 4 and renames 1                                                                                            |
 | `pkg/apple-sdk`                                              | 2 files, equal                                                                                                                             | 5 files                                                                                                                                                                             |
 | `pkg/libxml2`, `pkg/libintl`, `pkg/macos`, `pkg/android-ndk` | 5, 5, 59 and 2 files, equal                                                                                                                | The same counts, with upstream's content                                                                                                                                            |
 | `pkg/breakpad`                                               | Equal but for two fork changes in `build.zig`: no `linkLibCpp` under the MSVC ABI, and #718's `-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` | Keeps the first, rewritten for `v1.4.0`'s file, which sets `.link_libcpp = true` on the module where the stone's called `linkLibCpp()`; the toolchain cutover removes #718's define |
@@ -560,8 +562,14 @@ bound to the tree carries over from the tip. The Test workflow runs again on
 the merge SHA, because `release.yml` releases only `main`'s head, and only
 with a successful Test run for that exact SHA.
 
-If that run fails, re-run each failed job once: the tree has already passed,
-so a first failure is not yet a regression. A job that never reached a verdict
+If that run fails, start one new Test run (the dispatch below): the tree has
+already passed, so a first failure is not yet a regression. The budget is
+counted in runs, since a new run runs every job again. A failed run gets one
+new run only when each job that failed in it has no earlier failure
+attributable to the tree (the two kinds below that are not the tree's do not
+count). A job's earlier passes do not count either: a job that failed, then
+passed, then failed again has reproduced, and takes the fix route below.
+`release.yml` takes only a run whose jobs all passed. A job that never reached a verdict
 (a hosted outage, a cancellation) has not failed the tree: start it again when
 the runner is back, as often as that takes, and the prerelease waits for it.
 The same holds for a job that failed only in a step that does not run the

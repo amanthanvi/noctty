@@ -125,7 +125,7 @@ jobs:
           LINT_BASE: ${{ github.event.pull_request.base.sha }}
           LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           LINT_BEFORE: ${{ github.event.before }}
-        # A separate PR just before Phase 0b changes report to enforce here.
+        # Enforced since the Phase 0b switch (#753). Contracts.90-Workflows.ps1 accepts only enforce.
         run: python -I ci/run_lints.py --win32-mode enforce
 
 

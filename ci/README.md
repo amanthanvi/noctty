@@ -136,15 +136,55 @@ the cross-file recheck is bounded to resolved literal exports of
 `src/os/windows.zig`, not arbitrary module evaluation. They are not evaluated
 by this lint.
 
+**Comments and whitespace are no change:** a file whose only changes are to
+comments and whitespace is never flagged by its own edits; it is checked as an
+unchanged file is (a re-export change in `src/os/windows.zig` still rechecks
+it). Before reading its hunks, the Win32
+lint skips a file whose whole Zig code-token stream is the same at base and
+head, whatever lines git aligns (council S1 on #768; a swap of comments on two
+identical calls once made git read one call as added). In a file with a real
+change, the lint drops a diff hunk
+whose removed and added lines hold the same Zig tokens (`same_zig_code`, which
+`line_changes` takes as `same_code`), so a comment or whitespace edit on an
+alias's definition line rechecks nothing, while a reference added in the same
+edit is still checked (council no-seat N3, after the lint was enforced).
+Any other hunk counts as changed, exactly as before #768: a definition it
+touches rechecks its uses (council R1 on #768, after two attempts to quiet
+mixed hunks, P1 and Q1, each failed open on twin scopes). Two limits follow:
+
+- **Mixed hunks and moves over-report, and fail closed.** A comment on an
+  alias line beside an edit to the next line is one hunk whose code changed,
+  so the alias's unchanged uses are rechecked (40 on the real `ipc_server.zig`),
+  and so is a moved alias. In a file with a real change, a comment can also
+  make git align an unchanged call as added, and that call is reported: two
+  identical calls whose comments are swapped, beside one added call, report
+  both the added call and the misaligned one (`[7, 11]` in
+  `test_comment_only_file_is_never_flagged_whatever_git_aligns`). Put the
+  comment edit in its own hunk, or land it in a separate PR first: the lint
+  diffs the merge base against the head, so separate commits in the same PR
+  still make one mixed hunk.
+- **An edit elsewhere that changes scope is missed.** When the uses of an alias
+  whose own line is untouched bind somewhere else (a removed `else` boundary,
+  merged blocks), no touched definition rechecks them. This limit of the
+  definition-span rule is older than #753; with the comment-only hunk a no-op,
+  a comment on the alias in a hunk of its own is this case too. In a file with
+  a real change, a comment still takes part in git's line alignment, so
+  whether such a case is caught can depend on a comment (whether git puts the
+  alias's line in a hunk), as it could before #768. 1B's compile
+  catches it at a forward merge, since the removed names do not exist in
+  0.17.1. Comparing the resolved targets of unchanged calls across base and
+  head is the way to close it, and to remove the over-report above, later.
+
 **Known conservative over-report:** a touched definition rechecks its uses
-even if the final origin stayed the same. Moving, re-spelling or editing a
-comment on an alias's definition line can therefore report unchanged legacy
-uses. Introducing an intermediate
+even if the final origin stayed the same. Moving or re-spelling an alias's
+definition, or editing its line in a mixed hunk, can therefore report
+unchanged legacy uses (the soft freeze forbids moves on `main` during 1B
+anyway). Introducing an intermediate
 alias (for example `const os = std.os; const windows = os.windows;`), or routing
 an existing std alias through the fork's re-exports, can recheck uses whose final
 binding stayed the same. This may report existing removed uses even though that
 edit changed no call's meaning. The real IPC fixture retains the measured
-40/40/32 reports for these cases. The definition-span rule can therefore
+40/40/32 reports for these cases, and 40 for a moved alias. The definition-span rule can therefore
 report a legacy use whose binding stayed the same.
 
 The fork-added file set is computed at each head, by subtracting
@@ -153,15 +193,13 @@ New or renamed head paths absent from the list are covered immediately,
 including Phase 1A adaptation files; the Phase 0b allow-list does not restrict
 this lint.
 
-**Phase 0b switch:** in `.github/workflows/test.yml`, change only
+**Phase 0b switch:** #753 changed `.github/workflows/test.yml`'s
 `run: python -I ci/run_lints.py --win32-mode report` to
-`run: python -I ci/run_lints.py --win32-mode enforce`. The Zig lint already
-enforces. Report mode still reports Win32 violations, and input/tool errors
-still fail. **Land this single-token flip as its own small PR immediately
-before the first Phase 0b PR.** Section 5 excludes `test.yml` from 0b membership.
-The workflow contract accepts both positions now and tests its weakening
-mutations in both positions. The activation PR can then require `enforce` for
-subsequent changes.
+`run: python -I ci/run_lints.py --win32-mode enforce`, as its own small PR
+before the first Phase 0b PR. The Zig lint already enforced. Report mode still
+reports Win32 violations, and input/tool errors still fail. Section 5 excludes
+`test.yml` from 0b membership. The workflow contract now accepts only
+`enforce`, and counts `report` among its weakening mutations.
 
 ## Diff bases
 
