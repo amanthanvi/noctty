@@ -1241,7 +1241,6 @@ fn stagedImageByIdentity(alloc: Allocator, stage_final: []const u16, image: []co
 /// the same drive (`X:\`), or for a UNC stage the same `\\server\share\`,
 /// compared without case. Anything else, a device path included, is not.
 fn onStageRoot(stage: []const u16, image: []const u16) bool {
-    const sep: u16 = '\\';
     const len = rootLen(stage) orelse return false;
     if (image.len <= len) return false;
     return (rootLen(image) orelse return false) == len and win32_sys.eqlIgnoreCaseWtf16(stage[0..len], image[0..len]);
