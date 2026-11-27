@@ -4507,7 +4507,10 @@ test "a staged Setup started by the stage's 8.3 spelling reads as running (counc
     var fixture = (try StagedSetupFixture.init(alloc)) orelse return error.SkipZigTest;
     defer fixture.deinit(alloc);
     // Setup started by the stage's short spelling, as a short-spelled state
-    // path launches it.
+    // path launches it. Since T3's identity fallback this checks the scan as
+    // a whole, string match and fallback; S1's flag on its own is guarded by
+    // win32/sys.zig's 8.3 test, and the string match here by U4's
+    // `string_match` (council U4, Opus's nit).
     try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_short, true);
 }
 
