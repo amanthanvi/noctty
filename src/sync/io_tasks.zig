@@ -17,7 +17,10 @@
 //! inline it enters nothing and the task keeps its caller's role, which is
 //! the thread it runs on. A task that used `enter` would take its role over
 //! the caller's while it ran inline, and an acquisition there would record
-//! the wrong pair.
+//! the wrong pair. Acceptance test 9's checker (`ci/thread_role_points.py`)
+//! binds an `Io` task's registry entry to its task call and fails an `async`
+//! one whose target opens with `enter` (ENTRY-TASK-ENTER); a `concurrent`
+//! task, which always runs on a worker, opens with `enter` as a thread does.
 //!
 //! No product code starts an `Io` task yet (only the test runner's
 //! `concurrent` input poller, which always gets a worker), so the rule is
