@@ -12,63 +12,9 @@ from zig_bindings import Bindings as LiteralBindings
 import zigtok
 
 
-PREFIX_KEYWORDS = ("pub", "export", "extern", "threadlocal", "comptime")
-
-
-def own_tokens(bindings, index):
-    """A declaration's first token and its own tokens: its prefix keywords, then `const NAME = ... ;`."""
-    tokens = bindings.tokens
-    start = index
-    while start and tokens[start - 1].kind == "keyword" and tokens[start - 1].text in PREFIX_KEYWORDS:
-        start -= 1
-    return start, tuple((t.kind, t.text) for t in tokens[start:bindings.ends[index] + 1])
-
-
-def braces_before(tokens, first, start):
-    """The `{` and `}` tokens from `first` up to `start`: where in its hunk a declaration sits."""
-    return tuple(t.text for t in tokens[first:start] if zigtok.is_op(t, "{", "}"))
-
-
-def removed_declarations(lines):
-    """(braces before it, its own tokens) of each declaration on a hunk's removed lines."""
-    side = LiteralBindings("\n".join(lines))
-    found = set()
-    for index in side.ends:
-        start, own = own_tokens(side, index)
-        found.add((braces_before(side.tokens, 0, start), own))
-    return found
-
-
-def changed_declarations(bindings, added, deleted, hunks):
-    """The head declarations a changed line or deletion gap touches, but for one that a hunk only rewrote (council P1
-    and Q1 on #768): every line of it is an added line of one hunk, and a declaration on that hunk's removed lines
-    has the same whole token sequence, name included, and the same braces before it inside the hunk. So a comment on
-    an alias line beside an edit to the next line changes no binding. Anything else counts as changed and rechecks
-    its uses, a move to another hunk included: a documented over-report, which fails closed."""
-    touched = bindings.changed_aliases(added, deleted)
-    if not touched or not hunks:
-        return touched
-    tokens = bindings.tokens
-    removed = [removed_declarations(lines) for _, lines in hunks]
-    changed = set()
-    for index in touched:
-        first, last = bindings.definition_lines(index)
-        start, own = own_tokens(bindings, index)
-        kept = False
-        for (rows, _), before in zip(hunks, removed):
-            if all(line in rows for line in range(first, last + 1)):
-                top = min(rows)
-                lead = next(i for i, t in enumerate(tokens) if t.line + 1 >= top)
-                kept = (braces_before(tokens, lead, start), own) in before
-                break
-        if not kept:
-            changed.add(index)
-    return frozenset(changed)
-
-
 class Bindings(LiteralBindings):
-    def uses(self, removed, added=None, deleted=(), changed_exports=frozenset(), hunks=()):
-        changed = changed_declarations(self, added or (), deleted, hunks)
+    def uses(self, removed, added=None, deleted=(), changed_exports=frozenset()):
+        changed = self.changed_aliases(added or (), deleted)
         for start, end, origin in self.accesses():
             if origin.kind != "std" or origin.parts[:2] != ("os", "windows"):
                 continue
@@ -114,9 +60,9 @@ def fork_added(repo, head, upstream):
 
 
 @functools.lru_cache(maxsize=64)
-def removed_uses(path, text, exports, removed, added, deleted, changed_exports, hunks=()):
+def removed_uses(path, text, exports, removed, added, deleted, changed_exports):
     bindings = Bindings(text, dict(exports), path)
-    return tuple(bindings.uses(removed, frozenset(added), deleted, changed_exports, hunks))
+    return tuple(bindings.uses(removed, frozenset(added), deleted, changed_exports))
 
 
 def check(repo, base, head, upstream_path, removed_path):
@@ -125,18 +71,13 @@ def check(repo, base, head, upstream_path, removed_path):
     if not upstream or not rows or rows != sorted(set(rows)):
         raise ValueError("missing upstream paths or malformed removed-name inventory")
     removed = frozenset(rows)
-    hunks = {}
-    changes = line_changes(repo, base, head, same_code=same_zig_code, hunks=hunks)
-
-    def hunks_of(name):
-        return tuple((frozenset(rows), lines) for rows, lines in hunks.get(name, ()))
-
+    changes = line_changes(repo, base, head, same_code=same_zig_code)
     module = "src/os/windows.zig"
     new_module = sources(repo, head, {module})[module]
     bindings = LiteralBindings(new_module, path=module)
     origins = dict(export_origins(bindings))
     exports = tuple(sorted((name, origin.parts) for name, origin in origins.items()))
-    changed = changed_declarations(bindings, *changes.get(module, ((), ())), hunks_of(module))
+    changed = bindings.changed_aliases(*changes.get(module, ((), ())))
     changed_exports = frozenset(name for name, origin in origins.items() if origin.declarations & changed)
     fork = {name for name in fork_added(repo, head, upstream) if name.endswith(".zig")}
     # A re-export edit can change bindings even in files with no changed lines.
@@ -146,7 +87,7 @@ def check(repo, base, head, upstream_path, removed_path):
     for name in sorted(names):
         added, deleted = changes.get(name, ((), ()))
         for key, span, line in removed_uses(name, texts[name], exports, removed, tuple(sorted(added)),
-                                          tuple(sorted(deleted)), changed_exports, hunks_of(name)):
+                                          tuple(sorted(deleted)), changed_exports):
             findings.add((name, line, "error", "removed std.os.windows." + key))
     return sorted(findings)
 

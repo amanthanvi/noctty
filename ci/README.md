@@ -141,19 +141,26 @@ whose removed and added lines hold the same Zig tokens (`same_zig_code`, which
 `line_changes` takes as `same_code`), so a comment or whitespace edit on an
 alias's definition line rechecks nothing, while a reference added in the same
 edit is still checked (council no-seat N3, after the lint was enforced).
-Inside a hunk that does change code, a touched definition counts as unchanged
-only when every line of it is an added line of that one hunk and a declaration
-on the same hunk's removed lines has the same whole token sequence, name and
-prefix keywords included, at the same braces inside the hunk
-(`changed_declarations`; council P1 and Q1 on #768). So a comment on an alias
-line beside a changed next line rechecks none of its uses. Anything else counts
-as changed: the rule matches only a declaration that hunk removed, so it fails
-closed. (P1 had matched any base declaration in a scope with the same header,
-which twin blocks defeat.)
+Any other hunk counts as changed, exactly as before #768: a definition it
+touches rechecks its uses (council R1 on #768, after two attempts to quiet
+mixed hunks, P1 and Q1, each failed open on twin scopes). Two limits follow:
 
-**Known conservative over-report:** a definition whose own tokens changed, or
-that moved to another hunk, rechecks its uses even if the final origin stayed
-the same. Moving or re-spelling an alias's definition can therefore report
+- **Mixed hunks and moves over-report, and fail closed.** A comment on an
+  alias line beside an edit to the next line is one hunk whose code changed,
+  so the alias's unchanged uses are rechecked (40 on the real `ipc_server.zig`),
+  and so is a moved alias. Split the comment edit into its own hunk or commit.
+- **An edit elsewhere that changes scope is missed.** When the uses of an alias
+  whose own line is untouched bind somewhere else (a removed `else` boundary,
+  merged blocks), no touched definition rechecks them. This limit of the
+  definition-span rule is older than #753; with the comment-only hunk a no-op,
+  a comment on the alias in a hunk of its own is this case too. 1B's compile
+  catches it at a forward merge, since the removed names do not exist in
+  0.17.1. Comparing the resolved targets of unchanged calls across base and
+  head is the way to close it, and to remove the over-report above, later.
+
+**Known conservative over-report:** a touched definition rechecks its uses
+even if the final origin stayed the same. Moving or re-spelling an alias's
+definition, or editing its line in a mixed hunk, can therefore report
 unchanged legacy uses (the soft freeze forbids moves on `main` during 1B
 anyway). Introducing an intermediate
 alias (for example `const os = std.os; const windows = os.windows;`), or routing

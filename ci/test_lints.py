@@ -855,12 +855,8 @@ class GitControls(unittest.TestCase):
         base = self.commit()
         upstream, removed, _ = self.inputs()
         commented = source.replace("kernel32;", "kernel32; // Win32 API")
-        # Council P1 and Q1 on #768: in one mixed hunk, a comment on the alias line beside a changed next line leaves
-        # the alias as a declaration that hunk removed, token for token.
-        mixed = commented.replace("const unrelated = 1;", "const unrelated = 2;")
         for variant in (commented, source.replace("const w = std", "const  w =\n    std"),
-                        source.replace("const unrelated = 1;\n", "const unrelated = 1;\n// a comment line\n"),
-                        mixed):
+                        source.replace("const unrelated = 1;\n", "const unrelated = 1;\n// a comment line\n")):
             self.write("probe.zig", variant)
             head = self.commit()
             self.assertIn("probe.zig", common.line_changes(self.repo, base, head))
@@ -869,66 +865,97 @@ class GitControls(unittest.TestCase):
         head = self.commit()
         self.assertEqual([("probe.zig", 5, "error", "removed std.os.windows.kernel32.Sleep")],
                          win.check(self.repo, base, head, upstream, removed))
+        # Documented over-report (council R1 on #768): the same comment beside a changed next line is one hunk whose
+        # code changed, so the alias counts as changed and its unchanged use is rechecked. It fails closed; split the
+        # comment edit into its own hunk or commit.
+        self.write("probe.zig", commented.replace("const unrelated = 1;", "const unrelated = 2;"))
+        head = self.commit()
+        self.assertEqual([4], [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
 
-    def test_retargeted_twin_aliases_recheck_their_unchanged_uses(self):
-        # Council Q1 on #768: P1 took a touched declaration as unchanged when any base scope with the same header held
-        # its tokens, which twins defeat: a retargeted alias then hid its unchanged, newly forbidden use. Only a
-        # declaration that the same hunk removed, token for token and at the same braces, is unchanged now.
+    def test_fail_open_fixtures_report_the_forbidden_use(self):
+        # Council R1 on #768: every fixture with which P1 (round 2) or Q1 (round 3) matched a touched alias to an old
+        # declaration, and so hid an unchanged use now bound to kernel32. With only N3's rule (a hunk whose tokens did
+        # not change is no change), each hunk whose code changed counts as changed, and each one reports the use.
         self.write("src/os/windows.zig", "// reexports\n")
         upstream, removed, _ = self.inputs()
         safe, bad = "const w = local.sys;", "const w = std.os.windows.kernel32;"
-        cases = (
-            ("Sol's sibling if (on) blocks",
-             "fn f(on: bool) void {\n    if (on) {\n        " + safe + "\n        w.Sleep(1);\n    }\n"
-             "    if (on) {\n        " + bad + "\n        w.Sleep(2);\n    }\n}\n", (2, safe, bad), [4]),
-            ("Opus's twin else blocks",
-             "fn f(on: bool) void {\n    if (on) {} else {\n        " + safe + "\n        w.Sleep(1);\n    }\n"
-             "    if (on) {} else {\n        " + bad + "\n        w.Sleep(2);\n    }\n}\n", (2, safe, bad), [4]),
-            ("two functions returning error{Stopped}!void",
-             "fn a() error{Stopped}!void {\n    " + safe + "\n    w.Sleep(1);\n}\n"
-             "fn b() error{Stopped}!void {\n    " + bad + "\n    w.Sleep(2);\n}\n", (1, safe, bad), [3]),
-            ("a swap of twin aliases",
-             "test {\n    " + bad + "\n    w.Sleep(1);\n}\ntest {\n    " + safe + "\n    w.Sleep(2);\n}\n",
-             None, [7]),
-        )
-        for name, before, edit, expected in cases:
+
+        def report(before, after):
+            self.write("probe.zig", before)
+            base = self.commit()
+            self.write("probe.zig", after)
+            head = self.commit()
+            return [row[1] for row in win.check(self.repo, base, head, upstream, removed)]
+
+        def retarget(text, at):
+            lines = text.split("\n")
+            lines[at] = lines[at].replace(safe, bad)
+            return "\n".join(lines)
+
+        def swap(text):
+            lines = text.split("\n")
+            first = next(i for i, l in enumerate(lines) if l.strip() == bad)
+            second = next(i for i, l in enumerate(lines) if l.strip() == safe)
+            lines[first], lines[second] = lines[second], lines[first]
+            return "\n".join(lines)
+
+        siblings = ("fn f(on: bool) void {\n    if (on) {\n        " + safe + "\n        w.Sleep(1);\n    }\n"
+                    "    if (on) {\n        " + bad + "\n        w.Sleep(2);\n    }\n}\n")
+        elses = ("fn f(on: bool) void {\n    if (on) {} else {\n        " + safe + "\n        w.Sleep(1);\n    }\n"
+                 "    if (on) {} else {\n        " + bad + "\n        w.Sleep(2);\n    }\n}\n")
+        error_sets = ("fn a() error{Stopped}!void {\n    " + safe + "\n    w.Sleep(1);\n}\n"
+                      "fn b() error{Stopped}!void {\n    " + bad + "\n    w.Sleep(2);\n}\n")
+        tests = "test {\n    " + bad + "\n    w.Sleep(1);\n}\ntest {\n    " + safe + "\n    w.Sleep(2);\n}\n"
+        one_hunk = ("fn f(on: bool) void {\n    if (on) {\n        " + bad + "\n        w.Sleep(1);\n    } else {\n"
+                    "        " + safe + "\n        w.Sleep(2);\n    }\n}\n")
+        one_hunk_swapped = ("fn f(on: bool) void {\n    if (on) {\n        " + safe + " // a\n        w.Sleep(1); // swapped\n"
+                            "    }  else {\n        " + bad + " // b\n        w.Sleep(2);\n    }\n}\n")
+        # Round 3's scope-boundary cases, each in one hunk with a comment on the kernel32 alias: Sol's removes an
+        # else boundary and its local alias; Opus's merges sibling blocks. The unchanged `w.Sleep(2)` binds to kernel32.
+        sol_before = ("fn f(on: bool) void {\n    if (on) {\n        " + bad + "\n    } else {\n        " + safe + "\n"
+                      "        w.Sleep(2);\n    }\n}\n")
+        sol_after = "fn f(on: bool) void {\n    if (on) {\n        " + bad + " // kept\n        w.Sleep(2);\n    }\n}\n"
+        opus_before = ("fn f(on: bool) void {\n    if (on) {\n        " + bad + "\n    }\n    if (on) {\n        " + safe + "\n"
+                       "        w.Sleep(2);\n    }\n}\n")
+        opus_after = "fn f(on: bool) void {\n    if (on) {\n        " + bad + " // merged\n        w.Sleep(2);\n    }\n}\n"
+        for name, before, after, expected in (
+                ("Sol's sibling if (on) blocks", siblings, retarget(siblings, 2), [4]),
+                ("Opus's twin else blocks", elses, retarget(elses, 2), [4]),
+                ("two functions returning error{Stopped}!void", error_sets, retarget(error_sets, 1), [3]),
+                ("a swap of twin aliases across hunks", tests, swap(tests), [7]),
+                ("a swap of twin aliases in one hunk", one_hunk, one_hunk_swapped, [7]),
+                ("Sol's removed else boundary, one hunk", sol_before, sol_after, [4]),
+                ("Opus's merged sibling blocks, one hunk", opus_before, opus_after, [4])):
             with self.subTest(case=name):
-                self.write("probe.zig", before)
-                base = self.commit()
-                lines = before.split("\n")
-                if edit:
-                    at, old, new = edit
-                    lines[at] = lines[at].replace(old, new)
-                else:
-                    first = next(i for i, l in enumerate(lines) if l.strip() == bad)
-                    second = next(i for i, l in enumerate(lines) if l.strip() == safe)
-                    lines[first], lines[second] = lines[second], lines[first]
-                self.write("probe.zig", "\n".join(lines))
-                head = self.commit()
-                self.assertEqual(expected, [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
-        # The same swap inside one hunk (the use and the braces between the twins edited too): the hunk did remove a
-        # `const w = std.os.windows.kernel32;`, but at other braces, so the else block's alias is still changed.
-        before = ("fn f(on: bool) void {\n    if (on) {\n        " + bad + "\n        w.Sleep(1);\n    } else {\n"
-                  "        " + safe + "\n        w.Sleep(2);\n    }\n}\n")
-        after = ("fn f(on: bool) void {\n    if (on) {\n        " + safe + " // a\n        w.Sleep(1); // swapped\n"
-                 "    }  else {\n        " + bad + " // b\n        w.Sleep(2);\n    }\n}\n")
+                self.assertEqual(expected, report(before, after))
+
+    def test_known_limit_scope_edit_elsewhere_rebinds_an_untouched_alias(self):
+        # Known limit of the definition-span rule, older than #753 (council R1 on #768; ci/README.md): an edit
+        # elsewhere that changes scope rebinds the uses of an alias whose own line is untouched, and the lint does not
+        # see it. Sol's split-hunk variant is this case: the comment on the kernel32 alias is a hunk of its own, which
+        # N3 drops, and the removed else boundary is another. 1B's compile catches it; comparing the resolved targets
+        # of unchanged calls across base and head would close it.
+        self.write("src/os/windows.zig", "// reexports\n")
+        upstream, removed, _ = self.inputs()
+        before = ("fn f(on: bool) void {\n    if (on) {\n        const w = std.os.windows.kernel32;\n        _ = w;\n"
+                  "    } else {\n        const w = local.sys;\n        w.Sleep(2);\n    }\n}\n")
+        after = ("fn f(on: bool) void {\n    if (on) {\n        const w = std.os.windows.kernel32; // kept\n        _ = w;\n"
+                 "        w.Sleep(2);\n    }\n}\n")
         self.write("probe.zig", before)
         base = self.commit()
         self.write("probe.zig", after)
         head = self.commit()
-        hunks = {}
-        common.line_changes(self.repo, base, head, same_code=win.same_zig_code, hunks=hunks)
-        self.assertEqual([frozenset({3, 4, 5, 6})], [rows for rows, _ in hunks["probe.zig"]])
-        self.assertEqual([7], [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
+        self.assertEqual({"probe.zig": (set(), {4})}, common.line_changes(self.repo, base, head, same_code=win.same_zig_code))
+        self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
 
-    def test_touched_alias_moves_visibility_and_spellings_recheck(self):
+    def test_touched_alias_moves_documented_overreport_visibility_and_spellings_recheck(self):
         self.write("src/os/windows.zig", "// reexports\n")
         source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
                   'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
         self.write("probe.zig", source)
         base = self.commit()
         upstream, removed, _ = self.inputs()
-        # A move to another hunk is a documented over-report (council Q1 on #768); a changed visibility or spelling
+        # A move is a documented over-report (council R1 on #768); a changed visibility or spelling
         # changes the binding's own tokens.
         variants = (source.replace("const w =", "pub const w ="),
                     source.replace("const w = std.os.windows.kernel32;\n", "").replace(
@@ -1169,7 +1196,7 @@ class HistoryControls(unittest.TestCase):
                 self.assertEqual({path: ({line + 1}, {line})}, common.line_changes(self.repo, base, head))
                 self.assertEqual([], self.check(base, head))
 
-    def test_real_comment_on_alias_line_and_added_reference_twin(self):
+    def test_real_comment_on_alias_line_mixed_hunk_documented_overreport_and_added_reference_twin(self):
         # Council no-seat N3, Sol's probe: once the lint was enforced, a comment on ipc_server.zig's alias line
         # flagged its 40 unchanged uses. It now passes, and a reference added in the same edit still fails.
         path = "src/apprt/win32/ipc_server.zig"
@@ -1178,24 +1205,23 @@ class HistoryControls(unittest.TestCase):
         self.assertEqual(1, source.count(alias))
         commented = source.replace(alias, "const windows = std.os.windows; // council probe\n")
         self.assertEqual([], self.check(self.base, self.fixture(path, commented)))
-        # Council P1 on #768, Sol's probe: the same comment beside a change to the next line is one hunk, which
-        # rechecked all 40 uses of the untouched alias; the alias's own tokens did not change.
-        following = "const log = std.log.scoped(.win32);\n"
-        self.assertEqual(1, commented.count(following))
-        adjacent = commented.replace(following, "const log = std.log.scoped(.win32_ipc);\n")
-        mixed = self.fixture(path, adjacent)
-        # One hunk, lines 5 (the alias) and 6, that the token filter keeps.
-        self.assertEqual({5, 6}, common.line_changes(self.repo, self.base, mixed, same_code=win.same_zig_code)[path][0])
-        self.assertEqual([], self.check(self.base, mixed))
         added = commented + "\nfn councilProbe() void {\n    windows.kernel32.Sleep(1);\n}\n"
         self.assertEqual([(path, added.count("\n") - 1, "error", "removed std.os.windows.kernel32.Sleep")],
                          self.check(self.base, self.fixture(path, added)))
-        print("Real comment on an alias line: 0 errors; with the next line changed in its hunk: 0; "
-              "added-reference twin: 1")
+        # Documented over-report (council R1 on #768): the same comment beside a change to the next line is one hunk
+        # whose code changed, so the alias counts as changed and its 40 unchanged uses are rechecked. It fails closed:
+        # a developer splits the comment edit into its own hunk or commit.
+        following = "const log = std.log.scoped(.win32);\n"
+        self.assertEqual(1, commented.count(following))
+        mixed = self.fixture(path, commented.replace(following, "const log = std.log.scoped(.win32_ipc);\n"))
+        self.assertEqual({5, 6}, common.line_changes(self.repo, self.base, mixed, same_code=win.same_zig_code)[path][0])
+        self.assertEqual(40, len(self.check(self.base, mixed)))
+        print("Real comment on an alias line: 0 errors; added-reference twin: 1; "
+              "mixed hunk (documented over-report): 40")
 
-    def test_real_import_swap_and_ipc_alias_move_touch_definitions(self):
+    def test_real_import_swap_and_ipc_alias_move_documented_overreport(self):
         # A moved definition sits in another hunk than the one that removed it, so it rechecks its uses: a documented
-        # over-report (council Q1 on #768, which undid P1's base-scope match).
+        # over-report (council R1 on #768).
         path = "src/apprt/win32.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
@@ -1264,7 +1290,7 @@ class HistoryControls(unittest.TestCase):
             unchanged = [row for row in rows if row[1] not in added.get(row[0], ())]
             if head.startswith("1c8d4d394"):
                 # Its two unchanged-use errors come from host.zig's `const windows = win32.windows;`, which this
-                # refactor only moved (line 268 to 255): the documented move over-report (council Q1 on #768).
+                # refactor only moved (line 268 to 255): the documented move over-report (council R1 on #768).
                 self.assertEqual(2, len(rows))
                 self.assertEqual(2, len(unchanged))
             else:
@@ -1310,7 +1336,7 @@ class HistoryControls(unittest.TestCase):
                             'const zstd = @import("std");\nconst std = zstd;'), 40),
             (source.replace('const windows = std.os.windows;',
                             'const windows = @import("../../os/windows.zig");'), 32),
-            # Council Q1 on #768: the alias moved to another hunk rechecks its uses, as P1 had briefly stopped.
+            # Documented over-report (council R1 on #768): a moved alias rechecks its uses.
             (source.replace('const windows = std.os.windows;\n', '').replace(
                 'const log = std.log.scoped(.win32);\n',
                 'const log = std.log.scoped(.win32);\nconst windows = std.os.windows;\n'), 40),
