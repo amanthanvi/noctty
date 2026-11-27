@@ -1193,7 +1193,29 @@ extern "kernel32" fn GetFileInformationByHandleEx(
 fn directoryIdentity(handle: std.os.windows.HANDLE) ?DirectoryIdentity {
     var info: FILE_ID_INFO = undefined;
     if (GetFileInformationByHandleEx(handle, file_id_info_class, &info, @sizeOf(FILE_ID_INFO)) == 0) return null;
+    return identityFrom(info);
+}
+
+/// The identity `info` gives, or null when its file ID is all zero or all
+/// 0xFF bytes: no ID a file system names one file by (council U6), so a file
+/// system that gives either would make every staged-shape image on the
+/// volume match the stage.
+fn identityFrom(info: FILE_ID_INFO) ?DirectoryIdentity {
+    const none: [16]u8 = @splat(0);
+    const invalid: [16]u8 = @splat(0xff);
+    if (std.mem.eql(u8, &info.FileId, &none) or std.mem.eql(u8, &info.FileId, &invalid)) return null;
     return .{ .volume = info.VolumeSerialNumber, .file_id = info.FileId };
+}
+
+test "a zero or all-0xFF file ID is no directory identity (council U6)" {
+    var info: FILE_ID_INFO = .{ .VolumeSerialNumber = 7, .FileId = @splat(0) };
+    try std.testing.expect(identityFrom(info) == null);
+    info.FileId = @splat(0xff);
+    try std.testing.expect(identityFrom(info) == null);
+    info.FileId[3] = 0x12;
+    const found = identityFrom(info) orelse return error.TestExpectedIdentity;
+    try std.testing.expectEqual(@as(u64, 7), found.volume);
+    try std.testing.expectEqual(@as(u8, 0x12), found.file_id[3]);
 }
 
 /// The fallback when the spellings miss (council T3): a Setup started by the
