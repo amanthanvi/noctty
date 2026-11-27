@@ -16182,6 +16182,34 @@ test "win32 kitty-clipboard-read: a program's own read is served only when nothi
     try fixture.expectReply("\x1b]5522;type=read:status=EPERM\x1b\\");
 }
 
+test "win32 upstream 1.4 actions the runtime does not perform answer not performed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: ClipboardReplyFixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const core = &fixture.surface.core_surface;
+    core.rt_app = app;
+
+    // A program's CSI 8 t, a `set_window_title` binding and the inspector's
+    // Terminal IO export, at the targets core sends them to.
+    for ([_]apprt.Target{ .app, .{ .surface = core } }) |target| {
+        try std.testing.expect(!try app.performAction(target, .resize_window, .{ .width = 800, .height = 600 }));
+        try std.testing.expect(!try app.performAction(target, .set_window_title, .{ .title = "title" }));
+        try std.testing.expect(!try app.performAction(target, .export_terminal_io, .{ .contents = "io" }));
+    }
+    // The binding is not performed, so a `performable:` one goes on to the
+    // program.
+    try std.testing.expect(!try core.performBindingAction(.{ .set_window_title = "title" }));
+    try std.testing.expect(fixture.host.banner_text == null);
+    try fixture.expectSilent();
+
+    // GTK's D-Bus `+new-tab`: nothing is sent and nothing waits for a reply.
+    try std.testing.expect(!try App.performIpc(std.testing.allocator, .detect, .new_tab, .{ .surface_id = 0, .arguments = null }, 60_000));
+    var arguments = [_][:0]const u8{"--title=x"};
+    try std.testing.expect(!try App.performIpc(std.testing.allocator, .{ .class = "com.example.noctty" }, .new_tab, .{ .surface_id = 7, .arguments = &arguments }, 60_000));
+}
+
 test "win32 a program's clipboard request asks in its own words and cannot be answered by a key in flight" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
