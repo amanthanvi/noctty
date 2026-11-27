@@ -512,7 +512,9 @@ public static class GuiHiddenRunnerNative {
     public static bool CommandLineReadEnded(int status) { return status == unchecked((int)0xC000010A) || status == unchecked((int)0x8000000D); }
     // How long ExitedBy waits for a terminating process's handle to signal.
     public const uint ExitWaitMs = 100;
-    // The slices of that wait when the caller has work for between them (`WaitExit`'s `between`).
+    // The slices of that wait when the caller has work for between them (`WaitExit`'s `between`). A 5 ms wait lasts
+    // about one timer tick, some 16 ms at the default timer resolution, so the 100 ms wait has about six slices, not
+    // twenty (the #768 council's Opus seat measured 6 pump calls in 114 ms).
     public const uint ExitWaitSliceMs = 5;
 
     // Whether `handle` signals within ExitWaitMs. With `between`, the wait runs in slices of ExitWaitSliceMs and calls
@@ -922,8 +924,9 @@ function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPi
 # pinned handle signalled within ExitWaitMs with a matching exit time, each before the runner ended the job;
 # JobWatch's `GoneBeforeStop`, `Pinned` and `ExitedBy`) is counted apart and does not fail the leaf: on `main`, push run 45561987608 failed twice, and push run 44997457453 once, on unread joiners alone (TD
 # D112). A live joiner the reader could not read still fails it. One whose image class 27 read after the Win32 read
-# failed (NtImagePathOf) is read, exited or not, so every rule but its command line's applies to it: a stray noctty
-# that exits fast fails the copy or accounting rule (council no-seat N6). An exited one vouches for no child (`parentOf`), not
+# failed (NtImagePathOf) is read, exited or not, so every rule applies to it: a stray noctty that exits fast fails the
+# copy or accounting rule (council no-seat N6). Of the rules that need its command line, a noctty's argument rule is
+# excused when that read failed on its exit, but a cmd's shell rule, which is one too, applies and fails it. An exited one vouches for no child (`parentOf`), not
 # even a noctty whose image was read and whose command line was not, though a launcher record still accounts for that
 # noctty itself (CodeRabbit and Sourcery on #752). The one exception: an accounted noctty.com so exited still vouches
 # for the exact child noctty.exe it forwarded when that child's own arguments were read and kept the argument rule,

@@ -1772,9 +1772,11 @@ An image outlives the exit where the Win32 read does not: when
 image through `NtQueryInformationProcess` class 27 (`ProcessImageFileName`,
 `NtImagePathOf`), a device path that `SameImage` judges behind
 `\\?\GLOBALROOT` (council no-seat N6). A joiner read that way is read, exited
-or not, so every rule but its command line's applies: a short-lived stray
-noctty fails the accounting or copy rule, and a short-lived `cmd.exe` the
-shell rule. Only a joiner whose class-27 read failed too counts in
+or not, so every rule applies to it: a short-lived stray noctty fails the
+accounting or copy rule. Of the rules that need its command line, a noctty's
+argument rule is excused when that read failed on its exit, but the shell
+rule, a command-line rule too, applies and fails a short-lived `cmd.exe`
+whose command line went unread. Only a joiner whose class-27 read failed too counts in
 `imageUnreadExited`.
 
 **The real-input module.** `scripts/interactive-win11-realinput.ps1`
