@@ -1425,8 +1425,12 @@ pub const RecoveryLedgerLock = struct {
         const lock_path = try std.fmt.allocPrint(alloc, "{s}.lock", .{ledger_path});
         defer alloc.free(lock_path);
         // Open-if-exists, never truncate: the file's bytes are irrelevant and
-        // every instance must land on the same one.
-        const file = try std.Io.Dir.createFileAbsolute(io, lock_path, .{ .truncate = false, .read = true });
+        // every instance must land on the same one. One attempt: a holder
+        // that does not share writes, or a pending delete, is `FileBusy` at
+        // once, where std 0.17 would wait about four seconds on the UI thread
+        // first; the start goes unrecorded and the ready marker retries on a
+        // later tick (re-check item 34).
+        const file = try sys.dirCreateFileOnce(std.Io.Dir.cwd(), lock_path, .{ .truncate = false, .read = true });
         errdefer file.close(io);
 
         const deadline = std.Io.Timestamp.now(io, .real).toMilliseconds() + wait_ms;
@@ -1515,10 +1519,19 @@ pub fn readRecoveryLedgerAlloc(
 ) RecoveryLedgerRead {
     // A ledger that exists but cannot be read now (a scanner holds it, the
     // allocator failed) may be a newer build's: reading it as empty would
-    // replace it.
+    // replace it. One attempt, on the UI thread at start and at the ready
+    // marker: a holder that denies reads, or a pending delete, is `FileBusy`
+    // at once (std 0.17 would wait about four seconds first), and reads as
+    // unreadable, which the ready marker retries on a later tick
+    // (`RecoveryReadyRetry`); `AccessDenied` is a refusing ACL, unreadable
+    // too (re-check item 34).
     const io = global.io();
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
+    const file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return .empty,
+        error.FileBusy => {
+            log.warn("win32 recovery: {s} open found the file busy; leaving it untouched", .{context});
+            return .unreadable;
+        },
         else => {
             log.warn("win32 recovery: {s} open failed err={}; leaving it untouched", .{ context, err });
             return .unreadable;
@@ -1886,7 +1899,11 @@ fn settingsFileProbe(
     path: []const u8,
 ) win32_settings.SaveError!bool {
     const io = global.io();
-    const file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
+    // One attempt, on the UI thread for each file a save checks: a holder that
+    // denies reads, or a pending delete, is `FileBusy` at once, where std
+    // 0.17 would wait about four seconds per file first. Busy and a refusing
+    // ACL stop the save alike, and the user saves again (re-check item 34).
+    const file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return false,
         error.IsDir => return true,
         else => {
@@ -2312,7 +2329,9 @@ fn beginRecoveryStartupAtPath(
             } orelse break;
             if (!std.mem.startsWith(u8, entry.name, retained_prefix)) continue;
             const retained_path = std.fs.path.join(alloc, &.{ dir_path, entry.name }) catch continue;
-            const retained_file = std.Io.Dir.openFileAbsolute(io, retained_path, .{ .allow_directory = false }) catch {
+            // One attempt (re-check item 34): a record that is busy now is
+            // folded by a later start.
+            const retained_file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), retained_path, .{ .allow_directory = false }) catch {
                 alloc.free(retained_path);
                 continue;
             };
@@ -7469,6 +7488,151 @@ test "win32 settings disk edit does not mistake the resolved default command for
     defer written.deinit();
     written.command = .{ .shell = "cmd" };
     try std.testing.expect(try settingsDiskEditConflict(&original, &pending, &written, light, edited));
+}
+
+test "held file: the startup ledger's reads and writes are busy at once (re-check item 34)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const target = try std.fs.path.join(alloc, &.{ root, "startup-attempts.json" });
+    defer alloc.free(target);
+    const lock_path = try std.fmt.allocPrint(alloc, "{s}.lock", .{target});
+    defer alloc.free(lock_path);
+    const attempts = [_]win32_recovery.StartupAttempt{.{ .started_at_unix_ms = 100, .phase = .window_created }};
+    const json = try win32_recovery.encodeAlloc(alloc, .{ .attempts = &attempts });
+    defer alloc.free(json);
+
+    // A reader: the ledger reads as unreadable, which the ready marker
+    // retries on a later tick, and a start leaves unrecorded.
+    for ([_]sys.HeldFile.Kind{ .deny_read, .delete_pending }) |kind| {
+        try win32_session_persistence.writeFileInPlace(target, json);
+        const held = try sys.HeldFile.hold(target, kind);
+        defer held.release();
+        const start = sys.HeldFile.now();
+        var ledger = readRecoveryLedgerAlloc(alloc, target, "held-file test");
+        defer ledger.deinit();
+        const ms = sys.HeldFile.msSince(start);
+        std.debug.print("held file: ledger read against {t}: unreadable after {d} ms\n", .{ kind, ms });
+        try std.testing.expect(ledger == .unreadable);
+        try std.testing.expect(ms < sys.HeldFile.once_bound_ms);
+    }
+
+    // A creator and a writer: the lock file and the in-place fallback are
+    // `FileBusy`.
+    for ([_]sys.HeldFile.Kind{ .deny_write, .delete_pending }) |kind| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "startup-attempts.json.lock", .data = "" });
+        {
+            const held = try sys.HeldFile.hold(lock_path, kind);
+            defer held.release();
+            const start = sys.HeldFile.now();
+            try std.testing.expectError(error.FileBusy, RecoveryLedgerLock.acquire(alloc, target, recovery_ledger_lock_wait_ms));
+            const ms = sys.HeldFile.msSince(start);
+            std.debug.print("held file: ledger lock against {t}: FileBusy after {d} ms\n", .{ kind, ms });
+            try std.testing.expect(ms < sys.HeldFile.once_bound_ms);
+        }
+        try win32_session_persistence.writeFileInPlace(target, json);
+        {
+            const held = try sys.HeldFile.hold(target, kind);
+            defer held.release();
+            const start = sys.HeldFile.now();
+            try std.testing.expectError(error.FileBusy, win32_session_persistence.writeFileInPlace(target, json));
+            const ms = sys.HeldFile.msSince(start);
+            std.debug.print("held file: ledger in-place write against {t}: FileBusy after {d} ms\n", .{ kind, ms });
+            try std.testing.expect(ms < sys.HeldFile.once_bound_ms);
+        }
+    }
+
+    // Unheld, each opens at once.
+    try tmp.dir.writeFile(io, .{ .sub_path = "startup-attempts.json.lock", .data = "" });
+    try win32_session_persistence.writeFileInPlace(target, json);
+    const start = sys.HeldFile.now();
+    var ledger = readRecoveryLedgerAlloc(alloc, target, "held-file test");
+    defer ledger.deinit();
+    try std.testing.expect(ledger == .record);
+    var lock = (try RecoveryLedgerLock.acquire(alloc, target, recovery_ledger_lock_wait_ms)).?;
+    lock.release();
+    try std.testing.expect(sys.HeldFile.msSince(start) < sys.HeldFile.once_bound_ms);
+}
+
+test "held file: a Settings save's checks and reads are busy at once (re-check item 34)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const path = try std.fs.path.join(alloc, &.{ root, "config.ghostty" });
+    defer alloc.free(path);
+    var detail: win32_settings.FailureDetail = .{};
+    defer detail.clear(alloc);
+
+    for ([_]sys.HeldFile.Kind{ .deny_read, .delete_pending }) |kind| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.ghostty", .data = "font-size = 14\n" });
+        const held = try sys.HeldFile.hold(path, kind);
+        defer held.release();
+        const start = sys.HeldFile.now();
+        try std.testing.expectError(error.FileUnopenable, settingsFileOpenable(alloc, &detail, "the config file", path));
+        const probe_ms = sys.HeldFile.msSince(start);
+        const read_start = sys.HeldFile.now();
+        try std.testing.expectError(error.ReadFailed, save_target.read(alloc, path));
+        const read_ms = sys.HeldFile.msSince(read_start);
+        std.debug.print("held file: Settings check against {t}: FileUnopenable after {d} ms; save read ReadFailed after {d} ms\n", .{ kind, probe_ms, read_ms });
+        try std.testing.expect(probe_ms < sys.HeldFile.once_bound_ms);
+        try std.testing.expect(read_ms < sys.HeldFile.once_bound_ms);
+    }
+
+    // Unheld, both read at once.
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.ghostty", .data = "font-size = 14\n" });
+    const start = sys.HeldFile.now();
+    try settingsFileOpenable(alloc, &detail, "the config file", path);
+    const bytes = try save_target.read(alloc, path);
+    defer alloc.free(bytes);
+    try std.testing.expectEqualStrings("font-size = 14\n", bytes);
+    try std.testing.expect(sys.HeldFile.msSince(start) < sys.HeldFile.once_bound_ms);
+}
+
+test "held file: the session restore's read and owner lock keep std's retry (re-check item 34)" {
+    // Representatives of the reads and locks that keep std's retry: a start
+    // that cannot read the saved session, or take its owner lock, goes
+    // without it for the whole run, so riding out a brief hold is worth the
+    // wait a lasting one costs.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "session-state.json", .data = "{\"schema_version\":1,\"windows\":[]}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "session-state.json.lock", .data = "" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "session-state.json" });
+    defer alloc.free(state_path);
+    const lock_path = try std.fs.path.join(alloc, &.{ root, "session-state.json.lock" });
+    defer alloc.free(lock_path);
+
+    {
+        const held = try sys.HeldFile.hold(state_path, .deny_read);
+        defer held.release();
+        const start = sys.HeldFile.now();
+        var loaded = win32_session_persistence.loadAlloc(alloc, state_path, win32_session_persistence.default_max_state_bytes);
+        defer loaded.deinit();
+        const ms = sys.HeldFile.msSince(start);
+        std.debug.print("held file: session restore read against deny_read: {t} after {d} ms\n", .{ std.meta.activeTag(loaded), ms });
+        try std.testing.expect(loaded == .transient);
+        try std.testing.expect(loaded.transient == error.FileBusy);
+        try std.testing.expect(ms > sys.HeldFile.std_retry_floor_ms);
+    }
+    {
+        const held = try sys.HeldFile.hold(lock_path, .deny_write);
+        defer held.release();
+        const start = sys.HeldFile.now();
+        try std.testing.expectError(error.FileBusy, session_module.SessionOwnerLock.acquire(alloc, state_path));
+        const ms = sys.HeldFile.msSince(start);
+        std.debug.print("held file: session owner lock against deny_write: FileBusy after {d} ms\n", .{ms});
+        try std.testing.expect(ms > sys.HeldFile.std_retry_floor_ms);
+    }
 }
 
 test "win32 settings disk check stops at a config file it cannot open, not at a missing one" {

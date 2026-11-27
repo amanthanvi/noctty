@@ -42,7 +42,11 @@ pub fn expand(
             .{},
         ) catch |err| switch (err) {
             error.FileNotFound => continue,
-            error.AccessDenied => {
+            // A file another handle holds without sharing reads was
+            // `AccessDenied` on Zig 0.15; 0.17 retries it for about four
+            // seconds and reports `FileBusy`. Either way the search goes on
+            // to the next directory (re-check item 34).
+            error.AccessDenied, error.FileBusy => {
                 // Accumulate this and return it later so we can try other
                 // paths that we have access to.
                 seen_eacces = true;

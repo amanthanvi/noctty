@@ -1442,6 +1442,40 @@ fn isAbsoluteWtf16(path: []const u16) bool {
 /// `NtCreateFile` of `sub_path_w` with std's former `OpenFile` mapping of
 /// statuses to errors, flags and retry on a pending delete.
 pub fn openFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HANDLE {
+    return openFileAs(.zig015, sub_path_w, options);
+}
+
+pub const OpenOnceError = OpenError || error{FileBusy};
+
+/// One `NtCreateFile` of `sub_path_w`, for a caller that must not wait for
+/// another handle to let go: one on the UI thread whose failure is retried
+/// on its own schedule (a later tick, the next save or start) or shown to the
+/// user, or one that asks whether a file is in use (re-check item 34; the
+/// 2026-11-27 ZIG017-SHARING-ONCE-01 entry in build-release-ci.md). It maps
+/// statuses as `openFile` does except the two that mean another handle has
+/// the file, which are `error.FileBusy` at once:
+/// `STATUS_SHARING_VIOLATION` (a holder that does not share the access asked
+/// for; `openFile` reads it as `AccessDenied`) and `STATUS_DELETE_PENDING`
+/// (deleted while another handle keeps it open; `openFile` waits until it is
+/// gone, for as long as that handle stays open). Zig 0.17's `std.Io` opens
+/// retry both for about four seconds and then report `FileBusy`.
+/// `STATUS_ACCESS_DENIED` stays `AccessDenied`, a permission refusal: the
+/// NTSTATUS tells the three apart, where a single `CreateFileW` gives Win32
+/// error 5 for both a pending delete and a denying ACL.
+pub fn openFileOnce(sub_path_w: []const u16, options: OpenFileOptions) OpenOnceError!HANDLE {
+    return openFileAs(.once, sub_path_w, options);
+}
+
+const BusyRule = enum { zig015, once };
+
+fn openFileAs(
+    comptime busy: BusyRule,
+    sub_path_w: []const u16,
+    options: OpenFileOptions,
+) (switch (busy) {
+    .zig015 => OpenError,
+    .once => OpenOnceError,
+})!HANDLE {
     if (std.mem.eql(u16, sub_path_w, &[_]u16{'.'}) and options.filter == .file_only) return error.IsDir;
     if (std.mem.eql(u16, sub_path_w, &[_]u16{ '.', '.' }) and options.filter == .file_only) return error.IsDir;
 
@@ -1498,7 +1532,10 @@ pub fn openFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
             .BAD_NETWORK_NAME => return error.NetworkNotFound, // \\server was found but \\server\share wasn't
             .NO_MEDIA_IN_DEVICE => return error.NoDevice,
             .INVALID_PARAMETER => unreachable,
-            .SHARING_VIOLATION => return error.AccessDenied,
+            .SHARING_VIOLATION => return switch (busy) {
+                .zig015 => error.AccessDenied,
+                .once => error.FileBusy,
+            },
             .ACCESS_DENIED => return error.AccessDenied,
             .PIPE_BUSY => return error.PipeBusy,
             .PIPE_NOT_AVAILABLE => return error.NoDevice,
@@ -1508,17 +1545,84 @@ pub fn openFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
             .NOT_A_DIRECTORY => return error.NotDir,
             .USER_MAPPED_FILE => return error.AccessDenied,
             .INVALID_HANDLE => unreachable,
-            .DELETE_PENDING => {
+            .DELETE_PENDING => switch (busy) {
                 // A file was here and is deleted, but the OS has not finished:
                 // retry the creation once it has. (Zig 0.15's
                 // `std.Thread.sleep(std.time.ns_per_ms)`, which was `Sleep(1)`.)
-                Sleep(1);
-                continue;
+                .zig015 => {
+                    Sleep(1);
+                    continue;
+                },
+                .once => return error.FileBusy,
             },
             .VIRUS_INFECTED, .VIRUS_DELETED => return error.AntivirusInterference,
             else => return windows.unexpectedStatus(rc),
         }
     }
+}
+
+pub const DirOpenOnceError = OpenOnceError || prefixed_path.Error || LockFileError;
+
+// The NT create dispositions std's `createFile` options select.
+const file_create: u32 = 2;
+const file_open_if: u32 = 3;
+const file_overwrite_if: u32 = 5;
+
+/// `std.Io.Dir.openFile` as one attempt (`openFileOnce`): the access, sharing
+/// (all of it), disposition, directory rule and lock std's open takes, and its
+/// error names, with `error.FileBusy` at once where std would retry a sharing
+/// violation or a pending delete for about four seconds. An absolute
+/// `sub_path` ignores `dir`, so `std.Io.Dir.cwd()` stands in for
+/// `openFileAbsolute`; a relative one is opened under `dir` as `NtCreateFile`
+/// reads it, so it must not hold `..`. Takes no `path_only`, no
+/// `resolve_beneath` and no unfollowed link.
+pub fn dirOpenFileOnce(dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) DirOpenOnceError!std.Io.File {
+    std.debug.assert(!options.path_only and !options.resolve_beneath and options.follow_symlinks);
+    const allow_directory = options.allow_directory and !options.isWrite();
+    const access: u32 = win32_types.SYNCHRONIZE |
+        @as(u32, if (options.isRead()) win32_types.GENERIC_READ else 0) |
+        @as(u32, if (options.isWrite()) win32_types.GENERIC_WRITE else 0);
+    const path_w = try prefixed_path.sliceToPrefixedFileW(sub_path);
+    const handle = try openFileOnce(path_w.span(), .{
+        .access_mask = access,
+        .dir = dir.handle,
+        .creation = win32_types.FILE_OPEN,
+        .filter = if (allow_directory) .any else .file_only,
+    });
+    return lockOpenedOnce(handle, options.lock, options.lock_nonblocking);
+}
+
+/// `std.Io.Dir.createFile` as one attempt, as `dirOpenFileOnce` is std's
+/// `openFile`: write access (and read with `.read`), the disposition its
+/// `exclusive` and `truncate` select, and its lock.
+pub fn dirCreateFileOnce(dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.CreateFileOptions) DirOpenOnceError!std.Io.File {
+    std.debug.assert(!options.resolve_beneath);
+    if (std.mem.eql(u8, sub_path, ".") or std.mem.eql(u8, sub_path, "..")) return error.IsDir;
+    const path_w = try prefixed_path.sliceToPrefixedFileW(sub_path);
+    const handle = try openFileOnce(path_w.span(), .{
+        .access_mask = win32_types.SYNCHRONIZE | win32_types.GENERIC_WRITE |
+            @as(u32, if (options.read) win32_types.GENERIC_READ else 0),
+        .dir = dir.handle,
+        .creation = if (options.exclusive) file_create else if (options.truncate) file_overwrite_if else file_open_if,
+    });
+    return lockOpenedOnce(handle, options.lock, options.lock_nonblocking);
+}
+
+/// std's lock after its open: the same one-byte range at offset 0, so a lock
+/// taken here and one std takes refuse each other.
+fn lockOpenedOnce(handle: HANDLE, lock: std.Io.File.Lock, nonblocking: bool) LockFileError!std.Io.File {
+    const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
+    const exclusive = switch (lock) {
+        .none => return file,
+        .shared => false,
+        .exclusive => true,
+    };
+    errdefer windows.CloseHandle(handle);
+    const range_off: windows.LARGE_INTEGER = 0;
+    const range_len: windows.LARGE_INTEGER = 1;
+    var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+    try lockFile(handle, null, null, null, &io_status_block, &range_off, &range_len, null, @intFromBool(nonblocking), @intFromBool(exclusive));
+    return file;
 }
 
 pub const DeviceIoControlError = error{
@@ -2138,4 +2242,240 @@ test "dosPathFromFinal strips the verbatim prefix and keeps UNC paths whole" {
     try expectNoDosForm("\\\\.\\C:\\a");
     try expectNoDosForm("relative\\a");
     try expectNoDosForm("");
+}
+
+/// Tests only: a file another handle holds, for the held-file tests of
+/// re-check item 34 (the 2026-11-27 ZIG017-SHARING-ONCE-01 entry in
+/// build-release-ci.md). The holder's sharing follows the access of the open
+/// under test: a reader meets `deny_read`, a writer or a creator `deny_write`
+/// (which would leave a reader free), and every open `delete_pending`.
+pub const HeldFile = struct {
+    keep: HANDLE,
+
+    pub const Kind = enum {
+        /// Held shared for writes and deletes only.
+        deny_read,
+        /// Held shared for reads only.
+        deny_write,
+        /// Deleted with the legacy disposition while this handle keeps it
+        /// open: until it closes, every open of the name fails with
+        /// `STATUS_DELETE_PENDING`; once it closes, the file is gone.
+        delete_pending,
+    };
+
+    /// The most a single attempt may take.
+    pub const once_bound_ms = 100;
+    /// The least std 0.17's retry takes: 13 sleeps of `(1 << n) >> 1` ms,
+    /// 4,095 ms (measured 4,214 to 4,258 ms in PLAN section 13.6, row h).
+    pub const std_retry_floor_ms = 4000;
+
+    /// Hold the existing file at the absolute WTF-8 `path`.
+    pub fn hold(path: []const u8, kind: Kind) !HeldFile {
+        const path_w = try prefixed_path.sliceToPrefixedFileW(path);
+        const share_all = win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE;
+        switch (kind) {
+            .deny_read => return .{ .keep = try open(
+                path_w.span(),
+                win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
+                win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
+            ) },
+            .deny_write => return .{ .keep = try open(path_w.span(), win32_types.GENERIC_READ, win32_types.FILE_SHARE_READ) },
+            .delete_pending => {
+                const keep = try open(path_w.span(), win32_types.GENERIC_READ, share_all);
+                errdefer windows.CloseHandle(keep);
+                const deleter = try open(path_w.span(), delete_access, share_all);
+                defer windows.CloseHandle(deleter);
+                // FILE_DISPOSITION_INFO { DeleteFile = TRUE }, the legacy
+                // class: the name stays until the last handle closes, where
+                // the POSIX disposition `DeleteFileW` uses on NTFS would
+                // unlink it at once.
+                var delete_file: u8 = 1;
+                if (SetFileInformationByHandle(deleter, file_disposition_info, &delete_file, 1) == 0) {
+                    return error.CouldNotHoldFile;
+                }
+                return .{ .keep = keep };
+            },
+        }
+    }
+
+    pub fn release(self: HeldFile) void {
+        windows.CloseHandle(self.keep);
+    }
+
+    pub fn now() std.Io.Timestamp {
+        return std.Io.Timestamp.now(std.testing.io, .awake);
+    }
+
+    /// Whole milliseconds since `start`, on the clock `now` reads.
+    pub fn msSince(start: std.Io.Timestamp) i64 {
+        return start.untilNow(std.testing.io, .awake).toMilliseconds();
+    }
+
+    const delete_access: DWORD = 0x00010000;
+    const file_disposition_info: c_int = 4;
+
+    extern "kernel32" fn SetFileInformationByHandle(
+        hFile: HANDLE,
+        FileInformationClass: c_int,
+        lpFileInformation: *anyopaque,
+        dwBufferSize: DWORD,
+    ) callconv(.winapi) BOOL;
+
+    fn open(path_w: [:0]const u16, access: DWORD, share: DWORD) !HANDLE {
+        const handle = CreateFileW(path_w.ptr, access, share, null, win32_types.OPEN_EXISTING, win32_types.FILE_ATTRIBUTE_NORMAL, null);
+        if (handle == windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
+        return handle;
+    }
+};
+
+/// The four accesses the single-attempt sites take, each as the fork's single
+/// attempt and as std 0.17's own open.
+const HeldAccess = enum {
+    /// A reader: the startup ledger, a Settings save's reads, the installs'.
+    read,
+    /// The Settings save's rewrite of a hard-linked config.
+    write,
+    /// Open-if-exists: the ledger's and the PowerShell install's lock files.
+    create,
+    /// Create-or-truncate: the ledger's in-place write, the palette list, the
+    /// PowerShell install's overwrite.
+    create_truncate,
+
+    fn once(access: HeldAccess, path: []const u8) DirOpenOnceError!std.Io.File {
+        const cwd = std.Io.Dir.cwd();
+        return switch (access) {
+            .read => dirOpenFileOnce(cwd, path, .{ .allow_directory = false }),
+            .write => dirOpenFileOnce(cwd, path, .{ .mode = .write_only }),
+            .create => dirCreateFileOnce(cwd, path, .{ .truncate = false, .read = true }),
+            .create_truncate => dirCreateFileOnce(cwd, path, .{ .truncate = true }),
+        };
+    }
+
+    fn std017(access: HeldAccess, path: []const u8) std.Io.File.OpenError!std.Io.File {
+        const io = std.testing.io;
+        return switch (access) {
+            .read => std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }),
+            .write => std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .write_only }),
+            .create => std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = false, .read = true }),
+            .create_truncate => std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }),
+        };
+    }
+};
+
+/// The held-file test for one access: unheld, the single attempt and std's
+/// open both open at once; held (`deny_read` for a reader, `deny_write` for
+/// the rest) and left pending delete, the single attempt is `FileBusy` within
+/// `once_bound_ms`, and std's open of the same held file, the positive
+/// control, is `FileBusy` only after `std_retry_floor_ms`. Prints each wait.
+fn expectHeldAccess(access: HeldAccess) !void {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const path = try std.fs.path.join(alloc, &.{ root, "held.bin" });
+    defer alloc.free(path);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "held.bin", .data = "x" });
+    {
+        const start = HeldFile.now();
+        const file = try access.once(path);
+        file.close(io);
+        const once_ms = HeldFile.msSince(start);
+        const std_start = HeldFile.now();
+        const std_file = try access.std017(path);
+        std_file.close(io);
+        const std_ms = HeldFile.msSince(std_start);
+        std.debug.print("held file: {t} unheld: one attempt opened after {d} ms, std after {d} ms\n", .{ access, once_ms, std_ms });
+        try std.testing.expect(once_ms < HeldFile.once_bound_ms);
+        try std.testing.expect(std_ms < HeldFile.once_bound_ms);
+    }
+
+    const holder: HeldFile.Kind = if (access == .read) .deny_read else .deny_write;
+    for ([_]HeldFile.Kind{ holder, .delete_pending }) |kind| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "held.bin", .data = "x" });
+        const held = try HeldFile.hold(path, kind);
+        defer held.release();
+        const start = HeldFile.now();
+        try std.testing.expectError(error.FileBusy, access.once(path));
+        const once_ms = HeldFile.msSince(start);
+        const std_start = HeldFile.now();
+        try std.testing.expectError(error.FileBusy, access.std017(path));
+        const std_ms = HeldFile.msSince(std_start);
+        std.debug.print("held file: {t} against {t}: one attempt FileBusy after {d} ms, std FileBusy after {d} ms\n", .{ access, kind, once_ms, std_ms });
+        try std.testing.expect(once_ms < HeldFile.once_bound_ms);
+        try std.testing.expect(std_ms > HeldFile.std_retry_floor_ms);
+    }
+}
+
+test "held file: a reader's single attempt is busy at once where std 0.17 waits (re-check item 34)" {
+    try expectHeldAccess(.read);
+}
+
+test "held file: a writer's single attempt is busy at once where std 0.17 waits (re-check item 34)" {
+    try expectHeldAccess(.write);
+}
+
+test "held file: an open-if-exists create's single attempt is busy at once where std 0.17 waits (re-check item 34)" {
+    try expectHeldAccess(.create);
+}
+
+test "held file: a truncating create's single attempt is busy at once where std 0.17 waits (re-check item 34)" {
+    try expectHeldAccess(.create_truncate);
+}
+
+test "held file: a single attempt reads a permission refusal as AccessDenied and takes std's lock" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "read-only.bin", .data = "x" });
+    try tmp.dir.createDir(io, "folder", .default_dir);
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const read_only = try std.fs.path.join(alloc, &.{ root, "read-only.bin" });
+    defer alloc.free(read_only);
+    const folder = try std.fs.path.join(alloc, &.{ root, "folder" });
+    defer alloc.free(folder);
+    const cwd = std.Io.Dir.cwd();
+
+    // A read-only file refuses a write for permission
+    // (`STATUS_ACCESS_DENIED`), not because another handle has it.
+    {
+        const file = try std.Io.Dir.openFileAbsolute(io, read_only, .{ .mode = .read_write });
+        defer file.close(io);
+        try file.setPermissions(io, @fromBackingInt(win32_types.FILE_ATTRIBUTE_READONLY));
+    }
+    defer if (std.Io.Dir.openFileAbsolute(io, read_only, .{})) |file| {
+        file.setPermissions(io, @fromBackingInt(win32_types.FILE_ATTRIBUTE_NORMAL)) catch {};
+        file.close(io);
+    } else |_| {};
+    const start = HeldFile.now();
+    try std.testing.expectError(error.AccessDenied, dirOpenFileOnce(cwd, read_only, .{ .mode = .write_only }));
+    try std.testing.expect(HeldFile.msSince(start) < HeldFile.once_bound_ms);
+    const reader = try dirOpenFileOnce(cwd, read_only, .{});
+    reader.close(io);
+
+    // std's directory rule: a folder opens for reading only when allowed.
+    try std.testing.expectError(error.IsDir, dirOpenFileOnce(cwd, folder, .{ .allow_directory = false }));
+    try std.testing.expectError(error.IsDir, dirCreateFileOnce(cwd, folder, .{}));
+    const dir_handle = try dirOpenFileOnce(cwd, folder, .{});
+    dir_handle.close(io);
+    const absent = try std.fs.path.join(alloc, &.{ root, "absent.bin" });
+    defer alloc.free(absent);
+    try std.testing.expectError(error.FileNotFound, dirOpenFileOnce(cwd, absent, .{}));
+
+    // A relative name opens under the directory handle.
+    const relative = try dirOpenFileOnce(tmp.dir, "read-only.bin", .{});
+    relative.close(io);
+
+    // The lock is std's: the one-byte range at offset 0, so a second
+    // exclusive lock, std's or this one's, is refused.
+    const lock_path = try std.fs.path.join(alloc, &.{ root, "x.lock" });
+    defer alloc.free(lock_path);
+    const first = try dirCreateFileOnce(cwd, lock_path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
+    defer first.close(io);
+    try std.testing.expectError(error.WouldBlock, dirCreateFileOnce(cwd, lock_path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true }));
+    try std.testing.expectError(error.WouldBlock, std.Io.Dir.createFileAbsolute(io, lock_path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true }));
 }

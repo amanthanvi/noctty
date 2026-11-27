@@ -85,7 +85,11 @@ pub fn digestOf(bytes: []const u8) Digest {
 /// read is `Unstable`.
 pub fn read(alloc: Allocator, path: []const u8) ReadError![]u8 {
     const io = global.io();
-    const file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
+    // One attempt, on the UI thread during a save: a holder that denies reads,
+    // or a pending delete, fails the read at once (`ReadFailed`, which stops
+    // the save and tells the user), where std 0.17 would wait about four
+    // seconds first (re-check item 34).
+    const file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return alloc.dupe(u8, ""),
         else => return error.ReadFailed,
     };
@@ -305,8 +309,9 @@ pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy:
         // Opened without truncating, which also works for a hidden or system
         // file (creating over one fails). A file that cannot be opened is
         // untouched, so the copy goes with it; from the first byte on the copy
-        // is the only complete one, and the log says where it is.
-        const file = std.Io.Dir.cwd().openFile(io, target.path, .{ .mode = .write_only }) catch return error.ReplaceFailed;
+        // is the only complete one, and the log says where it is. One
+        // attempt, as `read` (re-check item 34).
+        const file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), target.path, .{ .mode = .write_only }) catch return error.ReplaceFailed;
         defer file.close(io);
         temp_pending = false;
         try rewriteOpened(alloc, file, target.path, tmp_path, bytes, kept_copy);
