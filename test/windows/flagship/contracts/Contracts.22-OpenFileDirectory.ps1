@@ -4,7 +4,8 @@
 # shows the difference. Every read-mode open outside test code under `src/` must pass `.allow_directory = false`,
 # but the reviewed sites below: each keeps 0.17's default on purpose, by file and function, with a count, as the
 # residue list's "checked, left" rows and the lead's QF3 ruling give them (keep upstream's line where a kind check
-# follows the open). A write-mode open refuses a directory anyway. The fork's own `win32_sys.openFile` opens files
+# follows the open; such a site names its check, and holds only while the check follows the open in the same
+# block: council W2). A write-mode open refuses a directory anyway. The fork's own `win32_sys.openFile` opens files
 # only by default and is not this API. A new open, or one that loses the option, fails here.
 
 # Blanks comments, multi-line-string lines and string and character literals, keeping the length.
@@ -43,24 +44,45 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
         $depth = 1
         $open = $call.Index + $call.Length
         $callArgs = $null
+        $callEnd = -1
         foreach ($paren in [regex]::new('[()]').Matches($code, $open)) {
-            if ($paren.Value -eq '(') { $depth++ } else { $depth--; if ($depth -eq 0) { $callArgs = $code.Substring($open, $paren.Index - $open); break } }
+            if ($paren.Value -eq '(') { $depth++ } else { $depth--; if ($depth -eq 0) { $callArgs = $code.Substring($open, $paren.Index - $open); $callEnd = $paren.Index; break } }
         }
         if ($null -eq $callArgs) { continue }
         if ($callArgs -match '\ballow_directory\s*=\s*false\b') { continue }
         if ($callArgs -match '\.mode\s*=\s*\.(?:write_only|read_write)\b') { continue }
         $name = '(top level)'
         foreach ($function in $functions) { if ($function.Index -lt $call.Index) { $name = $function.Groups[1].Value } else { break } }
-        "${Path}:${name}"
+        # A site reviewed for the kind check that follows its open holds only while that check is still there,
+        # after the open and in the block that holds it (council W2).
+        $site = "${Path}:${name}"
+        $reviewed = @($script:OpenFileDirectoryReviewed | Where-Object { $_['Site'] -ceq $site -and $_['Check'] })
+        if ($reviewed.Length -eq 1 -and -not (Test-OpenFileKindCheck -Code $code -After $callEnd -Check $reviewed[0]['Check'])) {
+            $site += " (no $($reviewed[0]['Check']) after the open)"
+        }
+        $site
     }
+}
+
+# Whether `$Check` (its spaces read as any whitespace) appears in `$Code` after offset `$After` and before the
+# end of the block that holds it.
+function Test-OpenFileKindCheck([string] $Code, [int] $After, [string] $Check) {
+    $end = $Code.Length
+    $depth = 0
+    foreach ($brace in [regex]::new('[{}]').Matches($Code, $After)) {
+        if ($brace.Value -eq '{') { $depth++ } elseif ($depth -eq 0) { $end = $brace.Index; break } else { $depth-- }
+    }
+    $pattern = '(?<![\w.])' + [regex]::Escape($Check).Replace('\ ', '\s*')
+    return [regex]::new($pattern).Match($Code.Substring($After, $end - $After)).Success
 }
 
 # The reviewed read-mode opens that keep 0.17's default, each `path:function` with how many it holds and why.
 $script:OpenFileDirectoryReviewed = @(
-    # A kind check follows the open (the lead's QF3 ruling: keep upstream's line).
-    @{ Site = 'src/os/path.zig:expand'; Opens = 1; Why = 'QF3-1: its stat skips a directory and the search goes on' }
-    @{ Site = 'src/config/file_load.zig:open'; Opens = 1; Why = 'QF3-2: its stat gives NotAFile, which loadFile logs and skips' }
-    @{ Site = 'src/config/Config.zig:loadRecursiveFiles'; Opens = 1; Why = 'its stat reports the file type and skips it' }
+    # A kind check follows the open (the lead's QF3 ruling: keep upstream's line), named as `Check`: the site
+    # holds only while that check follows its open (council W2).
+    @{ Site = 'src/os/path.zig:expand'; Opens = 1; Check = 'stat.kind != .directory'; Why = 'QF3-1: its stat skips a directory and the search goes on' }
+    @{ Site = 'src/config/file_load.zig:open'; Opens = 1; Check = 'switch (stat.kind)'; Why = 'QF3-2: its stat gives NotAFile, which loadFile logs and skips' }
+    @{ Site = 'src/config/Config.zig:loadRecursiveFiles'; Opens = 1; Check = 'switch (stat.kind)'; Why = 'its stat reports the file type and skips it' }
     # Not Windows code (residue: checked, left).
     @{ Site = 'src/os/cgroup.zig:current'; Opens = 1; Why = 'a Linux /proc read, where 0.15 opened a directory too' }
     @{ Site = 'src/os/kernel_info.zig:getKernelInfo'; Opens = 1; Why = 'a Linux /proc read' }
@@ -122,6 +144,34 @@ if ($mutantProblems -cnotcontains 'src/pty.zig:openConsoleMatchesArchitecture op
     throw 'The open-file directory check passed a product open that lost .allow_directory = false.'
 }
 $openFileControls++
+# Council W2: each kind-check site, its check removed, fails.
+function Remove-OpenFileSwitch([string] $Text, [string] $Function) {
+    $at = $Text.IndexOf('switch (stat.kind) {', $Text.IndexOf("fn $Function("))
+    if ($at -lt 0) { return $Text }
+    $depth = 0
+    foreach ($brace in [regex]::new('[{}]').Matches($Text, $at)) {
+        if ($brace.Value -eq '{') { $depth++ } else { $depth--; if ($depth -eq 0) { return $Text.Remove($at, $brace.Index + 1 - $at) } }
+    }
+    return $Text
+}
+foreach ($kindControl in @(
+        @{ Path = 'src/os/path.zig'; Function = 'expand'; Mutate = { param($t) $t.Replace('if (stat.kind != .directory and isExecutable(stat.permissions)) {', 'if (isExecutable(stat.permissions)) {') } }
+        @{ Path = 'src/config/file_load.zig'; Function = 'open'; Mutate = { param($t) Remove-OpenFileSwitch $t 'open' } }
+        @{ Path = 'src/config/Config.zig'; Function = 'loadRecursiveFiles'; Mutate = { param($t) Remove-OpenFileSwitch $t 'loadRecursiveFiles' } }
+    )) {
+    $kindPath = $kindControl['Path']
+    $kindText = Get-Content -LiteralPath (Join-Path $repoRoot $kindPath) -Raw
+    $kindMutant = & $kindControl['Mutate'] $kindText
+    if ([string]::Equals($kindMutant, $kindText, [StringComparison]::Ordinal)) { throw "The kind-check control changed nothing in $kindPath." }
+    $kindHits = @{} + $openFileHits
+    $kindHits[$kindPath] = @(Get-OpenFileDirectoryHits -ZigText $kindMutant -Path $kindPath)
+    $site = @($script:OpenFileDirectoryReviewed | Where-Object { $_['Site'] -ceq "${kindPath}:$($kindControl['Function'])" })[0]
+    $want = "$($site['Site']) (no $($site['Check']) after the open) opens without .allow_directory = false (1, reviewed 0)"
+    if ((Get-OpenFileDirectoryProblems -HitsByFile $kindHits) -cnotcontains $want) {
+        throw "The open-file directory check kept $($site['Site']) reviewed after its kind check was removed."
+    }
+    $openFileControls++
+}
 foreach ($sample in @(
         @{ Text = "test `"t`" {`n    const f = try dir.openFile(io, `"x`", .{});`n}`n"; Hits = 0 }
         @{ Text = "fn w() !void {`n    const f = try dir.openFile(io, `"x`", .{ .mode = .write_only });`n}`n"; Hits = 0 }
