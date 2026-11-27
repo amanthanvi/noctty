@@ -292,8 +292,10 @@ that govern each symbol you change, or that none does.
   `windows_visual_studio.devShellPrelude`, `win32_powershell_install.zig`):
   the OSC 133 and OSC 7 marks a shell emits and the directory and host names
   in them, Nushell's `@complete external` floor, PSReadLine hooks, execution
-  policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty or
-  modifyOtherKeys flags set (`CSI <99u`, `CSI >4;0m`).
+  policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty
+  keyboard, modifyOtherKeys or Kitty paste-event modes set (`CSI <99u`,
+  `CSI >4;0m`, `CSI ?5522l`; cmd's PROMPT: `buildCmdPrompt`,
+  `cmd_prompt_prefix`).
 - [terminal-core.md](docs/agents/log/terminal-core.md): `src/terminal/` (VT
   parser limits, `PageList` and its page serials (`page_serial_epoch`,
   `nodeIsValid`, the source renewal in `PageList.split`), `PageList.Node`'s
