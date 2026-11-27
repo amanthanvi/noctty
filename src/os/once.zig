@@ -176,21 +176,37 @@ test "once: waiters sleep on the state until the first call wakes them" {
     };
 
     var first = try std.Thread.spawn(.{}, Slow.worker, .{});
-    while (!Slow.entered.load(.acquire)) std.Thread.yield() catch {};
     var waiters: [4]std.Thread = undefined;
-    for (&waiters) |*t| t.* = try std.Thread.spawn(.{}, Slow.worker, .{});
-    // While `f` runs, no caller returns, and the waiters sleep: in 50 ms a
-    // parked waiter goes round its loop about once (each enters it, and a
-    // spurious wake may add a turn), where a waiter that yielded or spun
-    // would go round thousands of times (council F7).
-    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
-    try std.testing.expectEqual(@as(u32, 0), Slow.returned.load(.monotonic));
-    try std.testing.expectEqual(Slow.flag.state.load(.acquire), 1);
-    const loops = Slow.flag.wait_loops.load(.monotonic);
-    try std.testing.expect(loops <= waiters.len * 8);
-    Slow.release.store(1, .release);
-    first.join();
-    for (waiters) |t| t.join();
+    var spawned: usize = 0;
+    {
+        // Every thread started here is released and joined, a failed check
+        // included, before the test returns (council G8).
+        defer {
+            Slow.release.store(1, .release);
+            first.join();
+            for (waiters[0..spawned]) |t| t.join();
+        }
+        while (!Slow.entered.load(.acquire)) std.Thread.yield() catch {};
+        while (spawned < waiters.len) : (spawned += 1) waiters[spawned] = try std.Thread.spawn(.{}, Slow.worker, .{});
+        // First, with a bound, every waiter is in the wait path: each goes
+        // round its loop once before its first wait (council G8: a count of
+        // 0 passed the old bound with waiters that had not got there).
+        var waited_ms: u32 = 0;
+        while (Slow.flag.wait_loops.load(.monotonic) < waiters.len) : (waited_ms += 1) {
+            if (waited_ms >= 5000) return error.TestWaitersNeverWaited;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        // Then, while `f` still runs, no caller returns and the waiters
+        // sleep: over 50 ms a parked waiter goes round again at most on a
+        // spurious wake, where one that yielded or spun would go round
+        // thousands of times (council F7).
+        const before = Slow.flag.wait_loops.load(.monotonic);
+        std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+        const after = Slow.flag.wait_loops.load(.monotonic);
+        try std.testing.expectEqual(@as(u32, 0), Slow.returned.load(.monotonic));
+        try std.testing.expectEqual(Slow.flag.state.load(.acquire), 1);
+        try std.testing.expect(after - before <= waiters.len * 2);
+    }
     try std.testing.expectEqual(@as(u32, waiters.len + 1), Slow.returned.load(.monotonic));
 }
 
