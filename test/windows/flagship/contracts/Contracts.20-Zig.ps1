@@ -132,7 +132,8 @@ function Get-AbiPinProblems {
     param([string]$Source)
 
     $problems = [Collections.Generic.List[string]]::new()
-    $aliases = @{}
+    # Ordinal, as Zig's names are (council Z4): a hashtable would fold nested fields `part` and `Part` together.
+    $aliases = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
     foreach ($alias in [regex]::Matches($Source, '(?m)^[ \t]*const ([A-Za-z_][A-Za-z0-9_]*) = @FieldType\(([A-Za-z_][A-Za-z0-9_]*), "([A-Za-z_][A-Za-z0-9_]*)"\);')) {
         $aliases["$($alias.Groups[2].Value).$($alias.Groups[3].Value)"] = $alias.Groups[1].Value
     }
@@ -240,7 +241,16 @@ foreach ($control in $abiPinControls) {
         throw "Win32 ABI pin floor did not reject: $($control.Expect) (got: $($problems -join '; '))."
     }
 }
-Write-Host "Win32 ABI pin floor: $($abiPinResult.Top) structs and $($abiPinResult.Nested) nested members pinned; $($abiPinControls.Count)/$($abiPinControls.Count) mutations rejected"
+# Council Z4: a fully pinned struct whose nested fields differ only in case passes (an ordinal alias lookup).
+$abiCaseProbe = "pub const CASE_PROBE = extern struct {`n    part: extern struct {`n        a: u32,`n    },`n    Part: extern struct {`n        b: u32,`n    },`n};`n`n" +
+    "test `"case probe`" {`n    const CaseLower = @FieldType(CASE_PROBE, `"part`");`n    const CaseUpper = @FieldType(CASE_PROBE, `"Part`");`n" +
+    "    try testing.expectEqual(@as(usize, 8), @sizeOf(CASE_PROBE));`n    try testing.expectEqual(@as(usize, 0), @offsetOf(CASE_PROBE, `"part`"));`n" +
+    "    try testing.expectEqual(@as(usize, 4), @offsetOf(CASE_PROBE, `"Part`"));`n    try testing.expectEqual(@as(usize, 4), @sizeOf(CaseLower));`n" +
+    "    try testing.expectEqual(@as(usize, 0), @offsetOf(CaseLower, `"a`"));`n    try testing.expectEqual(@as(usize, 4), @sizeOf(CaseUpper));`n" +
+    "    try testing.expectEqual(@as(usize, 0), @offsetOf(CaseUpper, `"b`"));`n}`n`n"
+$abiCaseProblems = @((Get-AbiPinProblems $abiPinSource.Replace('pub const FILETIME = extern struct {', $abiCaseProbe + 'pub const FILETIME = extern struct {')).Problems)
+if ($abiCaseProblems.Count -ne 0) { throw "Win32 ABI pin floor refused a fully pinned struct with fields part and Part: $($abiCaseProblems -join '; ')." }
+Write-Host "Win32 ABI pin floor: $($abiPinResult.Top) structs and $($abiPinResult.Nested) nested members pinned; $($abiPinControls.Count)/$($abiPinControls.Count) mutations rejected; 1 passing control"
 
 
 $win32ModuleImports = @(
