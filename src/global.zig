@@ -37,6 +37,25 @@ comptime {
 /// backend.
 pub const xev = @import("xev").Dynamic;
 
+/// The global `Io`'s pool (the fork's decision 19 for Zig 0.17): beyond two
+/// busy workers an `async` task runs inline on its caller, and `concurrent`
+/// gets at most four, so one shared pool of at most max(2, 4) = 4 workers
+/// (`std.Progress`, if started, takes one of them). Each worker gets std's
+/// default stack (`std.Thread.SpawnConfig.default_stack_size`, 16 MiB),
+/// stated here so the soak's reserve and commit measurements can set it; a
+/// cut below it needs a stack-use measurement, as the surface thread's had.
+/// An `Io` task enters its thread role with `thread_role.enterIfNone`
+/// (`sync/io_tasks.zig`).
+pub const io_pool: struct {
+    async_limit: std.Io.Limit,
+    concurrent_limit: std.Io.Limit,
+    stack_size: usize,
+} = .{
+    .async_limit = .limited(2),
+    .concurrent_limit = .limited(4),
+    .stack_size = std.Thread.SpawnConfig.default_stack_size,
+};
+
 /// Global process state. This is initialized in main() for exe artifacts and
 /// by ghostty_init() for lib artifacts. Most other methods in this file will
 /// retrieve items stored in this state.
@@ -129,6 +148,9 @@ pub fn init(opts: InitOpts) !void {
     self.io_impl = .init(self.alloc, .{
         .argv0 = .init(self.args),
         .environ = self.environ,
+        .async_limit = io_pool.async_limit,
+        .concurrent_limit = io_pool.concurrent_limit,
+        .stack_size = io_pool.stack_size,
     });
 
     // Discover and save the temporary directory path
