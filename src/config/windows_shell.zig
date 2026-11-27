@@ -7313,3 +7313,41 @@ test "utf8-console cmd preamble preserves option-only switches" {
         }
     }
 }
+
+test "held file: the PATH search goes past a candidate another handle holds (re-check item 34)" {
+    // Profile discovery's PATH search (`internal_os.path.expand`) keeps std's
+    // retry on its worker: a candidate held without read sharing was
+    // `AccessDenied` on Zig 0.15 and skipped; 0.17 waits about four seconds
+    // and reports `FileBusy`, which is skipped the same way.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "first", .default_dir);
+    try tmp.dir.createDir(io, "second", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "first/held-tool.exe", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "second/held-tool.exe", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const first = try std.fs.path.join(alloc, &.{ root, "first" });
+    defer alloc.free(first);
+    const second = try std.fs.path.join(alloc, &.{ root, "second" });
+    defer alloc.free(second);
+    const held_path = try std.fs.path.join(alloc, &.{ first, "held-tool.exe" });
+    defer alloc.free(held_path);
+    const search = try std.fmt.allocPrint(alloc, "{s};{s}", .{ first, second });
+    defer alloc.free(search);
+    var environ_map: std.process.Environ.Map = .init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("PATH", search);
+
+    const held = try win32_sys.HeldFile.hold(held_path, .deny_read);
+    defer held.release();
+    const start = win32_sys.HeldFile.now();
+    const found = (try internal_os.path.expand(io, alloc, &environ_map, "held-tool.exe")).?;
+    defer alloc.free(found);
+    const ms = win32_sys.HeldFile.msSince(start);
+    std.debug.print("held file: PATH search past deny_read: found the next after {d} ms\n", .{ms});
+    try std.testing.expect(std.mem.startsWith(u8, found, second));
+    try std.testing.expect(ms > win32_sys.HeldFile.std_retry_floor_ms);
+}
