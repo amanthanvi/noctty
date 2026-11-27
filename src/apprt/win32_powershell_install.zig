@@ -157,7 +157,11 @@ pub fn installIfStale(alloc: Allocator, path: []const u8) InstallResult {
     // leaves it to that one and the next launch.
     const lock_path = std.mem.concat(alloc, u8, &.{ path, ".lock" }) catch return .failed;
     defer alloc.free(lock_path);
-    const lock = std.Io.Dir.createFileAbsolute(global.io(), lock_path, .{
+    // One attempt, at start on the UI thread (re-check item 34): a lock file
+    // another program holds, or one left pending delete, is `FileBusy` at
+    // once and installs unlocked as below, where std 0.17 would wait about
+    // four seconds first.
+    const lock = win32_sys.dirCreateFileOnce(std.Io.Dir.cwd(), lock_path, .{
         .truncate = false,
         .lock = .exclusive,
         .lock_nonblocking = true,
@@ -206,8 +210,11 @@ const Installed = struct {
 /// Null when there is no file.
 fn readInstalled(alloc: Allocator, path: []const u8) !?Installed {
     const io = global.io();
-    // `allow_directory = false` keeps 0.15's file-only open.
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
+    // `allow_directory = false` keeps 0.15's file-only open. One attempt
+    // (re-check item 34): a copy that is busy now (`FileBusy`: a holder that
+    // denies reads, or a pending delete) is left for the next launch at once,
+    // where std 0.17 would wait about four seconds first.
+    const file = win32_sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -237,8 +244,10 @@ fn writeAtomically(path: []const u8) !InstallResult {
     win32_terminfo.writeAtomically(dir, basename, integration_script) catch |err| {
         log.debug("powershell integration atomic write failed target={s} err={}", .{ basename, err });
 
-        // Fallback: direct overwrite.
-        const file = try dir.createFile(io, basename, .{ .truncate = true });
+        // Fallback: direct overwrite. One attempt (re-check item 34): the
+        // holder that refused the rename usually refuses this open too, and
+        // std 0.17 would wait about four seconds for it first.
+        const file = try win32_sys.dirCreateFileOnce(dir, basename, .{ .truncate = true });
         defer file.close(io);
         try file.writeStreamingAll(io, integration_script);
     };
@@ -1831,6 +1840,49 @@ test "installIfStale: a revision line that cannot be read leaves the copy alone"
     const script = try fx.read();
     defer std.testing.allocator.free(script);
     try std.testing.expectEqualStrings(garbled, script);
+}
+
+test "held file: the PowerShell install leaves a busy copy at once, and fails at once on a held target (re-check item 34)" {
+    // A reader's holder, or a pending delete: the copy is left for the next
+    // launch at once.
+    for ([_]win32_sys.HeldFile.Kind{ .deny_read, .delete_pending }) |kind| {
+        var busy_fx = try InstallFixture.init("# an older script\n");
+        defer busy_fx.deinit();
+        const held = try win32_sys.HeldFile.hold(busy_fx.path, kind);
+        defer held.release();
+        const start = win32_sys.HeldFile.now();
+        try std.testing.expectError(error.FileBusy, readInstalled(std.testing.allocator, busy_fx.path));
+        try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, busy_fx.path));
+        const ms = win32_sys.HeldFile.msSince(start);
+        std.debug.print("held file: PowerShell install against {t}: skipped after {d} ms\n", .{ kind, ms });
+        try std.testing.expect(ms < win32_sys.HeldFile.once_bound_ms);
+    }
+
+    // A holder that shares reads only (PowerShell's own reader shares no
+    // more): the stale copy reads, and the rename over it keeps std's call,
+    // which does not wait here. The target's holder shares no delete, so
+    // `FileRenameInformationEx` returns `STATUS_SHARING_VIOLATION`, which std
+    // 0.17's rename has no arm for: `error.Unexpected` at once, as on 0.15
+    // (std retries only `STATUS_ACCESS_DENIED` from a rename; in a Debug
+    // build `unexpectedStatus` also prints a stack trace, hence the looser
+    // bound). The overwrite after it is one attempt, so the install fails at
+    // once and leaves the copy for the next launch.
+    var fx = try InstallFixture.init("# an older script\n");
+    defer fx.deinit();
+    {
+        const held = try win32_sys.HeldFile.hold(fx.path, .deny_write);
+        defer held.release();
+        const start = win32_sys.HeldFile.now();
+        try std.testing.expectEqual(InstallResult.failed, installIfStale(std.testing.allocator, fx.path));
+        const ms = win32_sys.HeldFile.msSince(start);
+        std.debug.print("held file: PowerShell install against deny_write: failed after {d} ms\n", .{ms});
+        try std.testing.expect(ms < 1000);
+    }
+    const kept = try fx.read();
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("# an older script\n", kept);
+    // Unheld, the next launch installs it.
+    try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fx.path));
 }
 
 test "installIfStale: a copy that cannot be read is left for the next launch, one too large to be a script is replaced" {

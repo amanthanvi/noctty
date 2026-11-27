@@ -25,6 +25,7 @@ const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
 const global = @import("../global.zig");
 const terminfo = @import("../terminfo/main.zig");
+const win32_sys = @import("win32/sys.zig");
 const log = std.log.scoped(.win32_terminfo);
 
 /// The file, in the database directory, that records the SHA-256 of the
@@ -186,7 +187,7 @@ fn installFiles(
         var sub_dir = try dir.createDirPathOpen(io, &hex, .{});
         defer sub_dir.close(io);
 
-        const existing = sub_dir.readFileAlloc(io, name, alloc, .limited(64 * 1024 + 1)) catch |err| switch (err) {
+        const existing = readFileAllocOnce(sub_dir, name, alloc, .limited(64 * 1024 + 1)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -232,12 +233,40 @@ fn sha256(data: []const u8) [32]u8 {
 
 fn readRecordedHash(dir: std.Io.Dir) ?[32]u8 {
     var buf: [128]u8 = undefined;
-    const contents = dir.readFile(global.io(), record_name, &buf) catch return null;
+    const contents = readFileOnce(dir, record_name, &buf) catch return null;
     const hex = std.mem.trim(u8, contents, &std.ascii.whitespace);
     var hash: [32]u8 = undefined;
     const decoded = std.fmt.hexToBytes(&hash, hex) catch return null;
     if (decoded.len != hash.len) return null;
     return hash;
+}
+
+/// `dir.readFileAlloc` with one attempt at the open (`win32_sys.dirOpenFileOnce`;
+/// re-check item 34): the install runs on the UI thread at start, and a file
+/// another program holds without sharing reads, or one left pending delete, is
+/// `FileBusy` at once, where std 0.17 would wait about four seconds first. The
+/// install fails and the next start tries again.
+fn readFileAllocOnce(dir: std.Io.Dir, name: []const u8, alloc: Allocator, limit: std.Io.Limit) ![]u8 {
+    const io = global.io();
+    const file = try win32_sys.dirOpenFileOnce(dir, name, .{ .allow_directory = false });
+    defer file.close(io);
+    var reader = file.reader(io, &.{});
+    return reader.interface.allocRemaining(alloc, limit) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.OutOfMemory, error.StreamTooLong => |e| return e,
+    };
+}
+
+/// `dir.readFile` with one attempt at the open, as `readFileAllocOnce`.
+fn readFileOnce(dir: std.Io.Dir, name: []const u8, buffer: []u8) ![]u8 {
+    const io = global.io();
+    const file = try win32_sys.dirOpenFileOnce(dir, name, .{ .allow_directory = false });
+    defer file.close(io);
+    var reader = file.reader(io, &.{});
+    const n = reader.interface.readSliceShort(buffer) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+    };
+    return buffer[0..n];
 }
 
 /// Write through a temporary file and a rename, so a reader never sees a
@@ -418,6 +447,30 @@ test "install counts a file that already holds the entry as its own" {
     const kept = try paths.read("74/test");
     defer testing.allocator.free(kept);
     try testing.expectEqualStrings("the user's entry", kept);
+}
+
+test "held file: install fails at once on an entry another handle holds (re-check item 34)" {
+    // The install runs on the UI thread at start: an entry that cannot be
+    // read now fails it at once, and the next start installs.
+    for ([_]win32_sys.HeldFile.Kind{ .deny_read, .delete_pending }) |kind| {
+        var paths: TestPaths = try .init();
+        defer paths.deinit();
+        try paths.put("78/xterm-test", "old entry");
+        try paths.record("old entry");
+        const entry_path = try std.fs.path.join(testing.allocator, &.{ paths.db, "78", "xterm-test" });
+        defer testing.allocator.free(entry_path);
+        {
+            const held = try win32_sys.HeldFile.hold(entry_path, kind);
+            defer held.release();
+            const start = win32_sys.HeldFile.now();
+            try testing.expectEqual(.failed, install(testing.allocator, test_source, paths.db));
+            const ms = win32_sys.HeldFile.msSince(start);
+            std.debug.print("held file: terminfo install against {t}: failed after {d} ms\n", .{ kind, ms });
+            try testing.expect(ms < win32_sys.HeldFile.once_bound_ms);
+        }
+        try testing.expect(install(testing.allocator, test_source, paths.db) != .failed);
+        try testing.expect(hasEntry(testing.allocator, paths.db, "xterm-test"));
+    }
 }
 
 test "install does not create a missing home" {
