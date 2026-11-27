@@ -16,8 +16,8 @@
 //! the same addresses (a scratch probe with the wrapper's inline-method
 //! shape): the same bytes for a plain function, a struct method, a nested
 //! container's function, both instantiations of a generic method (each
-//! bare), a comptime-parameter instantiation (`name__anon_N`, which the
-//! compare strips), a test block (`test.<name>`, a non-ASCII name included)
+//! bare), a comptime-parameter instantiation (`name__anon_N`, `name__func_N`
+//! on 0.17.1, either of which the compare strips), a test block (`test.<name>`, a non-ASCII name included)
 //! and a site in an `inline fn` (its caller, as §19.1 says of 0.15.2); and the
 //! line table gives the acquiring function's file and line, not the
 //! wrapper's, for the call `StateMutex`'s inline method makes.
@@ -855,18 +855,23 @@ test "symbolise names each site shape's acquiring function in this file" {
     try expectShapeLine(lines.next().?, "symbolisePlainSite");
     try expectShapeLine(lines.next().?, "symboliseMethodSite");
     try expectShapeLine(lines.next().?, "symboliseNestedSite");
-    // Each instantiation is its own symbol, its suffix the compare's to strip.
+    // Each instantiation is its own symbol, its suffix the compare's to strip:
+    // `__anon_N` on 0.15.2, `__func_N` on 0.17.1 (`isolated.ShapeLine`).
     const first = lines.next().?;
     const second = lines.next().?;
     if (names_attributed) {
-        try testing.expect(std.mem.startsWith(u8, first, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
-        try testing.expect(std.mem.startsWith(u8, second, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
+        errdefer std.debug.print("symbolise: the instantiation lines are\n{s}\n{s}\n", .{ first, second });
+        const instantiation = "src/sync/symbolise.zig:symboliseComptimeSite" ++
+            if (builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) == .lt) "__anon_" else "__func_";
+        try expectInstantiationLine(first, instantiation);
+        try expectInstantiationLine(second, instantiation);
         try testing.expect(!std.mem.eql(u8, first, second));
     } else {
         try expectShapeLine(first, null);
         try expectShapeLine(second, null);
     }
-    // 0.15.2 attributes a site in an inline fn to its caller (§19.1).
+    // 0.15.2 attributes a site in an inline fn to its caller (§19.1), and
+    // 0.17.1 Debug does the same (this test, 1B.6).
     try expectShapeLine(lines.next().?, if (builtin.mode == .debug) "symboliseInlineCaller" else null);
     try expectShapeLine(lines.next().?, "test.symbolise names each site shape's acquiring function in this file");
     try testing.expectEqualStrings(
@@ -916,6 +921,18 @@ fn expectShapeLine(line: []const u8, comptime name: ?[]const u8) !void {
     }
     try testing.expect(std.mem.endsWith(u8, line, " ui"));
     try testing.expect(line[0] != '?' and std.mem.indexOf(u8, line, ".zig:") != null);
+}
+
+/// One symbolised line of a comptime-parameter instantiation in the
+/// site-shape test: `prefix` (the key up to the suffix's number), the
+/// instantiation's decimal number, and role `ui`.
+fn expectInstantiationLine(line: []const u8, prefix: []const u8) !void {
+    try testing.expect(std.mem.startsWith(u8, line, prefix));
+    try testing.expect(std.mem.endsWith(u8, line, " ui"));
+    // The prefix ends in `_`, so the role's space is past it.
+    const number = line[prefix.len .. line.len - " ui".len];
+    try testing.expect(number.len > 0);
+    for (number) |ch| try testing.expect(std.ascii.isDigit(ch));
 }
 
 /// The test block's own site (a test body is `test.<name>`).

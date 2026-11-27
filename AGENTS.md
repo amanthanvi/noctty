@@ -656,8 +656,10 @@ that govern each symbol you change, or that none does.
 - [config.md](docs/agents/log/config.md): config loading and reload outside
   the Settings window: the config file reader (`cli/args.zig` `LineIterator`,
   `streamDelimiterEnding`, `parseIntoField`, `ProfileMap`,
-  `Config.file_read_buffer_len`), Windows environment expansion
-  (`src/config/windows_shell.zig` `expandProfileText`), `--config-file` and
+  `Config.file_read_buffer_len`), a `command-palette-entry` action and the
+  tagged-union parse it takes (`parseTaggedUnion`), Windows environment
+  expansion (`src/config/windows_shell.zig` `expandProfileText`),
+  `--config-file` and
   `startup_cwd` on reload, diagnostics shown in the GUI, conditional replay
   (`Replay.Iterator`, `Config.finalize`, `loadTheme`,
   `changeConditionalState`), command-line values put

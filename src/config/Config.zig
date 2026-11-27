@@ -13364,7 +13364,9 @@ test "clone command C view survives source config deinit" {
         try testing.expectEqualStrings(std.mem.span(expected.title), std.mem.span(commands.commands[i].title));
     }
     const custom = commands.commands[commands.len - 1];
-    try testing.expectEqualStrings("open_config", std.mem.span(custom.action));
+    // Since Ghostty 1.4 `open_config` has a parameter, which the entry left
+    // at its default and the C view writes out, as `+list-keybinds` does.
+    try testing.expectEqualStrings("open_config:os_open", std.mem.span(custom.action));
     try testing.expectEqualStrings("Custom", std.mem.span(custom.title));
     try testing.expectEqualStrings("", std.mem.span(custom.description));
 
@@ -13982,8 +13984,11 @@ test "scrollback limits" {
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
+    // The fork keeps 10 MB where upstream 1.4 has 50 MB: Windows does not
+    // compress scrollback, so the history the limit allows stays resident
+    // (the field's documentation).
     try testing.expectEqual(
-        @as(usize, 50_000_000),
+        @as(usize, 10_000_000),
         cfg.@"scrollback-limit-bytes".value,
     );
     try testing.expectEqual(
@@ -14028,7 +14033,7 @@ test "scrollback limits" {
     try cfg.loadIter(alloc, &reset_it);
 
     try testing.expectEqual(
-        @as(usize, 50_000_000),
+        @as(usize, 10_000_000),
         cfg.@"scrollback-limit-bytes".value,
     );
     try testing.expectEqual(
