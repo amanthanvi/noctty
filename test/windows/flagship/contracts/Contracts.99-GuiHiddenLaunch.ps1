@@ -943,13 +943,15 @@ foreach ($good in @(
         @{ Name = 'a launched CLI that had exited before its image was read, its PID reused by a later exited joiner'; Rows = (@(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }) + @(& $guiRow 600 $null 100 61 -Exited $true)); Total = 11; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
     )) {
     $verdict = & $guiVerdict $good.Rows $good.Total 1
-    # Council R2 on #768: N7's positive row is the forward that returns at once, so its child's arguments name no
-    # action (`+name`) before `-e`; an IPC action such as +list-windows makes the wrapper wait instead.
+    # Council R2 and S2 on #768: N7's positive row is the forward that returns at once, so its child's arguments up to
+    # and including `-e` are exactly the run's known actionless GUI launch. The wrapper waits for its child on anything
+    # its action detector reads as an action before `-e`: a `+name`, `--version`, `--help` or `-h` among them.
     if ($good.Actionless) {
-        $guiForwardArgv = @(@($good.Rows | Where-Object { $_.Pid -eq $good.Actionless })[0].Argv | Select-Object -Skip 1)
-        $guiBeforeCommand = $(if ($guiForwardArgv -ccontains '-e') { $guiForwardArgv[0..([array]::IndexOf($guiForwardArgv, '-e'))] } else { $guiForwardArgv })
-        if ($guiForwardArgv.Count -eq 0 -or @($guiBeforeCommand | Where-Object { $_ -like '+*' }).Count -ne 0) {
-            throw "The N7 forward fixture ($($good.Name)) names an action before -e, so its wrapper would not return at once."
+        $guiForwardArgv = @(@(@($good.Rows | Where-Object { $_.Pid -eq $good.Actionless })[0].Argv) | Select-Object -Skip 1)
+        $guiActionlessHead = @('--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e')
+        $guiForwardHead = @($guiForwardArgv | Select-Object -First $guiActionlessHead.Count)
+        if (($guiForwardHead -join "`n") -cne ($guiActionlessHead -join "`n")) {
+            throw "The N7 forward fixture ($($good.Name)) is not the known actionless launch up to -e, so its wrapper may not return at once."
         }
     }
     if (-not $verdict.passed -or $verdict[$good.Exited] -ne 1 -or $verdict[$good.Live] -ne 0) {
