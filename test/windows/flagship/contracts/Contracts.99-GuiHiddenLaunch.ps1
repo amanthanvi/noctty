@@ -900,6 +900,12 @@ foreach ($bad in @(
         @{ Name = 'a noctty forwarded by an exited launched CLI, its own command line unread'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Exited $true } else { $_ } }); Total = 11; Shells = 1 }
         @{ Name = 'a noctty created before the exited launched CLI that is its parent'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 59 -Argv $guiActionless } else { $_ } }); Total = 11; Shells = 1; Unaccounted = 1 }
         @{ Name = 'a noctty forwarded by an exited CLI the leaf started itself'; Rows = (& $guiWith @((& $guiRow 900 'noctty.com' 100 90 -Exited $true), (& $guiRow 910 'noctty.exe' 900 91 -Argv $guiActionless))); Total = 13; Shells = 1; Unaccounted = 2 }
+        # Council S3 on #768 (Opus's row): the forwarder's creation guard under PID reuse. $accounted is keyed by PID, so
+        # a CLI (950, created 98, exited, command line unread) whose PID an older, accounted CLI (950, created 95, from
+        # shell 400) once held looks accounted. Its noctty.exe (970, created 97) is older than it, so it may not vouch:
+        # 2 stay unaccounted, and 1 without `$cli.Creation -gt $Row.Creation`. It changes only the count, never `passed`,
+        # since two noctty rows with one PID already fail it.
+        @{ Name = 'a noctty older than an exited CLI that reuses an accounted CLI''s PID'; Rows = (& $guiWith @((& $guiRow 950 'noctty.com' 400 95 -Argv @('noctty', '+help')), (& $guiRow 970 'noctty.exe' 950 97 -Argv $guiActionless), (& $guiRow 950 'noctty.com' 400 98 -Exited $true))); Total = 14; Shells = 1; Unaccounted = 2 }
         # Council no-seat N6: a stray noctty that exits fast, its image read through class 27 after the Win32 read
         # failed, is a read noctty, and the accounting and copy rules fail it.
         @{ Name = 'a stray noctty.exe read through class 27 after it exited'; Rows = (& $guiWith @((& $guiRow 930 'noctty.exe' 100 93 -Exited $true))); Total = 12; Shells = 1 }
