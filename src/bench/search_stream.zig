@@ -485,7 +485,7 @@ fn streamLocked(
     while (offset < streamed.len) {
         const end = @min(offset + 4096, streamed.len);
         const before_lock = timer.read();
-        mutex.lock();
+        mutex.lockUncancelable();
         lock_wait_ns += timer.read() - before_lock;
         stream.nextSlice(streamed[offset..end]);
         t.flags.search_viewport_dirty = true;

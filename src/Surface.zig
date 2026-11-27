@@ -1636,7 +1636,7 @@ test "Surface: queueIo(.locked) into a full termio mailbox lets the IO thread ta
         }
     };
 
-    f.mutex.lock();
+    f.mutex.lockUncancelable();
     f.io_thread = std.Thread.spawn(.{}, IoThread.main, .{&f}) catch |err| {
         f.mutex.unlock();
         return err;
@@ -1682,7 +1682,7 @@ test "isolated: a raw relock in place of send's leaves assertHeld() to panic wit
             }
         };
 
-        f.mutex.lock();
+        f.mutex.lockUncancelable();
         f.io_thread = std.Thread.spawn(.{}, IoThread.main, .{&f}) catch |err| {
             f.mutex.unlock();
             return err;
@@ -1919,7 +1919,7 @@ fn confirmQuitAnswer(self: *Surface, comptime wait: bool) ?bool {
         .false => false,
         .true => true: {
             if (wait) {
-                self.renderer_state.mutex.lock();
+                self.renderer_state.mutex.lockUncancelable();
             } else if (!self.renderer_state.mutex.tryLock()) return null;
             defer self.renderer_state.mutex.unlock();
             break :true !self.io.terminal.cursorIsAtPrompt();
@@ -2450,7 +2450,7 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     // mode still set, a modifier press or a key release would encode and
     // close it. The program that asked for them is gone.
     {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         t.modes.set(.disable_keyboard, false);
@@ -5349,7 +5349,7 @@ test "copy mode remains active while a duplicate table is still stacked" {
 fn finishCopyMode(self: *Surface) !void {
     if (!self.copy_mode_active) return;
     self.copy_mode_active = false;
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     const screens = &self.io.terminal.screens;
     if (self.copy_mode_screen) |key| {
         if (screens.get(key)) |screen| screen.clearSelection();
@@ -5390,7 +5390,7 @@ fn startCopyMode(self: *Surface) anyerror!bool {
     if (self.copy_mode_active) return false;
     if (self.config.keybind.tables.getPtr(copy_mode_table_name) == null) return false;
 
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     const screens = &self.io.terminal.screens;
     const copy_screen_key = screens.active_key;
     const screen: *terminal.Screen = screens.active;
@@ -5407,7 +5407,7 @@ fn startCopyMode(self: *Surface) anyerror!bool {
     self.copy_mode_screen = copy_screen_key;
     self.renderer_state.mutex.unlock();
     errdefer {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         if (self.io.terminal.screens.get(copy_screen_key)) |copy_screen| {
             copy_screen.clearSelection();
         }
@@ -5689,7 +5689,7 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     // Update the terminal state for synchronous queries, then notify the IO
     // thread so it can emit a mode 2033 report when enabled (termio gates
     // the mode; it stays off by default).
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     self.io.terminal.flags.visible = visible;
     const report_visibility = self.io.terminal.modes.get(.report_visibility);
     self.renderer_state.mutex.unlock();
@@ -6304,7 +6304,7 @@ pub fn mouseButtonCallback(
         // (`processLinks`): the mutex is not recursive, and the opener must
         // not run under it (PKG-23).
         const link: ?OpenLink = released: {
-            self.renderer_state.mutex.lock();
+            self.renderer_state.mutex.lockUncancelable();
             defer self.renderer_state.mutex.unlock();
 
             // Stop selection scrolling when releasing the left mouse button
@@ -6365,7 +6365,7 @@ pub fn mouseButtonCallback(
 
             // A link that did not open leaves the release to a prompt click,
             // as it did when the link was opened under the release's lock.
-            self.renderer_state.mutex.lock();
+            self.renderer_state.mutex.lockUncancelable();
             defer self.renderer_state.mutex.unlock();
             if (self.maybePromptClick()) |handled| {
                 if (handled) return true;
@@ -6878,7 +6878,7 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     surface.readonly = true;
 
     // maybePromptClick requires the renderer state mutex held.
-    mutex.lock();
+    mutex.lockUncancelable();
     defer mutex.unlock();
 
     // Reporting a press zeroes the click count: its release is reported too.
@@ -8236,7 +8236,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 };
             }
             {
-                self.renderer_state.mutex.lock();
+                self.renderer_state.mutex.lockUncancelable();
                 defer self.renderer_state.mutex.unlock();
                 const t = self.renderer_state.terminal;
                 // The pty does not see this reset. ConPTY asks for Win32 input
@@ -8288,7 +8288,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .copy_to_clipboard => |format| {
             const copied = copied: {
-                self.renderer_state.mutex.lock();
+                self.renderer_state.mutex.lockUncancelable();
                 defer self.renderer_state.mutex.unlock();
 
                 if (self.copy_mode_active and
@@ -8327,7 +8327,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .copy_last_command_output => {
-            self.renderer_state.mutex.lock();
+            self.renderer_state.mutex.lockUncancelable();
             defer self.renderer_state.mutex.unlock();
 
             const output = try self.io.terminal.screens.active.lastCommandOutputString(
@@ -8365,7 +8365,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .insert_last_command => {
             const command = command: {
-                self.renderer_state.mutex.lock();
+                self.renderer_state.mutex.lockUncancelable();
                 defer self.renderer_state.mutex.unlock();
 
                 // Never type into an alternate-screen program (a TUI) and
@@ -10750,7 +10750,7 @@ pub fn completeClipboardPasteWithoutText(self: *Surface) !bool {
     if (self.readonly) return false;
 
     {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
 
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);

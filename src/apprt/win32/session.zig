@@ -1529,7 +1529,7 @@ pub fn restoreSessionScrollback(
     var scrollbar: terminal.Scrollbar = .zero;
     var restored_lines: usize = 0;
     {
-        self.core_surface.renderer_state.mutex.lock();
+        self.core_surface.renderer_state.mutex.lockUncancelable();
         defer self.core_surface.renderer_state.mutex.unlock();
         restored_lines = try restoreTerminalScrollbackSnapshot(
             self.core_surface.renderer_state.terminal,

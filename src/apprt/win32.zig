@@ -25116,7 +25116,7 @@ test "win32 a Restart Manager query agrees only when a quit would ask nothing, a
     other.core_surface.renderer_state.mutex = &renderer_mutex;
     other.core_surface.config.confirm_close_surface = .true;
     other.core_surface.child_exited = false;
-    renderer_mutex.lock();
+    renderer_mutex.lockUncancelable();
     other.core_initialized = true;
     const locked = Query.send(hwnd, close_app);
     other.core_initialized = false;

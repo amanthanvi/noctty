@@ -1473,7 +1473,7 @@ pub const Surface = struct {
 
         self.undo_stack.discardExpired(self.app.undoCutoffTimestampMs());
         const captured = captured: {
-            self.core_surface.renderer_state.mutex.lock();
+            self.core_surface.renderer_state.mutex.lockUncancelable();
             defer self.core_surface.renderer_state.mutex.unlock();
             break :captured .{
                 .bytes = try captureTerminalUndoStateBytes(
@@ -1513,7 +1513,7 @@ pub const Surface = struct {
         var restored: RestoredTerminalUndoState = .{};
 
         {
-            self.core_surface.renderer_state.mutex.lock();
+            self.core_surface.renderer_state.mutex.lockUncancelable();
             defer self.core_surface.renderer_state.mutex.unlock();
             restored = restoreTerminalUndoState(
                 self.core_surface.renderer_state.terminal,
@@ -1573,7 +1573,7 @@ pub const Surface = struct {
         switch (kind) {
             .clear_screen => {
                 {
-                    self.core_surface.renderer_state.mutex.lock();
+                    self.core_surface.renderer_state.mutex.lockUncancelable();
                     defer self.core_surface.renderer_state.mutex.unlock();
                     if (self.core_surface.io.terminal.screens.active_key == .alternate) return false;
                 }
@@ -1594,7 +1594,7 @@ pub const Surface = struct {
                 };
                 var scrollbar: terminal.Scrollbar = .zero;
                 {
-                    self.core_surface.renderer_state.mutex.lock();
+                    self.core_surface.renderer_state.mutex.lockUncancelable();
                     defer self.core_surface.renderer_state.mutex.unlock();
                     scrollbar = self.core_surface.renderer_state.terminal.screens.active.pages.scrollbar();
                 }
@@ -1622,7 +1622,7 @@ pub const Surface = struct {
     fn canReapplyUndoableAction(self: *Surface, kind: win32_undo.Kind) bool {
         switch (kind) {
             .clear_screen => {
-                self.core_surface.renderer_state.mutex.lock();
+                self.core_surface.renderer_state.mutex.lockUncancelable();
                 defer self.core_surface.renderer_state.mutex.unlock();
                 return self.core_surface.io.terminal.screens.active_key != .alternate;
             },
@@ -2921,7 +2921,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         var render_state: terminal.RenderState = .empty;
         defer render_state.deinit(alloc);
-        self.core_surface.renderer_state.mutex.lock();
+        self.core_surface.renderer_state.mutex.lockUncancelable();
         render_state.update(
             alloc,
             self.core_surface.renderer_state.terminal,
@@ -3213,7 +3213,7 @@ pub const Surface = struct {
 
         var render_state: terminal.RenderState = .empty;
         defer render_state.deinit(alloc);
-        self.core_surface.renderer_state.mutex.lock();
+        self.core_surface.renderer_state.mutex.lockUncancelable();
         render_state.update(
             alloc,
             self.core_surface.renderer_state.terminal,

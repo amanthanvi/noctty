@@ -843,8 +843,8 @@ test "isolated: a blocking re-entry by lock panics with PN1 (acceptance test 6)"
         m.unlock();
         return;
     }
-    // PN1 is checked before the inner lock, so its text wins over Zig's own
-    // "Deadlock detected".
+    // PN1 is checked before the inner lock, which would wait for itself:
+    // 0.17.1's std.Io.Mutex has no re-entry check.
     try expectPanic(@src(), "thread-role layer: PN1 a blocking re-entry: lock of the renderer-state mutex by " ++
         "the thread that holds it (role ui)");
 }

@@ -230,7 +230,7 @@ fn fallBack(self: *Windows) !void {
     self.setPresentationPending(false);
     if (self.state) |state| {
         if (comptime terminal_options.kitty_graphics) {
-            state.mutex.lock();
+            state.mutex.lockUncancelable();
             // The counter, never cleared since upstream 1.4.0: moving it
             // makes the next frame place the images again, as setting the
             // old flag did.

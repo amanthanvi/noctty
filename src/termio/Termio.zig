@@ -1038,7 +1038,7 @@ pub fn resizeBeforeThreadStart(
     try self.backend.resize(grid_size, size.terminal());
 
     {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
 
         // Upstream's resize also sets the pixel size from the cell size and
@@ -1105,7 +1105,7 @@ pub fn resetSynchronizedOutput(self: *Termio) void {
 /// Clear the screen.
 pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
     const cleared = clear: {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
         break :clear clearTerminalScreen(&self.terminal, history);
     };
@@ -1221,7 +1221,7 @@ pub fn ptyClear(self: *Termio, keep_cursor_row: bool) void {
         .exec => |*exec| exec.ptyClear(keep_cursor_row),
     };
     if (cleared) {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
         self.pty_clear_generation +%= 1;
     }
@@ -1259,7 +1259,7 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
     const decision = render: {
         // We are modifying terminal state from here on out and we need
         // the lock to grab our read data.
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         if (trace_lock) lock_acquired = .now(global.io(), .awake);
         defer self.renderer_state.mutex.unlock();
         // Typing at a prompt often echoes only a cursor move (Left is a BS
