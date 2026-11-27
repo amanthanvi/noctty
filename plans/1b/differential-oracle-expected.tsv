@@ -1,0 +1,9 @@
+# Phase 1B differential oracle: expected differences registered before the capture (PLAN 3.3, 3.4; QR-55).
+# At 1B's capture each row is checked against the actual diff of its input: the row covers only the difference it
+# claims, and anything else that differs there is a finding, not covered by the row. When the capture's
+# differential-oracle.tsv is written (with its dump hashes), each covered difference cites this file and row id.
+# id: stable key. input: the corpus case. class: the oracle's three-way classification the row expects. source: what
+# the difference follows from. claim: what alone may differ. check: what the capture must show.
+id	input	class	source	claim	check
+E-conpty-width-18-0	synthetic/utf8-0000000000000000	fork-owned semantics (branch = pre != upstream)	src/build/uucode_config.zig conpty_width_pins, measured in src/unicode/testdata/conpty_width.tsv (CONPTY-WIDTH-18 in docs/agents/log/conpty.md; PLAN 7.7, QR-55)	width only: each of Unicode 18's 990 newly wide code points in the case is one column on the branch (and the 1A pre side, where Unicode 17 left them narrow) and two upstream, so the cells, wraps and cursor after it shift; every code point, style and other cell equal once that shift is applied	at 1B's capture, the pair diff for this input is a width shift at pinned code points and nothing else
+E-conpty-width-18-1	synthetic/utf8-0000000000000001	fork-owned semantics (branch = pre != upstream)	src/build/uucode_config.zig conpty_width_pins, measured in src/unicode/testdata/conpty_width.tsv (CONPTY-WIDTH-18 in docs/agents/log/conpty.md; PLAN 7.7, QR-55)	width only: as E-conpty-width-18-0	at 1B's capture, the pair diff for this input is a width shift at pinned code points and nothing else
