@@ -596,6 +596,19 @@ pub fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
                 return @unionInit(T, field_name, {});
             }
 
+            // noctty: the tag alone, with no colon, takes the default of a
+            // type that declares one, as `Binding.Action.parse` does for a
+            // keybind, so a `command-palette-entry` action reads as a
+            // keybind's (its documentation says the syntax is the same).
+            // Ghostty 1.4 gave `open_config` such a parameter, and without
+            // this a 1.3 `action:open_config` entry stops loading.
+            if (colon_idx == v.len) switch (@typeInfo(field_type)) {
+                .@"struct", .@"union", .@"enum" => if (@hasDecl(field_type, "default")) {
+                    return @unionInit(T, field_name, @field(field_type, "default"));
+                },
+                else => {},
+            };
+
             // We need to create a struct that looks like this union field.
             // This lets us use parseIntoField as if its a dedicated struct.
             const Target = @Struct(
@@ -1418,6 +1431,41 @@ test "parseIntoField: tagged union missing tag" {
     try testing.expectError(
         error.InvalidValue,
         parseIntoField(@TypeOf(data), alloc, &data, "value", ":a"),
+    );
+}
+
+test "parseIntoField: tagged union tag alone takes its type's default" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Mode = enum {
+        one,
+        two,
+        pub const default: @This() = .two;
+    };
+    var data: struct {
+        value: union(enum) {
+            a: Mode,
+            b: enum { x, y },
+        } = undefined,
+    } = .{};
+
+    // The tag alone takes the declared default, as a keybind action does.
+    try parseIntoField(@TypeOf(data), alloc, &data, "value", "a");
+    try testing.expectEqual(Mode.two, data.value.a);
+    try parseIntoField(@TypeOf(data), alloc, &data, "value", "a:one");
+    try testing.expectEqual(Mode.one, data.value.a);
+    // A colon with nothing after it names no value, as for a keybind.
+    try testing.expectError(
+        error.InvalidValue,
+        parseIntoField(@TypeOf(data), alloc, &data, "value", "a:"),
+    );
+    // A type with no default still needs its value.
+    try testing.expectError(
+        error.InvalidValue,
+        parseIntoField(@TypeOf(data), alloc, &data, "value", "b"),
     );
 }
 
