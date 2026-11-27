@@ -45,6 +45,12 @@ test-dir-io (also):
   blocks, a capture `|f|`, a parameter `f: T`, a ported open): a close paired by name alone could take the wrong
   open. The pairing reads one test block at a time, so the same name in another test is another binding and pairs
   within that test. Likewise a `tmp` receiver bound to a temporary directory and also to something else;
+- an open whose value the pairing does not read. It reads a binding only as `const f = [try] <open>` (or `var`), so
+  through a typed binding (`const f: std.fs.File = try tmp.dir.openFile(..)`), an assignment, a field, an
+  expression such as `(try ..).close()` or an `if` capture, or an argument of any call but `expectError`, the open
+  would be rewritten without its close. The open is a hand edit, and so are every close and open of a name it binds
+  (a typed binding's or an assignment's). An open that nothing can close, passed straight to `expectError` or
+  discarded by `_ =`, is rewritten;
 - arguments that change places must lie on one line, with no comment between the call's arguments;
 - makeOpenPath with any options but the two exact translations: `.{}` stays, `.{ .no_follow = true }` becomes
   `.{ .open_options = .{ .follow_symlinks = false } }` (0.17 renamed the field and inverted it);

@@ -385,6 +385,65 @@ def _receiver(toks, i, tmp_names):
 
 REUSED_NAME = ("the name `{}` is bound more than once in this test, so which open a close belongs to needs a "
                "reader: its 0.15 opens and its closes are hand edits")
+UNREAD_OPEN = ("the pairing reads an open's binding only as `const f = [try] <open>`, and this open's value goes "
+               "elsewhere (a typed binding, an assignment, a field, another expression), so its close would not be "
+               "rewritten with it: the open, and the closes and opens of a name it binds, are hand edits")
+
+
+def _enclosing_open(toks, r):
+    """The index of the innermost bracket that is open at toks[r], or None."""
+    depth = 0
+    for k in range(r - 1, -1, -1):
+        t = toks[k]
+        if t.kind != "op":
+            continue
+        if t.text in (")", "]", "}"):
+            depth += 1
+        elif t.text in ("(", "[", "{"):
+            if depth == 0:
+                return k
+            depth -= 1
+    return None
+
+
+def _statement_start(toks, p):
+    """The index of the first token of the statement (or of the bracketed group) toks[p] is in."""
+    depth = 0
+    for k in range(p - 1, -1, -1):
+        t = toks[k]
+        if t.kind != "op":
+            continue
+        if t.text in (")", "]"):
+            depth += 1
+        elif t.text in ("(", "["):
+            if depth == 0:
+                return k + 1
+            depth -= 1
+        elif depth == 0 and t.text in (";", "{", "}"):
+            return k + 1
+    return 0
+
+
+def _open_target(toks, r):
+    """Where the value of an open that the pairing did not read goes (toks[r] starts its receiver): (True, None)
+    when nothing can close it (the open is an argument of `expectError`, or discarded by `_ =`), else (False, the
+    name a typed `const`/`var` or an assignment binds it to, or None when it goes anywhere else)."""
+    p = r - 1
+    if is_tok(at(toks, p), "keyword", "try"):
+        p -= 1
+    t = at(toks, p)
+    if is_tok(t, "op", ",") or is_tok(t, "op", "("):
+        o = _enclosing_open(toks, r)
+        return (o is not None and is_tok(toks[o], "op", "(") and is_tok(at(toks, o - 1), "identifier", "expectError"),
+                None)
+    if is_tok(t, "op", "="):
+        s = _statement_start(toks, p)
+        if s == p - 1 and is_tok(toks[s], "identifier"):
+            return (True, None) if toks[s].text == "_" else (False, toks[s].text)
+        if (is_tok(at(toks, s), "keyword") and toks[s].text in ("const", "var")
+                and is_tok(at(toks, s + 1), "identifier") and is_tok(at(toks, s + 2), "op", ":")):
+            return False, toks[s + 1].text
+    return False, None
 REUSED_RECEIVER = ("the name `{}` is bound more than once in this test, not always to a temporary directory: its "
                    "calls are hand edits")
 
@@ -469,7 +528,10 @@ def rule_test_dir_io(text, toks):
     `std.fs.cwd()` or `std.fs.openFileAbsolute` is a reported hand edit that should pass `.allow_directory = false`.
     A file or directory such a call opened (`const f = try tmp.dir.createFile(...)`) closes with the
     Io, in the same hit as its open, so the two are rewritten together or not at all; one whose open is already
-    0.17's closes with the Io alone. Only the 0.15 arity is rewritten, so a ported call is left alone."""
+    0.17's closes with the Io alone. An open whose value goes anywhere else (a typed binding, an assignment, a field,
+    another expression) is a hand edit, with the closes and opens of a name it binds; only one that nothing can close
+    (an argument of `expectError`, or `_ =`) is rewritten alone. Only the 0.15 arity is rewritten, so a ported call
+    is left alone."""
     hits = []
     names_file_too_big = "FileTooBig" in text   # code, a string or a comment: when in doubt, a hand edit
     blocks = test_blocks(toks)
@@ -492,6 +554,7 @@ def rule_test_dir_io(text, toks):
         tmp_names = {n for n, c in tmp_counts.items() if c == bound.get(n, 0)}
         tmp_any = set(tmp_counts)
         call_hits = {}   # method-name token index -> Hit
+        call_at = {}   # method-name token index -> (the index its receiver starts at, the lines the call spans)
         for i in range(lo, hi):
             t = toks[i]
             if t.kind != "identifier" or t.text not in DIR_METHODS or not is_tok(at(toks, i - 1), "op", "."):
@@ -522,10 +585,12 @@ def rule_test_dir_io(text, toks):
             hit = Hit(t.line + 1, edits, OPEN_FILE_NOTE if t.text == "openFile" else None)
             hits.append(hit)
             call_hits[i] = hit
+            call_at[i] = (i - (4 if recv == "tmp" else 8), call_lines)
         # What such a call opened closes with the Io. A name bound more than once in the block (sibling scopes, a
         # capture, a parameter) could pair a close with the wrong open: its opens and closes are hand edits.
         opened = {}   # name -> the open's Hit, or "ported" when the open is already 0.17's
         open_hits = {}   # name -> the Hits of its 0.15 opens
+        paired = set()   # the method-name token index of each 0.15 open the pairing read
         for i in range(lo, hi):
             if not (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
                     and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
@@ -556,21 +621,36 @@ def rule_test_dir_io(text, toks):
             if m in call_hits and method in OPENING:
                 opened[name] = call_hits[m]
                 open_hits.setdefault(name, []).append(call_hits[m])
+                paired.add(m)
             elif method in ("createFile", "openFile", "openDir", "createDirPathOpen"):
                 args, _ = zigtok.split_args(toks, m + 1)
                 if args and "".join(x.text for x in args[0]) in IO_ARG_NAMES:
                     opened[name] = "ported"
-        reused = {n for n in opened if bound.get(n, 0) > 1}
-        for name in sorted(reused):
+        held = {n: REUSED_NAME.format(n) for n in opened if bound.get(n, 0) > 1}   # name -> why its pairs bail
+        # A 0.15 open the pairing did not read (a typed binding, an assignment, a field, an expression) would be
+        # rewritten without its close: it is a hand edit, and so are the closes and opens of a name it binds. One
+        # that nothing can close (expectError's argument, `_ =`) is rewritten.
+        for m, owner in list(call_hits.items()):
+            if toks[m].text not in OPENING or m in paired:
+                continue
+            free, name = _open_target(toks, call_at[m][0])
+            if free:
+                continue
+            hits.remove(owner)
+            hits.append(Bail(owner.line, UNREAD_OPEN, call_at[m][1]))
+            if name is not None:
+                held.setdefault(name, UNREAD_OPEN)
+        for name in sorted(held):
             for owner in open_hits.get(name, ()):
                 hits.remove(owner)
-                hits.append(Bail(owner.line, REUSED_NAME.format(name)))
+                hits.append(Bail(owner.line, held[name]))
         for i in range(lo, hi):
-            if (is_tok(at(toks, i), "identifier") and toks[i].text in opened and is_tok(at(toks, i + 1), "op", ".")
+            if (is_tok(at(toks, i), "identifier") and (toks[i].text in opened or toks[i].text in held)
+                    and is_tok(at(toks, i + 1), "op", ".")
                     and is_tok(at(toks, i + 2), "identifier", "close") and is_tok(at(toks, i + 3), "op", "(")
                     and is_tok(at(toks, i + 4), "op", ")") and not is_tok(at(toks, i - 1), "op", ".")):
-                if toks[i].text in reused:
-                    hits.append(Bail(toks[i].line + 1, REUSED_NAME.format(toks[i].text)))
+                if toks[i].text in held:
+                    hits.append(Bail(toks[i].line + 1, held[toks[i].text]))
                     continue
                 edit = Edit(toks[i + 4].start, toks[i + 4].start, IO)
                 owner = opened[toks[i].text]

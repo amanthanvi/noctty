@@ -453,6 +453,42 @@ class RuleTests(unittest.TestCase):
         self.assertIn("dupeSentinel(\n    u8,\n    name,\n 0,);", got)
         self.assertNotIn("trimStart", got)
 
+    # --- the council's round-3 findings ------------------------------------------------------------------------
+
+    def test_an_open_whose_binding_the_pairing_cannot_read_is_a_hand_edit(self):
+        # council G4: the pairing reads an open's binding only as `const f = [try] <open>`. Through a typed binding
+        # (or an assignment, a field, any other expression) the open was rewritten and its close was not. Such an
+        # open is a hand edit, reported, with every close of the name it binds (and that name's other opens).
+        head = 'test "u" {\n    var tmp = std.testing.tmpDir(.{});\n'
+        why = "hand edit: " + codemod.UNREAD_OPEN
+        for body, want in (
+                ('    const f: std.fs.File = try tmp.dir.openFile("a", .{});\n    defer f.close();\n', [3, 4]),
+                ('    var d: std.fs.Dir = try std.fs.cwd().openDir("a", .{});\n    d.close();\n', [3, 4]),
+                ('    var f: std.fs.File = undefined;\n    f = try tmp.dir.createFile("a", .{});\n    f.close();\n',
+                 [4, 5]),
+                ('    var f = try tmp.dir.openFile("a", .{});\n    f.close();\n'
+                 '    f = try tmp.dir.openFile("b", .{});\n    f.close();\n', [3, 4, 5, 6]),
+                ('    s.file = try tmp.dir.createFile("a", .{});\n    s.file.close();\n', [3]),
+                ('    const s: S = .{ .file = try tmp.dir.createFile("a", .{}) };\n', [3]),
+                ('    (try tmp.dir.createFile("a", .{})).close();\n', [3]),
+                ('    if (tmp.dir.openFile("a", .{})) |f| f.close() else |_| {}\n', [3]),
+                ('    const f = wrap(try tmp.dir.openFile("a", .{}));\n    f.close();\n', [3])):
+            with self.subTest(body=body):
+                src = head + body + '}\n'
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", n, why) for n in want])
+        # An open whose value goes nowhere a close could reach it is still rewritten: the one expectError expects to
+        # fail (over one line or several), and one discarded.
+        for body in ('    try testing.expectError(error.FileNotFound, tmp.dir.openFile("x", .{}));\n',
+                     '    try std.testing.expectError(\n        error.FileNotFound,\n'
+                     '        tmp.dir.openFile("x", .{}),\n    );\n',
+                     '    _ = try tmp.dir.createFile("x", .{});\n'):
+            with self.subTest(body=body):
+                got, hits = codemod.rewrite(head + body + '}\n')
+                self.assertEqual(got, head + body.replace('("x"', '(std.testing.io, "x"') + '}\n')
+                self.assertEqual(len(hits), 1)
+
     def test_all_rules_together_match_each_rule_alone(self):
         for rule_id, cases in FIXTURES.items():
             for source, expected in cases:
