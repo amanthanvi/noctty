@@ -432,7 +432,7 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
         },
     };
     defer self.alloc.free(json);
-    try file.writeAll(json);
+    try file.writeStreamingAll(global.io(), json);
     // Status remains observable when the device cannot provide GPU pixels.
     // The harness still requires successful capture for pixel assertions.
     switch (self.active) {
