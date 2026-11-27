@@ -10,19 +10,21 @@
 //! misrepresenting where it points.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const windows = std.os.windows;
 const windows_shell = @import("../config/windows_shell.zig");
 const windows_ssh_hosts = @import("../config/windows_ssh_hosts.zig");
 const Command = @import("../config/command.zig").Command;
 const win32_aumid = @import("win32_aumid.zig");
 const persistence = @import("win32_session_persistence.zig");
+const global = @import("../global.zig");
 const sys = @import("win32/sys.zig");
 const paint_text = @import("win32/text.zig");
 const consts = @import("win32/consts.zig");
 
 const Allocator = std.mem.Allocator;
 const DWORD = u32;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const GUID = windows.GUID;
 const HWND = ?*anyopaque;
 const UINT = u32;
@@ -40,9 +42,18 @@ const max_profile_events: usize = max_profile_tombstones * 2;
 const max_rebuild_retries: u8 = 3;
 
 fn eventTimestamp() i64 {
-    // std.time.nanoTimestamp is UTC calendar time, not a boot-relative clock.
-    return @intCast(std.time.nanoTimestamp());
+    // The real clock is UTC calendar time, not a boot-relative clock.
+    return @intCast(std.Io.Timestamp.now(global.io(), .real).toNanoseconds());
 }
+
+/// This executable's path, owned without a sentinel as 0.15's
+/// `selfExePathAlloc` returned it (`JumpList.exe_path` is freed as `[]u8`).
+fn executablePathAlloc(alloc: Allocator) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.executablePath(global.io(), &buf);
+    return alloc.dupe(u8, buf[0..len]);
+}
+
 const max_shell_link_chars: usize = 32_768;
 const profile_description_prefix = "noctty-profile:";
 
@@ -1116,7 +1127,7 @@ pub const JumpList = struct {
         return .{
             .alloc = alloc,
             .state_path = owned_state_path,
-            .exe_path = std.fs.selfExePathAlloc(alloc) catch |err| exe: {
+            .exe_path = executablePathAlloc(alloc) catch |err| exe: {
                 log.warn("jump list executable path unavailable err={}", .{err});
                 break :exe null;
             },
@@ -1408,7 +1419,7 @@ pub const JumpList = struct {
     /// in-memory snapshot overwrite them.
     fn persist(self: *JumpList) bool {
         if (std.fs.path.dirname(self.state_path)) |directory| {
-            std.fs.makeDirAbsolute(directory) catch |err| switch (err) {
+            std.Io.Dir.createDirAbsolute(global.io(), directory, .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => {
                     log.warn("jump list recent directory create failed path={s} err={}", .{ directory, err });
@@ -1422,7 +1433,11 @@ pub const JumpList = struct {
             return false;
         };
         defer self.alloc.free(lock_path);
-        const lock_file = std.fs.createFileAbsolute(lock_path, .{
+        // One attempt, on the UI thread's flush timer and at quit (re-check
+        // item 34): a lock file another program holds, or one left pending
+        // delete, fails this persist at once (`FileBusy`), and `flush`
+        // retries it, where std 0.17 would wait about four seconds first.
+        const lock_file = sys.dirCreateFileOnce(std.Io.Dir.cwd(), lock_path, .{
             .read = true,
             .truncate = false,
             .lock = .exclusive,
@@ -1431,7 +1446,7 @@ pub const JumpList = struct {
             log.warn("jump list state lock unavailable path={s} err={}", .{ lock_path, err });
             return false;
         };
-        defer lock_file.close();
+        defer lock_file.close(global.io());
 
         var merged = loadStateForMergeAlloc(self.alloc, self.state_path) catch |err| {
             log.warn("jump list state reload failed; preserving prior snapshot path={s} err={}", .{
@@ -1467,7 +1482,7 @@ pub const JumpList = struct {
         const temporary_path = std.fmt.allocPrint(
             self.alloc,
             "{s}.tmp-{x}-{x}",
-            .{ self.state_path, GetCurrentProcessId(), @as(u64, @bitCast(std.time.milliTimestamp())) },
+            .{ self.state_path, GetCurrentProcessId(), @as(u64, @bitCast(std.Io.Timestamp.now(global.io(), .real).toMilliseconds())) },
         ) catch |err| {
             log.warn("jump list recent temp path allocation failed err={}", .{err});
             return false;
@@ -2265,11 +2280,11 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var file = try tmp.dir.createFile("corrupt.json", .{});
-        defer file.close();
-        try file.writeAll("{not json");
+        var file = try tmp.dir.createFile(std.testing.io, "corrupt.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "{not json");
     }
-    const corrupt_path = try tmp.dir.realpathAlloc(std.testing.allocator, "corrupt.json");
+    const corrupt_path = try tmp.dir.realPathFileAlloc(std.testing.io, "corrupt.json", std.testing.allocator);
     defer std.testing.allocator.free(corrupt_path);
     var corrupt = loadStateAlloc(std.testing.allocator, corrupt_path);
     defer corrupt.deinit(std.testing.allocator);
@@ -2285,17 +2300,17 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     );
 
     {
-        var file = try tmp.dir.createFile("oversized.json", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "oversized.json", .{});
+        defer file.close(std.testing.io);
         var remaining = max_state_bytes + 1;
-        const chunk = [_]u8{'x'} ** 1024;
+        const chunk = @as([1024]u8, @splat('x'));
         while (remaining > 0) {
             const count = @min(remaining, chunk.len);
-            try file.writeAll(chunk[0..count]);
+            try file.writeStreamingAll(std.testing.io, chunk[0..count]);
             remaining -= count;
         }
     }
-    const oversized_path = try tmp.dir.realpathAlloc(std.testing.allocator, "oversized.json");
+    const oversized_path = try tmp.dir.realPathFileAlloc(std.testing.io, "oversized.json", std.testing.allocator);
     defer std.testing.allocator.free(oversized_path);
     var oversized = loadStateAlloc(std.testing.allocator, oversized_path);
     defer oversized.deinit(std.testing.allocator);
@@ -2363,7 +2378,7 @@ test "jump_list persistence recovers from an oversized valid model" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const directory = try tmp.dir.realpathAlloc(alloc, ".");
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(directory);
     const state_path = try std.fs.path.join(alloc, &.{ directory, state_filename });
     defer alloc.free(state_path);
@@ -2451,7 +2466,7 @@ test "jump_list argument builders preserve Windows argv boundaries" {
         profile,
     );
 
-    var argv = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, profile);
+    var argv = try std.process.Args.IteratorGeneral(.{}).init(std.testing.allocator, profile);
     defer argv.deinit();
     try std.testing.expectEqualStrings("--single-instance=false", argv.next().?);
     try std.testing.expectEqualStrings("--working-directory=home", argv.next().?);
@@ -2484,7 +2499,7 @@ test "jump_list argument builders preserve Windows argv boundaries" {
         true,
     );
     defer std.testing.allocator.free(ssh_profile);
-    var ssh_argv = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, ssh_profile);
+    var ssh_argv = try std.process.Args.IteratorGeneral(.{}).init(std.testing.allocator, ssh_profile);
     defer ssh_argv.deinit();
     try std.testing.expectEqualStrings("--single-instance=false", ssh_argv.next().?);
     try std.testing.expectEqualStrings("--working-directory=C:\\Users\\Aman Thanvi", ssh_argv.next().?);
@@ -3141,7 +3156,7 @@ test "jump_list links a user profile by name, never by its environment" {
     try std.testing.expectEqualStrings(pinned_args, inherit_args);
 
     // The new process reads those arguments back as the selector they are.
-    var argv = try std.process.ArgIteratorGeneral(.{}).init(alloc, jump.profiles.items[1].arguments);
+    var argv = try std.process.Args.IteratorGeneral(.{}).init(alloc, jump.profiles.items[1].arguments);
     defer argv.deinit();
     for ([_][]const u8{
         "--single-instance=false",
@@ -3210,10 +3225,10 @@ fn testLoadJumpListLink(alloc: Allocator, file_text: []const u8, link_args: []co
     const cli_args = @import("../cli/args.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = file_text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = file_text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
-    var argv = try std.process.ArgIteratorGeneral(.{}).init(alloc, link_args);
+    var argv = try std.process.Args.IteratorGeneral(.{}).init(alloc, link_args);
     defer argv.deinit();
     var child_args: std.ArrayList([]const u8) = .empty;
     defer child_args.deinit(alloc);

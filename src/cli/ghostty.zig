@@ -33,6 +33,7 @@ const new_split = @import("new_split.zig");
 const register_shell_menu = @import("register_shell_menu.zig");
 const unregister_shell_menu = @import("unregister_shell_menu.zig");
 const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
+const global = @import("../global.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -47,13 +48,13 @@ pub fn run(self: Action, alloc: Allocator) !u8 {
 }
 
 fn printActionHelp(self: Action) !u8 {
-    inline for (@typeInfo(Action).@"enum".fields) |field| {
+    inline for (@typeInfo(Action).@"enum".field_names) |field_name| {
         // All action help text is emitted through this shared path.
-        if (self == @field(Action, field.name)) {
+        if (self == @field(Action, field_name)) {
             var buffer: [1024]u8 = undefined;
-            var stdout_writer = std.fs.File.stdout().writer(&buffer);
+            var stdout_writer = std.Io.File.stdout().writer(global.io(), &buffer);
             const stdout = &stdout_writer.interface;
-            const text = @field(help_strings.Action, field.name) ++ "\n";
+            const text = @field(help_strings.Action, field_name) ++ "\n";
             stdout.writeAll(text) catch return error.ActionHelpOutputUnavailable;
             stdout.flush() catch return error.ActionHelpOutputUnavailable;
             return 0;
@@ -142,7 +143,7 @@ test "parse action none" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         alloc,
         "--a=42 --b --b-f=false",
     );
@@ -156,7 +157,7 @@ test "parse action version" {
     const alloc = testing.allocator;
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--a=42 --b --b-f=false --version",
         );
@@ -166,7 +167,7 @@ test "parse action version" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--version --a=42 --b --b-f=false",
         );
@@ -176,7 +177,7 @@ test "parse action version" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--c=84 --d --version --a=42 --b --b-f=false",
         );
@@ -191,7 +192,7 @@ test "parse action plus" {
     const alloc = testing.allocator;
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--a=42 --b --b-f=false +version",
         );
@@ -201,7 +202,7 @@ test "parse action plus" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "+version --a=42 --b --b-f=false",
         );
@@ -211,7 +212,7 @@ test "parse action plus" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--c=84 --d +version --a=42 --b --b-f=false",
         );
@@ -229,7 +230,7 @@ test "parse send-text action ignores literal action-like payloads" {
         "+send-text --surface-id=42 -- --version",
         "+send-text --surface-id=42 -- +focus",
     }) |args_text| {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, args_text);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(alloc, args_text);
         defer iter.deinit();
         try testing.expectEqual(Action.@"send-text", (try actionpkg.detectIter(Action, &iter)).?);
     }
@@ -240,7 +241,7 @@ test "parse action plus ignores -e" {
     const alloc = testing.allocator;
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--a=42 -e +version",
         );
@@ -250,7 +251,7 @@ test "parse action plus ignores -e" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "+list-fonts --a=42 -e +version",
         );
@@ -271,7 +272,7 @@ test "vt-probe action is registered" {
     try testing.expect(@hasDecl(help_strings.Action, "vt-probe"));
 
     if (probe) |expected| {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "+vt-probe",
         );

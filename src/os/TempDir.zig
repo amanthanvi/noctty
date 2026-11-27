@@ -5,8 +5,10 @@ const TempDir = @This();
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
-const Dir = std.fs.Dir;
+const Dir = std.Io.Dir;
 const file = @import("file.zig");
+const global = @import("../global.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 
 const log = std.log.scoped(.tempdir);
 
@@ -29,26 +31,26 @@ pub fn init() !TempDir {
     var tmp_path_buf: [file.random_basename_len:0]u8 = undefined;
 
     // The parent is always a handle of our own, so `close` can close it.
-    var dir = dir: {
-        const cwd = std.fs.cwd();
-        const tmp_dir = try file.allocTmpDir(std.heap.page_allocator);
+    const dir = dir: {
+        const cwd = std.Io.Dir.cwd();
+        const tmp_dir = try file.allocTmpDir(std.heap.page_allocator, global.environ());
         defer file.freeTmpDir(std.heap.page_allocator, tmp_dir);
-        break :dir try cwd.openDir(tmp_dir, .{});
+        break :dir try cwd.openDir(global.io(), tmp_dir, .{});
     };
-    errdefer dir.close();
+    errdefer dir.close(global.io());
 
     // We now loop forever until we can find a directory that we can create.
     while (true) {
         const tmp_path = try file.randomBasename(&tmp_path_buf);
         tmp_path_buf[tmp_path.len] = 0;
 
-        dir.makeDir(tmp_path) catch |err| switch (err) {
+        dir.createDir(global.io(), tmp_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => |e| return e,
         };
 
         return TempDir{
-            .dir = try dir.openDir(tmp_path, .{}),
+            .dir = try dir.openDir(global.io(), tmp_path, .{}),
             .parent = dir,
             .name_buf = tmp_path_buf,
         };
@@ -72,13 +74,13 @@ pub const CloseMode = enum { delete, retain };
 /// Close the directory handles, optionally retaining the temporary directory
 /// and its contents on disk.
 pub fn close(self: *TempDir, mode: CloseMode) void {
-    self.dir.close();
+    self.dir.close(global.io());
     switch (mode) {
-        .delete => self.parent.deleteTree(self.name()) catch |err|
+        .delete => self.parent.deleteTree(global.io(), self.name()) catch |err|
             log.err("error deleting temp dir err={}", .{err}),
         .retain => {},
     }
-    self.parent.close();
+    self.parent.close(global.io());
 }
 
 test {
@@ -93,10 +95,10 @@ test {
         try testing.expect(nameval.len > 0);
 
         // Can open a new handle to it proves it exists.
-        var dir = try td.parent.openDir(nameval, .{});
-        dir.close();
+        var dir = try td.parent.openDir(testing.io, nameval, .{});
+        dir.close(testing.io);
 
-        path = try td.parent.realpath(nameval, &path_buf);
+        path = path_buf[0..try td.parent.realPathFile(testing.io, nameval, &path_buf)];
         handles = try .capture(&td);
 
         // Should be deleted after we deinit.
@@ -104,7 +106,7 @@ test {
     }
 
     try handles.expectClosed();
-    try testing.expectError(error.FileNotFound, std.fs.openDirAbsolute(path, .{}));
+    try testing.expectError(error.FileNotFound, Dir.openDirAbsolute(testing.io, path, .{}));
 }
 
 test "close retains the temporary directory" {
@@ -115,16 +117,16 @@ test "close retains the temporary directory" {
         var td = try init();
         errdefer td.deinit();
 
-        path = try td.parent.realpath(td.name(), &path_buf);
+        path = path_buf[0..try td.parent.realPathFile(testing.io, td.name(), &path_buf)];
         handles = try .capture(&td);
 
         td.close(.retain);
     }
-    defer std.fs.deleteDirAbsolute(path) catch {};
+    defer Dir.deleteDirAbsolute(testing.io, path) catch {};
 
     try handles.expectClosed();
-    var dir = try std.fs.openDirAbsolute(path, .{});
-    dir.close();
+    var dir = try Dir.openDirAbsolute(testing.io, path, .{});
+    dir.close(testing.io);
 }
 
 /// A TempDir's two handles and the directories they named.
@@ -133,7 +135,7 @@ const Handles = struct {
     ids: [2]?FileId,
 
     fn capture(td: *const TempDir) !Handles {
-        const values: [2]Dir.Handle = .{ td.dir.fd, td.parent.fd };
+        const values: [2]Dir.Handle = .{ td.dir.handle, td.parent.handle };
         var ids: [2]?FileId = undefined;
         for (values, &ids) |value, *id| {
             id.* = fileId(value);
@@ -159,7 +161,7 @@ const FileId = struct { volume: u32, index_high: u32, index_low: u32 };
 fn fileId(handle: Dir.Handle) ?FileId {
     switch (builtin.os.tag) {
         .windows => {
-            var info: std.os.windows.BY_HANDLE_FILE_INFORMATION = undefined;
+            var info: win32_types.BY_HANDLE_FILE_INFORMATION = undefined;
             if (GetFileInformationByHandle(handle, &info) == 0) return null;
             return .{
                 .volume = info.dwVolumeSerialNumber,
@@ -173,5 +175,5 @@ fn fileId(handle: Dir.Handle) ?FileId {
 
 extern "kernel32" fn GetFileInformationByHandle(
     hFile: std.os.windows.HANDLE,
-    lpFileInformation: *std.os.windows.BY_HANDLE_FILE_INFORMATION,
-) callconv(.winapi) std.os.windows.BOOL;
+    lpFileInformation: *win32_types.BY_HANDLE_FILE_INFORMATION,
+) callconv(.winapi) win32_types.BOOL;

@@ -16,8 +16,8 @@
 //! the same addresses (a scratch probe with the wrapper's inline-method
 //! shape): the same bytes for a plain function, a struct method, a nested
 //! container's function, both instantiations of a generic method (each
-//! bare), a comptime-parameter instantiation (`name__anon_N`, which the
-//! compare strips), a test block (`test.<name>`, a non-ASCII name included)
+//! bare), a comptime-parameter instantiation (`name__anon_N`, `name__func_N`
+//! on 0.17.1, either of which the compare strips), a test block (`test.<name>`, a non-ASCII name included)
 //! and a site in an `inline fn` (its caller, as §19.1 says of 0.15.2); and the
 //! line table gives the acquiring function's file and line, not the
 //! wrapper's, for the call `StateMutex`'s inline method makes.
@@ -41,6 +41,8 @@
 //! `problem=` header as BAD-DUMP.
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const dump = @import("dump.zig");
@@ -70,7 +72,7 @@ pub const names_attributed = switch (builtin.cpu.arch) {
 /// a test left with nothing else to check, such as acceptance test 10's
 /// site shapes, is skipped.
 pub const names_checked = names_attributed and
-    (builtin.mode == .Debug or builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) != .lt);
+    (builtin.mode == .debug or builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) != .lt);
 
 /// The symbolise mode's variables (`runFromEnvironment`): the raw dumps'
 /// directory, the directory the symbolised ones are written to (it must
@@ -164,16 +166,43 @@ const ImagehlpModuleW64 = extern struct {
     PdbSig: u32,
     PdbSig70: [16]u8,
     PdbAge: u32,
-    PdbUnmatched: windows.BOOL,
-    DbgUnmatched: windows.BOOL,
-    LineNumbers: windows.BOOL,
-    GlobalSymbols: windows.BOOL,
-    TypeInfo: windows.BOOL,
-    SourceIndexed: windows.BOOL,
-    Publics: windows.BOOL,
+    PdbUnmatched: win32_types.BOOL,
+    DbgUnmatched: win32_types.BOOL,
+    LineNumbers: win32_types.BOOL,
+    GlobalSymbols: win32_types.BOOL,
+    TypeInfo: win32_types.BOOL,
+    SourceIndexed: win32_types.BOOL,
+    Publics: win32_types.BOOL,
     MachineType: u32,
     Reserved: u32,
 };
+
+// DbgHelp.h's `IMAGEHLP_MODULEW64` (10.0.28000.0 SDK): the header packs with
+// pshpack8, which leaves every member here at its natural alignment, so the
+// DWORD64 after the first DWORD starts at 8, the GUID (`PdbSig70`, 4-aligned
+// in C) at 3,204, and the struct is 3,260 bytes rounded up to 3,264. A
+// `SizeOfStruct` DbgHelp does not know makes `SymGetModuleInfoW64` fail.
+test "ImagehlpModuleW64 matches DbgHelp.h's IMAGEHLP_MODULEW64" {
+    const T = ImagehlpModuleW64;
+    try std.testing.expectEqual(@as(usize, 3264), @sizeOf(T));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(T));
+    const offsets = .{
+        .{ "SizeOfStruct", 0 },      .{ "BaseOfImage", 8 },      .{ "ImageSize", 16 },
+        .{ "TimeDateStamp", 20 },    .{ "CheckSum", 24 },        .{ "NumSyms", 28 },
+        .{ "SymType", 32 },          .{ "ModuleName", 36 },      .{ "ImageName", 100 },
+        .{ "LoadedImageName", 612 }, .{ "LoadedPdbName", 1124 }, .{ "CVSig", 1636 },
+        .{ "CVData", 1640 },         .{ "PdbSig", 3200 },        .{ "PdbSig70", 3204 },
+        .{ "PdbAge", 3220 },         .{ "PdbUnmatched", 3224 },  .{ "DbgUnmatched", 3228 },
+        .{ "LineNumbers", 3232 },    .{ "GlobalSymbols", 3236 }, .{ "TypeInfo", 3240 },
+        .{ "SourceIndexed", 3244 },  .{ "Publics", 3248 },       .{ "MachineType", 3252 },
+        .{ "Reserved", 3256 },
+    };
+    inline for (offsets) |entry| {
+        try std.testing.expectEqual(@as(usize, entry[1]), @offsetOf(T, entry[0]));
+    }
+    // Every member is pinned: none was added or dropped.
+    try std.testing.expectEqual(offsets.len, @typeInfo(T).@"struct".field_names.len);
+}
 
 const sym_pdb = 3;
 const sym_dia = 7;
@@ -192,8 +221,8 @@ const sym_options: u32 = 0x10 | // SYMOPT_LOAD_LINES
 
 const Api = struct {
     SymSetOptions: *const fn (options: u32) callconv(.winapi) u32,
-    SymInitializeW: *const fn (process: windows.HANDLE, search_path: ?[*:0]const u16, invade: windows.BOOL) callconv(.winapi) windows.BOOL,
-    SymCleanup: *const fn (process: windows.HANDLE) callconv(.winapi) windows.BOOL,
+    SymInitializeW: *const fn (process: windows.HANDLE, search_path: ?[*:0]const u16, invade: win32_types.BOOL) callconv(.winapi) win32_types.BOOL,
+    SymCleanup: *const fn (process: windows.HANDLE) callconv(.winapi) win32_types.BOOL,
     SymLoadModuleExW: *const fn (
         process: windows.HANDLE,
         file: ?windows.HANDLE,
@@ -204,9 +233,31 @@ const Api = struct {
         data: ?*anyopaque,
         flags: u32,
     ) callconv(.winapi) u64,
-    SymGetModuleInfoW64: *const fn (process: windows.HANDLE, address: u64, info: *ImagehlpModuleW64) callconv(.winapi) windows.BOOL,
-    SymFromAddrW: *const fn (process: windows.HANDLE, address: u64, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) windows.BOOL,
-    SymGetLineFromAddrW64: *const fn (process: windows.HANDLE, address: u64, displacement: *u32, line: *ImagehlpLineW64) callconv(.winapi) windows.BOOL,
+    SymGetModuleInfoW64: *const fn (process: windows.HANDLE, address: u64, info: *ImagehlpModuleW64) callconv(.winapi) win32_types.BOOL,
+    SymFromAddrW: *const fn (process: windows.HANDLE, address: u64, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) win32_types.BOOL,
+    SymGetLineFromAddrW64: *const fn (process: windows.HANDLE, address: u64, displacement: *u32, line: *ImagehlpLineW64) callconv(.winapi) win32_types.BOOL,
+    // The inline frames at an address (DbgHelp 6.2 and later, in every
+    // supported Windows's System32): how many, where their contexts start,
+    // and each frame's function and line (`Session.locateSite`).
+    SymAddrIncludeInlineTrace: *const fn (process: windows.HANDLE, address: u64) callconv(.winapi) u32,
+    SymQueryInlineTrace: *const fn (
+        process: windows.HANDLE,
+        start_address: u64,
+        start_context: u32,
+        start_return_address: u64,
+        current_address: u64,
+        current_context: *u32,
+        current_frame_index: *u32,
+    ) callconv(.winapi) win32_types.BOOL,
+    SymFromInlineContextW: *const fn (process: windows.HANDLE, address: u64, inline_context: u32, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) win32_types.BOOL,
+    SymGetLineFromInlineContextW: *const fn (
+        process: windows.HANDLE,
+        address: u64,
+        inline_context: u32,
+        module_base: u64,
+        displacement: *u32,
+        line: *ImagehlpLineW64,
+    ) callconv(.winapi) win32_types.BOOL,
 };
 
 const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x2;
@@ -215,11 +266,11 @@ const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 
 extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?windows.HANDLE, flags: u32) callconv(.winapi) ?windows.HMODULE;
 extern "kernel32" fn GetProcAddress(module: windows.HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) win32_types.BOOL;
 
 /// DbgHelp is single-threaded: one session at a time, held from `open` to
 /// `close`.
-var session_lock: std.Thread.Mutex = .{};
+var session_lock: std.Io.Mutex = .init;
 /// Loaded at the first session, kept for the process (under the lock).
 var api: ?Api = null;
 /// Its address names this file's DbgHelp sessions: `SymInitializeW` takes
@@ -235,16 +286,46 @@ fn loadApi() error{NoDbgHelp}!*const Api {
     const lib = LoadLibraryExW(std.unicode.utf8ToUtf16LeStringLiteral("dbghelp.dll"), null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse
         return error.NoDbgHelp;
     var fns: Api = undefined;
-    inline for (@typeInfo(Api).@"struct".fields) |field| {
-        const proc = GetProcAddress(lib, field.name) orelse return error.NoDbgHelp;
+    inline for (@typeInfo(Api).@"struct".field_names) |field_name| {
+        const proc = GetProcAddress(lib, field_name) orelse return error.NoDbgHelp;
         // A function pointer is aligned 4 on aarch64 and 1 on x86_64, so only an
         // aarch64 build rejects the cast without the assertion (tabs-panes.md,
         // 2026-11-08 TEAROFF-01, review round 2).
-        @field(fns, field.name) = @ptrCast(@alignCast(proc));
+        @field(fns, field_name) = @ptrCast(@alignCast(proc));
     }
     api = fns;
     return &api.?;
 }
+
+/// The inline frames `Session.locateSite` passes over on its way to the
+/// acquiring function: the wrapper's own methods, by their file, and the
+/// renderer's demand forwarder, by its name (`State.lockDemand`, the one
+/// permanent inline site, RQ11; 0.17.1 names its frame plainly).
+pub const Skip = struct {
+    /// The file of a skipped frame, matched at the end of the path the PDB
+    /// holds, either separator, any case.
+    file: ?[]const u8 = null,
+    names: []const []const u8 = &.{},
+
+    fn takes(self: Skip, frame: Location) bool {
+        for (self.names) |n| {
+            if (std.mem.eql(u8, n, frame.name)) return true;
+        }
+        const tail = self.file orelse return false;
+        if (frame.file.len < tail.len) return false;
+        const at = frame.file.len - tail.len;
+        if (at > 0 and frame.file[at - 1] != '\\' and frame.file[at - 1] != '/') return false;
+        for (frame.file[at..], tail) |got, want| {
+            const g = if (got == '/') '\\' else std.ascii.toLower(got);
+            const w = if (want == '/') '\\' else std.ascii.toLower(want);
+            if (g != w) return false;
+        }
+        return true;
+    }
+};
+
+/// What a dump's sites skip: `StateMutex`'s methods and the forwarder.
+pub const wrapper_skip: Skip = .{ .file = "src\\sync\\state_mutex.zig", .names = &.{"lockDemand"} };
 
 /// A function and its file, as DbgHelp names them (WTF-8).
 pub const Location = struct {
@@ -284,18 +365,18 @@ pub const Session = struct {
     /// Loads `image` (its PDB beside it) at `base`, a virtual load: nothing
     /// of the image runs.
     pub fn open(a: Allocator, image: []const u16, base: u64, size: u32) OpenError!Session {
-        const image_z = try a.dupeZ(u16, image);
+        const image_z = try a.dupeSentinel(u16, image, 0);
         defer a.free(image_z);
         // The search path: the image's directory.
         const dir_len = dirLength(image) orelse return error.NameTooLong;
-        const dir_z = try a.dupeZ(u16, image[0..dir_len]);
+        const dir_z = try a.dupeSentinel(u16, image[0..dir_len], 0);
         defer a.free(dir_z);
 
-        session_lock.lock();
-        errdefer session_lock.unlock();
+        session_lock.lockUncancelable(std.testing.io);
+        errdefer session_lock.unlock(std.testing.io);
         const fns = try loadApi();
         _ = fns.SymSetOptions(sym_options);
-        if (fns.SymInitializeW(sessionHandle(), dir_z.ptr, windows.FALSE) == 0) return error.SymInitializeFailed;
+        if (fns.SymInitializeW(sessionHandle(), dir_z.ptr, win32_types.FALSE) == 0) return error.SymInitializeFailed;
         errdefer _ = fns.SymCleanup(sessionHandle());
         if (fns.SymLoadModuleExW(sessionHandle(), null, image_z.ptr, null, base, size, null, 0) == 0) {
             return error.LoadModuleFailed;
@@ -307,14 +388,14 @@ pub const Session = struct {
     pub fn openSelf(a: Allocator) (OpenError || error{NoModule})!Session {
         const module = dump.selfModule() orelse return error.NoModule;
         var buf: [32768]u16 = undefined;
-        const n = windows.kernel32.GetModuleFileNameW(@ptrFromInt(module.base), &buf, buf.len);
+        const n = win32_sys.GetModuleFileNameW(@ptrFromInt(module.base), &buf, buf.len);
         if (n == 0 or n >= buf.len) return error.NoModule;
         return open(a, buf[0..n], module.base, module.size);
     }
 
     pub fn close(self: *Session) void {
         _ = self.api.SymCleanup(sessionHandle());
-        session_lock.unlock();
+        session_lock.unlock(std.testing.io);
     }
 
     /// What DbgHelp loaded for the image.
@@ -357,6 +438,54 @@ pub const Session = struct {
             a.free(name);
             return null;
         };
+        const file = try std.unicode.wtf16LeToWtf8Alloc(a, std.mem.span(file_name));
+        return .{ .name = name, .file = file };
+    }
+
+    /// The acquiring function of a recorded site (PLAN.md §19.1's 0.17.1
+    /// frame rule, RQ10): with the inline frames at `address` resolved,
+    /// innermost first, the first that `skip` does not take, else the
+    /// function holding the address (`locate`). On Zig 0.17.1 the wrapper's
+    /// `inline fn` methods are inline frames of their own, and so is every
+    /// function LLVM inlined into its caller in a release build, which
+    /// `locate` alone names by the caller it went into (measured: acceptance
+    /// test 10's site shapes in a ReleaseSafe test build, 1B.6).
+    pub fn locateSite(self: *const Session, a: Allocator, address: u64, skip: Skip) Allocator.Error!?Location {
+        const count = self.api.SymAddrIncludeInlineTrace(sessionHandle(), address);
+        var context: u32 = 0;
+        var frame_index: u32 = 0;
+        if (count > 0 and self.api.SymQueryInlineTrace(sessionHandle(), address, 0, address, address, &context, &frame_index) != 0) {
+            var k: u32 = 0;
+            while (k < count) : (k += 1) {
+                const frame = (try self.inlineFrame(a, address, context + k)) orelse continue;
+                if (skip.takes(frame)) {
+                    frame.deinit(a);
+                    continue;
+                }
+                return frame;
+            }
+        }
+        return self.locate(a, address);
+    }
+
+    /// One inline frame's function and the file of its line at `address`.
+    fn inlineFrame(self: *const Session, a: Allocator, address: u64, context: u32) Allocator.Error!?Location {
+        const max_name = 2048;
+        var buf: [@sizeOf(SymbolInfoW) + 2 * max_name]u8 align(@alignOf(SymbolInfoW)) = undefined;
+        const symbol: *SymbolInfoW = @ptrCast(&buf);
+        symbol.* = std.mem.zeroes(SymbolInfoW);
+        symbol.SizeOfStruct = @sizeOf(SymbolInfoW);
+        symbol.MaxNameLen = max_name;
+        var displacement: u64 = 0;
+        if (self.api.SymFromInlineContextW(sessionHandle(), address, context, &displacement, symbol) == 0) return null;
+        var line = std.mem.zeroes(ImagehlpLineW64);
+        line.SizeOfStruct = @sizeOf(ImagehlpLineW64);
+        var line_displacement: u32 = 0;
+        if (self.api.SymGetLineFromInlineContextW(sessionHandle(), address, context, 0, &line_displacement, &line) == 0) return null;
+        const file_name = line.FileName orelse return null;
+        const name_units: [*]const u16 = @ptrCast(&symbol.Name);
+        const name = try std.unicode.wtf16LeToWtf8Alloc(a, name_units[0..@min(symbol.NameLen, max_name)]);
+        errdefer a.free(name);
         const file = try std.unicode.wtf16LeToWtf8Alloc(a, std.mem.span(file_name));
         return .{ .name = name, .file = file };
     }
@@ -443,10 +572,16 @@ pub const Result = struct {
 /// keys are relative to. A dump whose identity does not match keeps its
 /// header (with `problem=`) and writes every pair unqualified.
 pub fn symbolise(a: Allocator, raw: []const u8, session: *const Session, image_pdb: ?dump.Pdb, root: []const u8) Allocator.Error!Result {
+    return symboliseSkipping(a, raw, session, image_pdb, root, wrapper_skip);
+}
+
+/// `symbolise` with the inline frames `skip` passes over: this file's
+/// site-shape test records through a stand-in for the wrapper.
+fn symboliseSkipping(a: Allocator, raw: []const u8, session: *const Session, image_pdb: ?dump.Pdb, root: []const u8, skip: Skip) Allocator.Error!Result {
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     var result: Result = .{ .text = undefined };
-    write(a, &out.writer, raw, session, image_pdb, root, &result) catch |err| switch (err) {
+    write(a, &out.writer, raw, session, image_pdb, root, skip, &result) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
     };
     result.text = try out.toOwnedSlice();
@@ -460,6 +595,7 @@ fn write(
     session: *const Session,
     image_pdb: ?dump.Pdb,
     root: []const u8,
+    skip: Skip,
     result: *Result,
 ) (std.Io.Writer.Error || Allocator.Error)!void {
     var lines = std.mem.splitScalar(u8, raw, '\n');
@@ -517,7 +653,7 @@ fn write(
             continue;
         }
         const address = session.base + (pair.site - header.base) - 1;
-        const location = (try session.locate(a, address)) orelse {
+        const location = (try session.locateSite(a, address, skip)) orelse {
             result.unresolved += 1;
             try w.print("?no-symbol:0x{x:0>16} {s}\n", .{ pair.site, pair.role });
             continue;
@@ -549,8 +685,8 @@ pub fn runFromEnvironment() noreturn {
 /// environment is drive-absolute or refused (error.NotDriveAbsolute), as
 /// the dump directory is (`dump.isDriveAbsolute`).
 pub fn envPath(a: Allocator, name: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(a, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
+    const value = std.testing.environ.getAlloc(a, name) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return null,
         else => return err,
     };
     errdefer a.free(value);
@@ -573,7 +709,7 @@ fn runDirectories(a: Allocator) !u8 {
     const raw_path = (try envPath(a, raw_env)) orelse return error.NoRawDirectory;
     const out_path = (try envPath(a, out_env)) orelse return error.NoOutputDirectory;
     const images_path = (try envPath(a, images_env)) orelse images: {
-        const self_exe = try std.fs.selfExePathAlloc(a);
+        const self_exe = try std.process.executablePathAlloc(std.testing.io, a);
         break :images try a.dupe(u8, std.fs.path.dirname(self_exe) orelse return error.NoImagesDirectory);
     };
     const root = (try envPath(a, root_env)) orelse root: {
@@ -582,14 +718,15 @@ fn runDirectories(a: Allocator) !u8 {
         break :root try own.sourceRoot(a);
     };
 
-    var raw_dir = try std.fs.openDirAbsolute(raw_path, .{ .iterate = true });
-    defer raw_dir.close();
-    var out_dir = try std.fs.openDirAbsolute(out_path, .{});
-    defer out_dir.close();
+    const io = std.testing.io;
+    var raw_dir = try std.Io.Dir.openDirAbsolute(io, raw_path, .{ .iterate = true });
+    defer raw_dir.close(io);
+    var out_dir = try std.Io.Dir.openDirAbsolute(io, out_path, .{});
+    defer out_dir.close(io);
 
     var names: std.ArrayListUnmanaged([]u8) = .empty;
     var it = raw_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, dump.extension)) continue;
         try names.append(a, try a.dupe(u8, entry.name));
     }
@@ -601,13 +738,14 @@ fn runDirectories(a: Allocator) !u8 {
 
     var totals: struct { dumps: usize = 0, pairs: usize = 0, unresolved: usize = 0, problems: usize = 0 } = .{};
     for (names.items) |name| {
-        const raw = try raw_dir.readFileAlloc(a, name, 16 << 20);
+        // + 1: a dump of exactly 16 MiB is read, as 0.15 did (QR-30).
+        const raw = try raw_dir.readFileAlloc(io, name, a, .limited((16 << 20) + 1));
         defer a.free(raw);
         const result = try symboliseFile(a, raw, images_path, root);
         defer result.deinit(a);
-        const file = try out_dir.createFile(name, .{ .exclusive = true });
-        defer file.close();
-        try file.writeAll(result.text);
+        const file = try out_dir.createFile(io, name, .{ .exclusive = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, result.text);
         totals.dumps += 1;
         totals.pairs += result.pairs;
         totals.unresolved += result.unresolved;
@@ -813,7 +951,11 @@ test "symbolise names each site shape's acquiring function in this file" {
     var line: [dump.pair_line_max]u8 = undefined;
     try raw.writer.writeAll(dump.formatPair(&line, own.base + own.size + 16, .termio, .lock));
 
-    const result = try symbolise(a, raw.written(), &session, pdb, root);
+    // The shapes record through `record`, this test's stand-in for the
+    // wrapper's inline methods, whose frame the site rule passes over as it
+    // passes over `StateMutex`'s (`wrapper_skip`); so does the test block's
+    // own inline helper.
+    const result = try symboliseSkipping(a, raw.written(), &session, pdb, root, .{ .names = &.{ "record", "record_test_site" } });
     defer result.deinit(a);
     try testing.expectEqual(@as(?Problem, null), result.problem);
     try testing.expectEqual(@as(usize, 8), result.pairs);
@@ -824,19 +966,25 @@ test "symbolise names each site shape's acquiring function in this file" {
     try expectShapeLine(lines.next().?, "symbolisePlainSite");
     try expectShapeLine(lines.next().?, "symboliseMethodSite");
     try expectShapeLine(lines.next().?, "symboliseNestedSite");
-    // Each instantiation is its own symbol, its suffix the compare's to strip.
+    // Each instantiation is its own symbol, its suffix the compare's to strip:
+    // `__anon_N` on 0.15.2, `__func_N` on 0.17.1 (`isolated.ShapeLine`).
     const first = lines.next().?;
     const second = lines.next().?;
     if (names_attributed) {
-        try testing.expect(std.mem.startsWith(u8, first, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
-        try testing.expect(std.mem.startsWith(u8, second, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
+        errdefer std.debug.print("symbolise: the instantiation lines are\n{s}\n{s}\n", .{ first, second });
+        const instantiation = "src/sync/symbolise.zig:symboliseComptimeSite" ++
+            if (builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) == .lt) "__anon_" else "__func_";
+        try expectInstantiationLine(first, instantiation);
+        try expectInstantiationLine(second, instantiation);
         try testing.expect(!std.mem.eql(u8, first, second));
     } else {
         try expectShapeLine(first, null);
         try expectShapeLine(second, null);
     }
-    // 0.15.2 attributes a site in an inline fn to its caller (§19.1).
-    try expectShapeLine(lines.next().?, if (builtin.mode == .Debug) "symboliseInlineCaller" else null);
+    // On 0.17.1 an inline fn is an inline frame of its own, which the site
+    // rule names in Debug and ReleaseSafe alike (1B.6; the older compiler
+    // named its caller, §19.1).
+    try expectShapeLine(lines.next().?, "inlineSite");
     try expectShapeLine(lines.next().?, "test.symbolise names each site shape's acquiring function in this file");
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&line, "?outside-image:0x{x:0>16} termio", .{own.base + own.size + 16}),
@@ -887,6 +1035,18 @@ fn expectShapeLine(line: []const u8, comptime name: ?[]const u8) !void {
     try testing.expect(line[0] != '?' and std.mem.indexOf(u8, line, ".zig:") != null);
 }
 
+/// One symbolised line of a comptime-parameter instantiation in the
+/// site-shape test: `prefix` (the key up to the suffix's number), the
+/// instantiation's decimal number, and role `ui`.
+fn expectInstantiationLine(line: []const u8, prefix: []const u8) !void {
+    try testing.expect(std.mem.startsWith(u8, line, prefix));
+    try testing.expect(std.mem.endsWith(u8, line, " ui"));
+    // The prefix ends in `_`, so the role's space is past it.
+    const number = line[prefix.len .. line.len - " ui".len];
+    try testing.expect(number.len > 0);
+    for (number) |ch| try testing.expect(std.ascii.isDigit(ch));
+}
+
 /// The test block's own site (a test body is `test.<name>`).
 inline fn record_test_site() void {
     Shapes.record(6);
@@ -896,7 +1056,7 @@ test "the image file's own CodeView record is this process's" {
     const own = dump.selfModule().?;
     const pdb = own.pdb orelse return error.SkipZigTest;
     var buf: [32768]u16 = undefined;
-    const n = windows.kernel32.GetModuleFileNameW(null, &buf, buf.len - 1);
+    const n = win32_sys.GetModuleFileNameW(null, &buf, buf.len - 1);
     buf[n] = 0;
     const file_pdb = (try imagePdb(buf[0..n :0])) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(pdb.guid, file_pdb.guid);

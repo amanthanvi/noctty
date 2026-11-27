@@ -61,7 +61,7 @@ profile inheritance. Copy only the lines you need.
 | `padding`                    | `window-padding-x`, `window-padding-y` | Noctty splits horizontal and vertical padding.                                      |
 | `copyOnSelect`               | `copy-on-select`                       |                                                                                     |
 | `cursorShape`                | `cursor-style`                         |                                                                                     |
-| `historySize`                | `scrollback-limit`                     | Different unit: WT counts lines, Noctty counts bytes. The default is 10 MB.         |
+| `historySize`                | `scrollback-limit-lines`               | Lines, as in WT. `scrollback-limit-bytes` (default 10 MB) also caps it.             |
 | `initialCols`, `initialRows` | `window-width`, `window-height`        | Grid cells, as in WT. Both must be set or both are ignored.                         |
 | `backgroundImage`            | `background-image`                     |                                                                                     |
 | `bellStyle`, `bellSound`     | `bell-features`, `bell-audio-path`     | See [The bell](#the-bell) below.                                                    |

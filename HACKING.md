@@ -70,9 +70,10 @@ Keep `bin` and `share` together: the exe needs `share` beside it. A plain
 custom shaders are off unless you pass the second flag.
 `-Doptimize=ReleaseSafe` keeps Zig's runtime safety checks, so an
 out-of-bounds index or an overflow stops with a panic instead of corrupting
-memory, at some cost in speed. It also loses crash dumps: per the Zig 0.15
-standard library source, Debug and ReleaseSafe builds install Zig's own
-segfault handler, which ends the process before noctty's crash-dump filter
+memory, at some cost in speed. It also loses crash dumps: per the Zig 0.17.1
+standard library source (`std.debug.default_enable_segfault_handler`, on in
+every mode with runtime safety), Debug and ReleaseSafe builds install Zig's
+own segfault handler, which ends the process before noctty's crash-dump filter
 runs for an access violation. Crash capture is verified on ReleaseFast only.
 
 The installer, WinGet and Chocolatey (which run the same installer) create the
@@ -157,12 +158,13 @@ Differences from an installed copy:
 
 ## Toolchain
 
-This fork requires a Zig 0.15.x release with patch ≥ 2. The check is
-enforced at compile time in `src/build/zig.zig::requireZig`: any 0.14.x,
-0.16.x, or 0.15.0 / 0.15.1 toolchain fails with a `@compileError` before
-user code runs; 0.15.2 and any later 0.15 patch compile. CI uses 0.15.2
-exactly. If you have multiple Zig versions installed locally, check which
-one is on your `PATH` before debugging build issues.
+This fork requires a Zig 0.17.x release with patch ≥ 1, the
+`minimum_zig_version` in `build.zig.zon`. The check is enforced at compile
+time in `src/build/zig.zig::requireZig`: any 0.16.x or 0.18.x toolchain, or
+0.17.0, fails with a `@compileError` before user code runs; 0.17.1 and any
+later 0.17 patch compile. CI uses 0.17.1 exactly. If you have multiple Zig
+versions installed locally, check which one is on your `PATH` before
+debugging build issues.
 
 If Zig fails before compilation because the dependency cache is empty or
 cannot be hydrated automatically for Windows builds, seed it first from

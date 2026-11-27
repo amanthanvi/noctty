@@ -8,6 +8,7 @@ const configpkg = @import("../config.zig");
 const internal_os = @import("../os/main.zig");
 const Config = configpkg.Config;
 const windows_text_editor = @import("../os/windows_text_editor.zig");
+const global = @import("../global.zig");
 
 pub const Options = struct {
     pub fn deinit(self: Options) void {
@@ -44,14 +45,14 @@ pub fn run(alloc: Allocator) !u8 {
     // critical where setting up the defer cleanup is a problem.
 
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
     const stderr = &stderr_writer.interface;
 
     var opts: Options = .{};
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(Options, alloc, &opts, &iter);
     }
@@ -92,7 +93,7 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
 
     if (comptime builtin.os.tag == .windows) {
         if (editor.len > 0) {
-            return launchWindowsEditor(alloc, editor, path, stderr, std.process.Child.spawnAndWait);
+            return launchWindowsEditor(alloc, editor, path, stderr, spawnAndWait);
         }
 
         return launchWindowsDefaultEditor(alloc, path, stderr, windows_text_editor.open);
@@ -127,7 +128,7 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
     }
 
     const command = command: {
-        var buffer: std.io.Writer.Allocating = .init(alloc);
+        var buffer: std.Io.Writer.Allocating = .init(alloc);
         defer buffer.deinit();
         const writer = &buffer.writer;
         try writer.writeAll(editor);
@@ -174,26 +175,27 @@ fn launchWindowsEditor(
     editor: []const u8,
     path: []const u8,
     stderr: *std.Io.Writer,
-    comptime spawn_and_wait: fn (*std.process.Child) anyerror!std.process.Child.Term,
+    comptime spawn_and_wait: fn (std.Io, std.process.SpawnOptions) anyerror!std.process.Child.Term,
 ) !u8 {
     const argv = windowsEditorArgv(alloc, editor, path) catch |err| {
         try stderr.print("Failed to parse the editor command: {s}. Check VISUAL or EDITOR.\n", .{@errorName(err)});
         return 1;
     };
     defer freeEditorArgv(alloc, argv);
-    var child = std.process.Child.init(argv, alloc);
     // Inherit the caller's terminal so console editors run inline. Waiting also
-    // honors explicit GUI wait flags such as `code --wait`. Zig's Child handles
+    // honors explicit GUI wait flags such as `code --wait`. Zig's spawn handles
     // PATHEXT and .cmd shims, with the appropriate batch-file quoting.
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    const term = spawn_and_wait(&child) catch |err| {
+    const term = spawn_and_wait(global.io(), .{
+        .argv = argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch |err| {
         try stderr.print("Failed to execute the editor: {s}. Check VISUAL or EDITOR.\n", .{@errorName(err)});
         return 1;
     };
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code == 0) return 0;
             try stderr.print("The editor exited with code {d}.\n", .{code});
         },
@@ -202,10 +204,16 @@ fn launchWindowsEditor(
     return 1;
 }
 
+/// 0.15's `Child.spawnAndWait`: spawn, then wait for the exit.
+fn spawnAndWait(io: std.Io, options: std.process.SpawnOptions) !std.process.Child.Term {
+    var child = try std.process.spawn(io, options);
+    return child.wait(io);
+}
+
 fn windowsEditorArgv(alloc: Allocator, editor: []const u8, path: []const u8) ![]const []const u8 {
     const wide = try std.unicode.utf8ToUtf16LeAlloc(alloc, std.mem.trim(u8, editor, " \t"));
     defer alloc.free(wide);
-    var iter = try std.process.ArgIteratorWindows.init(alloc, wide);
+    var iter = try std.process.Args.Iterator.Windows.init(alloc, wide);
     defer iter.deinit();
 
     var argv: std.ArrayList([]const u8) = .empty;
@@ -256,20 +264,20 @@ test "PKG61 editor argv preserves backslashes empty args and literal metacharact
 
 test "PKG61 editor launch inherits stdio and reports failures without environment values" {
     const Fake = struct {
-        fn success(child: *std.process.Child) !std.process.Child.Term {
-            try std.testing.expectEqual(std.process.Child.StdIo.Inherit, child.stdin_behavior);
-            try std.testing.expectEqual(std.process.Child.StdIo.Inherit, child.stdout_behavior);
-            try std.testing.expectEqual(std.process.Child.StdIo.Inherit, child.stderr_behavior);
-            try std.testing.expectEqual(@as(usize, 3), child.argv.len);
-            try std.testing.expectEqualStrings("stand-in.exe", child.argv[0]);
-            try std.testing.expectEqualStrings("--wait", child.argv[1]);
-            try std.testing.expectEqualStrings("C:\\config folder\\config.ghostty", child.argv[2]);
-            return .{ .Exited = 0 };
+        fn success(_: std.Io, options: std.process.SpawnOptions) !std.process.Child.Term {
+            try std.testing.expect(options.stdin == .inherit);
+            try std.testing.expect(options.stdout == .inherit);
+            try std.testing.expect(options.stderr == .inherit);
+            try std.testing.expectEqual(@as(usize, 3), options.argv.len);
+            try std.testing.expectEqualStrings("stand-in.exe", options.argv[0]);
+            try std.testing.expectEqualStrings("--wait", options.argv[1]);
+            try std.testing.expectEqualStrings("C:\\config folder\\config.ghostty", options.argv[2]);
+            return .{ .exited = 0 };
         }
-        fn failedExit(_: *std.process.Child) !std.process.Child.Term {
-            return .{ .Exited = 7 };
+        fn failedExit(_: std.Io, _: std.process.SpawnOptions) !std.process.Child.Term {
+            return .{ .exited = 7 };
         }
-        fn failedSpawn(_: *std.process.Child) !std.process.Child.Term {
+        fn failedSpawn(_: std.Io, _: std.process.SpawnOptions) !std.process.Child.Term {
             return error.FileNotFound;
         }
     };

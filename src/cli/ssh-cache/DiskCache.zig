@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const internal_os = @import("../../os/main.zig");
 const xdg = internal_os.xdg;
 const Entry = @import("Entry.zig");
+const global = @import("../../global.zig");
 
 // 512KB - sufficient for approximately 10k entries
 const MAX_CACHE_SIZE = 512 * 1024;
@@ -26,8 +27,15 @@ pub fn defaultPath(
     alloc: Allocator,
     program: []const u8,
 ) ![]const u8 {
+    var environ_map = global.environMap() catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.XdgLookupFailed,
+    };
+    defer environ_map.deinit();
     const state_dir: []const u8 = xdg.state(
+        global.io(),
         alloc,
+        &environ_map,
         .{ .subdir = program },
     ) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -41,7 +49,7 @@ pub fn defaultPath(
 /// This removes the cache file from disk, effectively clearing all cached
 /// SSH terminfo entries.
 pub fn clear(self: DiskCache) !void {
-    std.fs.cwd().deleteFile(self.path) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(global.io(), self.path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -58,25 +66,37 @@ pub fn add(
     if (!isValidCacheKey(key)) return error.InvalidCacheKey;
 
     // Create cache directory if needed
+    // Zig 0.17's `createDirPath` does not follow a link it finds on the way
+    // (0.15's `makePath` did), so an existing folder, a link to one included,
+    // is opened first and created only when it is missing.
     if (std.fs.path.dirname(self.path)) |dir| {
-        std.fs.cwd().makePath(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        if (std.Io.Dir.cwd().openDir(global.io(), dir, .{ .follow_symlinks = true })) |existing| {
+            existing.close(global.io());
+        } else |open_err| switch (open_err) {
+            error.FileNotFound => std.Io.Dir.cwd().createDirPath(global.io(), dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            },
+            else => return open_err,
+        }
     }
 
     // Open or create cache file with secure permissions
-    const file = std.fs.createFileAbsolute(self.path, .{
+    const file = std.Io.Dir.createFileAbsolute(global.io(), self.path, .{
         .read = true,
         .truncate = false,
-        .mode = 0o600,
+        .permissions = if (builtin.target.os.tag != .windows and std.posix.mode_t != u0)
+            .fromMode(0o600)
+        else
+            .default_file,
     }) catch |err| switch (err) {
         error.PathAlreadyExists => blk: {
-            const existing_file = try std.fs.openFileAbsolute(
+            const existing_file = try std.Io.Dir.openFileAbsolute(
+                global.io(),
                 self.path,
                 .{ .mode = .read_write },
             );
-            errdefer existing_file.close();
+            errdefer existing_file.close(global.io());
             try fixupPermissions(existing_file);
             break :blk existing_file;
         },
@@ -87,13 +107,13 @@ pub fn add(
     // and this one mutually exclusive, so the handle is closed exactly once on
     // every platform and every exit path.
     var file_open = true;
-    defer if (file_open) file.close();
+    defer if (file_open) file.close(global.io());
 
     // Lock
     // Causes a compile failure in the Zig std library on Windows, see:
     // https://github.com/ziglang/zig/issues/18430
-    if (comptime builtin.os.tag != .windows) _ = file.tryLock(.exclusive) catch return error.CacheLocked;
-    defer if (comptime builtin.os.tag != .windows) file.unlock();
+    if (comptime builtin.os.tag != .windows) _ = file.tryLock(global.io(), .exclusive) catch return error.CacheLocked;
+    defer if (comptime builtin.os.tag != .windows) file.unlock(global.io());
 
     var entries = try readEntries(alloc, file);
     defer deinitEntries(alloc, &entries);
@@ -118,7 +138,7 @@ pub fn add(
     }
 
     if (comptime release_before_rename) {
-        file.close();
+        file.close(global.io());
         file_open = false;
     }
     try self.writeCacheFile(entries);
@@ -153,7 +173,8 @@ pub fn remove(
     if (!isValidCacheKey(key)) return error.InvalidCacheKey;
 
     // Open our file
-    const file = std.fs.openFileAbsolute(
+    const file = std.Io.Dir.openFileAbsolute(
+        global.io(),
         self.path,
         .{ .mode = .read_write },
     ) catch |err| switch (err) {
@@ -165,14 +186,14 @@ pub fn remove(
     // and this one mutually exclusive, so the handle is closed exactly once on
     // every platform and every exit path.
     var file_open = true;
-    defer if (file_open) file.close();
+    defer if (file_open) file.close(global.io());
     try fixupPermissions(file);
 
     // Lock
     // Causes a compile failure in the Zig std library on Windows, see:
     // https://github.com/ziglang/zig/issues/18430
-    if (comptime builtin.os.tag != .windows) _ = file.tryLock(.exclusive) catch return error.CacheLocked;
-    defer if (comptime builtin.os.tag != .windows) file.unlock();
+    if (comptime builtin.os.tag != .windows) _ = file.tryLock(global.io(), .exclusive) catch return error.CacheLocked;
+    defer if (comptime builtin.os.tag != .windows) file.unlock(global.io());
 
     // Read existing entries
     var entries = try readEntries(alloc, file);
@@ -187,7 +208,7 @@ pub fn remove(
     } else false;
 
     if (comptime release_before_rename) {
-        file.close();
+        file.close(global.io());
         file_open = false;
     }
     try self.writeCacheFile(entries);
@@ -202,7 +223,8 @@ pub fn prune(
     alloc: Allocator,
     max_age_s: u64,
 ) !usize {
-    const file = std.fs.openFileAbsolute(
+    const file = std.Io.Dir.openFileAbsolute(
+        global.io(),
         self.path,
         .{ .mode = .read_write },
     ) catch |err| switch (err) {
@@ -214,21 +236,21 @@ pub fn prune(
     // and this one mutually exclusive, so the handle is closed exactly once on
     // every platform and every exit path.
     var file_open = true;
-    defer if (file_open) file.close();
+    defer if (file_open) file.close(global.io());
     try fixupPermissions(file);
 
     // Lock
     // Causes a compile failure in the Zig std library on Windows, see:
     // https://github.com/ziglang/zig/issues/18430
-    if (comptime builtin.os.tag != .windows) _ = file.tryLock(.exclusive) catch return error.CacheLocked;
-    defer if (comptime builtin.os.tag != .windows) file.unlock();
+    if (comptime builtin.os.tag != .windows) _ = file.tryLock(global.io(), .exclusive) catch return error.CacheLocked;
+    defer if (comptime builtin.os.tag != .windows) file.unlock(global.io());
 
     // Read existing entries
     var entries = try readEntries(alloc, file);
     defer deinitEntries(alloc, &entries);
 
     // Drop expired entries from the map, then persist what remains.
-    const now = std.time.timestamp();
+    const now = std.Io.Timestamp.now(global.io(), .real).toSeconds();
     var expired: std.ArrayList([]const u8) = .empty;
     defer expired.deinit(alloc);
     var iter = entries.iterator();
@@ -244,7 +266,7 @@ pub fn prune(
     }
 
     if (comptime release_before_rename) {
-        file.close();
+        file.close(global.io());
         file_open = false;
     }
     try self.writeCacheFile(entries);
@@ -261,14 +283,15 @@ pub fn contains(
     if (!isValidCacheKey(key)) return error.InvalidCacheKey;
 
     // Open our file
-    const file = std.fs.openFileAbsolute(
+    const file = std.Io.Dir.openFileAbsolute(
+        global.io(),
         self.path,
-        .{},
+        .{ .allow_directory = false },
     ) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
-    defer file.close();
+    defer file.close(global.io());
 
     // Read existing entries
     var entries = try readEntries(alloc, file);
@@ -277,15 +300,15 @@ pub fn contains(
     return entries.contains(key);
 }
 
-fn fixupPermissions(file: std.fs.File) !void {
+fn fixupPermissions(file: std.Io.File) !void {
     // Windows does not support chmod
     if (comptime builtin.os.tag == .windows) return;
 
     // Ensure file has correct permissions (readable/writable by
     // owner only)
-    const stat = try file.stat();
-    if (stat.mode & 0o777 != 0o600) {
-        try file.chmod(0o600);
+    const stat = try file.stat(global.io());
+    if (stat.permissions.toMode() & 0o777 != 0o600) {
+        try file.setPermissions(global.io(), .fromMode(0o600));
     }
 }
 
@@ -301,22 +324,27 @@ fn writeCacheFile(
     const cache_dir = std.fs.path.dirname(self.path) orelse return error.InvalidCachePath;
     const cache_basename = std.fs.path.basename(self.path);
 
-    var dir = try std.fs.cwd().openDir(cache_dir, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(global.io(), cache_dir, .{});
+    defer dir.close(global.io());
 
     var buf: [1024]u8 = undefined;
-    var atomic_file = try dir.atomicFile(cache_basename, .{
-        .mode = 0o600,
-        .write_buffer = &buf,
+    var atomic_file = try dir.createFileAtomic(global.io(), cache_basename, .{
+        .permissions = if (builtin.target.os.tag != .windows and std.posix.mode_t != u0)
+            .fromMode(0o600)
+        else
+            .default_file,
+        .replace = true,
     });
-    defer atomic_file.deinit();
+    defer atomic_file.deinit(global.io());
+    var file_writer = atomic_file.file.writer(global.io(), &buf);
 
     var iter = entries.iterator();
     while (iter.next()) |kv| {
-        try kv.value_ptr.format(&atomic_file.file_writer.interface);
+        try kv.value_ptr.format(&file_writer.interface);
     }
 
-    try atomic_file.finish();
+    try file_writer.flush();
+    try atomic_file.replace(global.io());
 }
 
 /// List all entries in the cache.
@@ -327,14 +355,15 @@ pub fn list(
     alloc: Allocator,
 ) !std.StringHashMap(Entry) {
     // Open our file
-    const file = std.fs.openFileAbsolute(
+    const file = std.Io.Dir.openFileAbsolute(
+        global.io(),
         self.path,
-        .{},
+        .{ .allow_directory = false },
     ) catch |err| switch (err) {
         error.FileNotFound => return .init(alloc),
         else => return err,
     };
-    defer file.close();
+    defer file.close(global.io());
     return readEntries(alloc, file);
 }
 
@@ -357,9 +386,9 @@ pub fn deinitEntries(
 
 fn readEntries(
     alloc: Allocator,
-    file: std.fs.File,
+    file: std.Io.File,
 ) !std.StringHashMap(Entry) {
-    var reader = file.reader(&.{});
+    var reader = file.reader(global.io(), &.{});
     const content = try reader.interface.allocRemaining(
         alloc,
         .limited(MAX_CACHE_SIZE),
@@ -443,7 +472,7 @@ fn isValidHost(host: []const u8) bool {
     // We also accept valid IP addresses. In practice, IPv4 addresses are also
     // considered valid hostnames due to their overlapping syntax, so we can
     // simplify this check to be IPv6-specific.
-    if (std.net.Address.parseIp6(host, 0)) |_| {
+    if (std.Io.net.IpAddress.parseIp6(host, 0)) |_| {
         return true;
     } else |_| {
         return false;
@@ -479,12 +508,12 @@ test "disk cache clear" {
     defer tmp.cleanup();
     var buf: [4096]u8 = undefined;
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
-        var file_writer = file.writer(&buf);
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
+        var file_writer = file.writer(std.testing.io, &buf);
         try file_writer.interface.writeAll("HELLO!");
     }
-    const path = try tmp.dir.realpathAlloc(alloc, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", alloc);
     defer alloc.free(path);
 
     // Setup our cache
@@ -494,7 +523,7 @@ test "disk cache clear" {
     // Verify the file is gone
     try testing.expectError(
         error.FileNotFound,
-        tmp.dir.openFile("cache", .{}),
+        tmp.dir.openFile(std.testing.io, "cache", .{}),
     );
 }
 
@@ -507,21 +536,21 @@ test "disk cache operations" {
     defer tmp.cleanup();
     var buf: [4096]u8 = undefined;
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
-        var file_writer = file.writer(&buf);
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
+        var file_writer = file.writer(std.testing.io, &buf);
         const writer = &file_writer.interface;
         try writer.writeAll("HELLO!");
         try writer.flush();
     }
-    const path = try tmp.dir.realpathAlloc(alloc, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", alloc);
     defer alloc.free(path);
 
     // Setup our cache. Adding the same key twice exercises both the new
     // and existing-entry paths.
     const cache: DiskCache = .{ .path = path };
-    try cache.add(alloc, "example.com", std.time.timestamp());
-    try cache.add(alloc, "example.com", std.time.timestamp());
+    try cache.add(alloc, "example.com", std.Io.Timestamp.now(std.testing.io, .real).toSeconds());
+    try cache.add(alloc, "example.com", std.Io.Timestamp.now(std.testing.io, .real).toSeconds());
     try testing.expect(try cache.contains(alloc, "example.com"));
 
     // List
@@ -533,7 +562,7 @@ test "disk cache operations" {
     try testing.expect(try cache.remove(alloc, "example.com"));
     try testing.expect(!try cache.remove(alloc, "example.com"));
     try testing.expect(!(try cache.contains(alloc, "example.com")));
-    try cache.add(alloc, "example.com", std.time.timestamp());
+    try cache.add(alloc, "example.com", std.Io.Timestamp.now(std.testing.io, .real).toSeconds());
 }
 
 test "disk cache cleans up temp files" {
@@ -543,19 +572,19 @@ test "disk cache cleans up temp files" {
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const cache_path = try std.fs.path.join(alloc, &.{ tmp_path, "cache" });
     defer alloc.free(cache_path);
 
     const cache: DiskCache = .{ .path = cache_path };
-    try cache.add(alloc, "example.com", std.time.timestamp());
-    try cache.add(alloc, "example.org", std.time.timestamp());
+    try cache.add(alloc, "example.com", std.Io.Timestamp.now(std.testing.io, .real).toSeconds());
+    try cache.add(alloc, "example.org", std.Io.Timestamp.now(std.testing.io, .real).toSeconds());
 
     // Verify only the cache file exists and no temp files left behind
     var count: usize = 0;
     var iter = tmp.dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(std.testing.io)) |entry| {
         count += 1;
         try testing.expectEqualStrings("cache", entry.name);
     }
@@ -568,7 +597,7 @@ test "disk cache prune" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const cache_path = try std.fs.path.join(alloc, &.{ tmp_path, "cache" });
     defer alloc.free(cache_path);
@@ -578,7 +607,7 @@ test "disk cache prune" {
     // Back-date one entry an hour old and one 100 days old.
     const day = std.time.s_per_day;
     const hour = std.time.s_per_hour;
-    const now = std.time.timestamp();
+    const now = std.Io.Timestamp.now(std.testing.io, .real).toSeconds();
     try cache.add(alloc, "recent.com", now - hour);
     try cache.add(alloc, "old.com", now - 100 * day);
 
@@ -602,7 +631,7 @@ test "disk cache prune missing file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const cache_path = try std.fs.path.join(alloc, &.{ tmp_path, "cache" });
     defer alloc.free(cache_path);
@@ -622,16 +651,16 @@ test "disk cache reads duplicate keys" {
     // key with the updated entry and ensure (via testing.allocator) that
     // we don't double-free or leak.
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
         var buf: [256]u8 = undefined;
-        var file_writer = file.writer(&buf);
+        var file_writer = file.writer(std.testing.io, &buf);
         try file_writer.interface.writeAll(
             "example.com|100|xterm-ghostty\nexample.com|200|xterm-newer\n",
         );
         try file_writer.interface.flush();
     }
-    const path = try tmp.dir.realpathAlloc(alloc, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", alloc);
     defer alloc.free(path);
 
     const cache: DiskCache = .{ .path = path };
@@ -653,10 +682,10 @@ test "disk cache reads survive allocation failure" {
     // Exercise a populated cache containing a duplicate key to ensure
     // that we hit all of the possible allocation behaviors below.
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
         var buf: [256]u8 = undefined;
-        var file_writer = file.writer(&buf);
+        var file_writer = file.writer(std.testing.io, &buf);
         try file_writer.interface.writeAll(
             "a.com|100|xterm-ghostty\n" ++
                 "b.com|100|xterm-ghostty\n" ++
@@ -665,7 +694,7 @@ test "disk cache reads survive allocation failure" {
         );
         try file_writer.interface.flush();
     }
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", testing.allocator);
     defer testing.allocator.free(path);
 
     const cache: DiskCache = .{ .path = path };
@@ -698,7 +727,7 @@ test "disk cache add survives allocation failure" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(tmp_path);
     const path = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cache" });
     defer testing.allocator.free(path);
@@ -711,7 +740,7 @@ test "disk cache add survives allocation failure" {
     // from a clean cache file.
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         var failing = std.testing.FailingAllocator.init(
             testing.allocator,
             .{ .fail_index = fail_index },
@@ -773,7 +802,8 @@ test isValidUser {
     try testing.expect(!isValidUser("user@example"));
     try testing.expect(!isValidUser("user:group"));
     try testing.expect(!isValidUser("user\nname"));
-    try testing.expect(!isValidUser("a" ** 65)); // too long
+    const loooong: [65]u8 = @splat('a');
+    try testing.expect(!isValidUser(&loooong)); // too long
 }
 
 test isValidCacheKey {

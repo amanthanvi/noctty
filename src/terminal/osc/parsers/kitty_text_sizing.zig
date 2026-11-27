@@ -5,6 +5,8 @@ const std = @import("std");
 
 const assert = @import("../../../quirks.zig").inlineAssert;
 
+const Parser = @import("../../osc.zig").Parser;
+const Command = @import("../../osc.zig").Command;
 const encoding = @import("../encoding.zig");
 const lib = @import("../../lib.zig");
 
@@ -144,7 +146,7 @@ pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
 }
 
 test "OSC 66: numeric fields reject digit separators" {
-    var p = @import("../../osc.zig").Parser.init(null);
+    var p: Parser = .init(null);
     for ("66;s=0_2;text") |ch| p.next(ch);
     const cmd = p.end(null).?.*;
     try std.testing.expectEqualDeep(
@@ -256,8 +258,8 @@ test "OSC 66: overlong UTF-8" {
 
     var p = @import("../../osc.zig").Parser.init(null);
 
-    const input = "66;;" ++ "bobr" ** 1025;
-    for (input) |ch| p.next(ch);
+    for ("66;;") |ch| p.next(ch);
+    for (0..1025) |_| for ("bobr") |ch| p.next(ch);
 
     try testing.expect(p.end('\x1b') == null);
 }

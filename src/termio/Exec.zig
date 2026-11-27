@@ -9,7 +9,8 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const posix = std.posix;
-const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
+const xev = global.xev;
 const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
 const configpkg = @import("../config.zig");
@@ -27,10 +28,12 @@ const Command = @import("../Command.zig");
 const windows_shell = configpkg.windows_shell;
 const ptypkg = @import("../pty.zig");
 const Pty = ptypkg.Pty;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
 const PasswdEntry = internal_os.passwd.Entry;
 const windows = internal_os.windows;
+const windows_ext = internal_os.windows_ext;
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+const compat_fd = @import("../lib/compat/fd.zig");
 
 const log = std.log.scoped(.io_exec);
 const flatpak_support = false;
@@ -50,15 +53,14 @@ const WRITE_BUF_SIZE = 4 * 1024;
 // bottleneck on high-throughput output. 64 KiB is the product default.
 const WINDOWS_READ_BUF_SIZE = 64 * 1024;
 
-fn traceInstant(enabled: bool) ?std.time.Instant {
+fn traceInstant(enabled: bool) ?std.Io.Timestamp {
     if (!enabled) return null;
-    return std.time.Instant.now() catch null;
+    return .now(global.io(), .awake);
 }
 
-fn traceElapsedNs(started: ?std.time.Instant) u64 {
+fn traceElapsedNs(started: ?std.Io.Timestamp) u64 {
     const start = started orelse return 0;
-    const now = std.time.Instant.now() catch return 0;
-    return now.since(start);
+    return @intCast(@max(0, start.untilNow(global.io(), .awake).toNanoseconds()));
 }
 
 fn pathEntryEquals(a: []const u8, b: []const u8) bool {
@@ -124,7 +126,7 @@ fn putTermEnv(env: *EnvMap, term: []const u8, dir: []const u8) !void {
     }
 
     if (env.get("TERMINFO")) |inherited| {
-        if (samePath(inherited, dir)) env.remove("TERMINFO");
+        if (samePath(inherited, dir)) _ = env.orderedRemove("TERMINFO");
     }
 }
 
@@ -250,7 +252,7 @@ pub fn threadEnter(
         switch (@as(StartError, @errorCast(err))) {
             // We're in the child. Nothing more we can do but abnormal exit.
             // The Command will output some additional information.
-            error.ExecFailedInChild => posix.exit(1),
+            error.ExecFailedInChild => std.process.exit(1),
 
             // Keep the tailored pty exhaustion message in Thread.
             error.OpenptyFailed => return error.OpenptyFailed,
@@ -297,13 +299,16 @@ pub fn threadEnter(
     errdefer if (process) |*p| p.deinit();
 
     // Track our process start time for abnormal exits
-    const process_start = try std.time.Instant.now();
+    const process_start: std.Io.Timestamp = .now(global.io(), .awake);
 
     // Create our pipe that we'll use to kill our read thread.
     // pipe[0] is the read end, pipe[1] is the write end.
     const pipe = try internal_os.pipe();
-    errdefer posix.close(pipe[0]);
-    errdefer posix.close(pipe[1]);
+    // Win32 handles: 0.15.2's posix.close was CloseHandle; 0.17's
+    // posix.system.close is the C runtime's, which takes no HANDLE
+    // (conpty-io-boundary 4.3).
+    errdefer _ = windows.exp.kernel32.CloseHandle(pipe[0]);
+    errdefer _ = windows.exp.kernel32.CloseHandle(pipe[1]);
 
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
@@ -328,7 +333,7 @@ pub fn threadEnter(
             ReadThread.threadMainPosix,
             .{ pty_fds.read, io, pipe[0] },
         );
-    read_thread.setName("io-reader") catch {};
+    read_thread.setName(global.io(), "io-reader") catch {};
     io.surface_mailbox.surface.noteBenchmarkIoReaderSpawned();
 
     const command: ?*Command = if (self.subprocess.process) |*subprocess| switch (subprocess.*) {
@@ -347,7 +352,7 @@ pub fn threadEnter(
         .read_thread_fd = pty_fds.read,
         .stopping = &io.stopping,
         .termios_timer = termios_timer,
-        .write_pool = .init(alloc),
+        .write_pool = .empty,
     } };
 
     // Start our process watcher. If we have an xev.Process use it.
@@ -376,7 +381,7 @@ pub fn threadEnter(
     // Start our termios timer. We don't support this on Windows.
     // Fundamentally, we could support this on Windows so we're just
     // waiting for someone to implement it.
-    if (comptime builtin.os.tag != .windows) {
+    if (comptime builtin.target.os.tag != .windows) {
         termios_timer.run(
             td.loop,
             &td.backend.exec.termios_timer_c,
@@ -399,17 +404,31 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // already, before it stopped this thread; an IO thread that ends on its
     // own has not.
     exec.stopping.store(true, .release);
-    _ = posix.write(exec.read_thread_pipe, "x") catch |err| switch (err) {
-        // BrokenPipe means that our read thread is closed already,
-        // which is completely fine since that is what we were trying
-        // to achieve.
-        error.BrokenPipe => {},
+    if (comptime builtin.target.os.tag == .windows) {
+        // The quit byte goes through WriteFile, never the C runtime's write
+        // on a HANDLE (conpty-io-boundary 4.3). The Windows reader stops on
+        // `stopping` and the repeated cancel below, not on this byte.
+        var written: windows.DWORD = 0;
+        if (windows_ext.WriteFile(exec.read_thread_pipe, "x", 1, &written, null) == 0) {
+            switch (windows.GetLastError()) {
+                // Our read thread closed its end already, which is what we
+                // were trying to achieve.
+                .BROKEN_PIPE, .NO_DATA => {},
+                else => |err| log.warn("error writing to read thread quit pipe err={}", .{err}),
+            }
+        }
+    } else switch (posix.errno(posix.system.write(exec.read_thread_pipe, "x", 1))) {
+        .SUCCESS => {},
 
-        else => log.warn(
-            "error writing to read thread quit pipe err={}",
-            .{err},
+        // EPIPE means that our read thread is closed already, which is
+        // completely fine since that is what we were trying to achieve.
+        .PIPE => {},
+
+        else => |e| log.warn(
+            "error writing to read thread quit pipe err=E{s}",
+            .{@tagName(e)},
         ),
-    };
+    }
 
     if (comptime builtin.os.tag == .windows) {
         ReadThread.cancelReadUntilExit(exec.read_thread_fd, exec.read_thread);
@@ -460,7 +479,7 @@ pub fn focusGained(
     _ = self;
 
     // Windows has no termios, so there is nothing to poll.
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) return;
 
     assert(td.backend == .exec);
     const execdata = &td.backend.exec;
@@ -501,16 +520,11 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     if (execdata.command) |cmd| cmd.closeWindowsJobObject();
 
     // Determine how long the process was running for.
-    const runtime_ms: ?u64 = runtime: {
-        const process_end = std.time.Instant.now() catch break :runtime null;
-        const runtime_ns = process_end.since(execdata.start);
-        const runtime_ms = runtime_ns / std.time.ns_per_ms;
-        break :runtime runtime_ms;
-    };
-    log.debug(
-        "child process exited status={} runtime={}ms",
-        .{ exit_code, runtime_ms orelse 0 },
+    const runtime_ms: u64 = @max(
+        0,
+        execdata.start.untilNow(global.io(), .awake).toMilliseconds(),
     );
+    log.debug("child process exited status={} runtime={}ms", .{ exit_code, runtime_ms });
 
     // We always notify the surface immediately that the child has
     // exited and some metadata about the exit, unless the surface is
@@ -518,7 +532,7 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     _ = td.surface_mailbox.push(.{
         .child_exited = .{
             .exit_code = exit_code,
-            .runtime_ms = runtime_ms orelse 0,
+            .runtime_ms = runtime_ms,
         },
     }, .{ .forever_unless = execdata.stopping });
 }
@@ -596,7 +610,7 @@ fn termiosTimer(
         // If our password input state changed on the terminal then
         // we notify the surface.
         {
-            td.renderer_state.mutex.lock();
+            td.renderer_state.mutex.lockUncancelable();
             defer td.renderer_state.mutex.unlock();
             const t = td.renderer_state.terminal;
             if (t.flags.password_input == password_input) {
@@ -635,9 +649,6 @@ pub fn queueWrite(
     linefeed: bool,
 ) !void {
     _ = self;
-    // The write pool owns its allocator; the parameter is kept for the
-    // backend interface.
-    _ = alloc;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
@@ -650,7 +661,7 @@ pub fn queueWrite(
     // still queued (see `ThreadData.Write`).
     var i: usize = 0;
     while (i < data.len) {
-        const w = try exec.write_pool.create();
+        const w = try exec.write_pool.create(alloc);
         w.td = exec;
         const buf = &w.buf;
         const slice = slice: {
@@ -752,7 +763,7 @@ pub const ThreadData = struct {
     };
 
     /// Process start time and boolean of whether its already exited.
-    start: std.time.Instant,
+    start: std.Io.Timestamp,
     exited: bool = false,
 
     /// The data stream is the main IO for the pty.
@@ -795,13 +806,12 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.Mode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        posix.close(self.read_thread_pipe);
+        _ = windows.exp.kernel32.CloseHandle(self.read_thread_pipe);
 
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
         // drop this.
-        _ = alloc;
-        self.write_pool.deinit();
+        self.write_pool.deinit(alloc);
 
         // Stop our process watcher
         if (self.process) |*p| p.deinit();
@@ -840,11 +850,7 @@ pub const Config = struct {
 };
 
 const Subprocess = struct {
-    const c = @cImport({
-        @cInclude("errno.h");
-        @cInclude("signal.h");
-        @cInclude("unistd.h");
-    });
+    const c = @import("posix_c");
 
     arena: std.heap.ArenaAllocator,
     cwd: ?[:0]const u8,
@@ -941,8 +947,8 @@ const Subprocess = struct {
         if (cfg.resources_dir) |base| {
             // Assume that the resources directory is adjacent to the terminfo
             // database
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const dir = try std.fmt.bufPrint(&buf, "{s}/terminfo", .{
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const dir = try std.mem.print(&buf, "{s}/terminfo", .{
                 std.fs.path.dirname(base) orelse unreachable,
             });
             try putTermEnv(&env, cfg.term, dir);
@@ -966,11 +972,14 @@ const Subprocess = struct {
                 break :ghostty_path;
             }
 
-            var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const exe_bin_path = std.fs.selfExePath(&exe_buf) catch |err| {
+            var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const exe_bin_path = exe_buf[0 .. std.process.executablePath(
+                global.io(),
+                &exe_buf,
+            ) catch |err| {
                 log.warn("failed to get ghostty exe path err={}", .{err});
                 break :ghostty_path;
-            };
+            }];
             const exe_dir = std.fs.path.dirname(exe_bin_path) orelse break :ghostty_path;
             log.debug(
                 "{s} ghostty bin on path dir={s}",
@@ -984,13 +993,13 @@ const Subprocess = struct {
         if (comptime builtin.target.os.tag.isDarwin()) darwin: {
             const resources_dir = cfg.resources_dir orelse break :darwin;
 
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
             const xdg_data_dir_key = "XDG_DATA_DIRS";
-            if (std.fmt.bufPrint(&buf, "{s}/..", .{resources_dir})) |data_dir| {
+            if (std.mem.print(&buf, "{s}/..", .{resources_dir})) |data_dir| {
                 try env.put(
                     xdg_data_dir_key,
-                    try internal_os.appendEnv(
+                    try appendEnv(
                         alloc,
                         env.get(xdg_data_dir_key) orelse "/usr/local/share:/usr/share",
                         data_dir,
@@ -1001,13 +1010,13 @@ const Subprocess = struct {
             }
 
             const manpath_key = "MANPATH";
-            if (std.fmt.bufPrint(&buf, "{s}/../man", .{resources_dir})) |man_dir| {
+            if (std.mem.print(&buf, "{s}/../man", .{resources_dir})) |man_dir| {
                 // Always append with colon in front, as it mean that if
                 // `MANPATH` is empty, then it should be treated as an extra
                 // path instead of overriding all paths set by OS.
                 try env.put(
                     manpath_key,
-                    try internal_os.appendEnvAlways(
+                    try appendEnvAlways(
                         alloc,
                         env.get(manpath_key) orelse "",
                         man_dir,
@@ -1026,7 +1035,7 @@ const Subprocess = struct {
         // VTE_VERSION is set by gnome-terminal and other VTE-based terminals.
         // We don't want our child processes to think we're running under VTE.
         // This is not apprt-specific, so we do it here.
-        env.remove("VTE_VERSION");
+        _ = env.orderedRemove("VTE_VERSION");
 
         const utf8_console = if (builtin.os.tag == .windows)
             windows_shell.shouldApplyUtf8ConsoleForCurrentSystem(cfg.utf8_console)
@@ -1192,10 +1201,10 @@ const Subprocess = struct {
                 cfg.working_directory,
                 windows_shell.isWslCommand(launch_command),
             );
-            if (resolved) |value| break :pwd try alloc.dupeZ(u8, value);
+            if (resolved) |value| break :pwd try alloc.dupeSentinel(u8, value, 0);
             break :pwd null;
         } else if (cfg.working_directory) |cwd|
-            try alloc.dupeZ(u8, cwd)
+            try alloc.dupeSentinel(u8, cwd, 0)
         else
             null;
         const cwd: ?[:0]u8 = if (builtin.os.tag == .windows) cwd: {
@@ -1205,7 +1214,7 @@ const Subprocess = struct {
                 cfg.working_directory_home,
                 windows_shell.isWslCommand(launch_command),
             );
-            if (resolved) |value| break :cwd try alloc.dupeZ(u8, value);
+            if (resolved) |value| break :cwd try alloc.dupeSentinel(u8, value, 0);
             break :cwd null;
         } else shell_pwd;
 
@@ -1278,7 +1287,7 @@ const Subprocess = struct {
         self.stop();
         if (self.pty) |*pty| pty.deinit();
         if (comptime builtin.os.tag == .windows) if (self.adopted_client_process) |handle| {
-            _ = windows.CloseHandle(handle);
+            _ = windows_ext.CloseHandle(handle);
             self.adopted_client_process = null;
         };
         if (self.env) |*env| env.deinit();
@@ -1322,8 +1331,8 @@ const Subprocess = struct {
         }, self.pty_options);
         self.pty = pty;
         errdefer if (!in_child) {
-            if (comptime builtin.os.tag != .windows) {
-                _ = posix.close(pty.slave);
+            if (comptime builtin.target.os.tag != .windows) {
+                _ = posix.system.close(pty.slave);
             }
 
             pty.deinit();
@@ -1333,11 +1342,11 @@ const Subprocess = struct {
         // Cleanup we only run in our parent when we successfully start
         // the process.
         defer if (!in_child and self.process != null) {
-            if (comptime builtin.os.tag != .windows) {
+            if (comptime builtin.target.os.tag != .windows) {
                 // Once our subcommand is started we can close the slave
                 // side. This prevents the slave fd from being leaked to
                 // future children.
-                _ = posix.close(pty.slave);
+                _ = posix.system.close(pty.slave);
             }
 
             // Successful start we can clear out some memory.
@@ -1366,8 +1375,12 @@ const Subprocess = struct {
                 //
                 // https://docs.flatpak.org/en/latest/sandbox-permissions.html#reserved-paths
                 log.info("flatpak detected, will use host command to verify cwd access", .{});
-                const dev_null = try std.fs.cwd().openFile("/dev/null", .{ .mode = .read_write });
-                defer dev_null.close();
+                const dev_null = try std.Io.Dir.cwd().openFile(
+                    global.io(),
+                    "/dev/null",
+                    .{ .mode = .read_write },
+                );
+                defer dev_null.close(global.io());
                 var cmd: internal_os.FlatpakHostCommand = .{
                     .argv = &[_][]const u8{
                         "/bin/sh",
@@ -1388,7 +1401,7 @@ const Subprocess = struct {
                 break :cwd proposed;
             }
 
-            if (std.fs.cwd().access(proposed, .{})) {
+            if (std.Io.Dir.cwd().access(global.io(), proposed, .{})) {
                 break :cwd proposed;
             } else |err| {
                 log.warn("cannot access cwd, ignoring: {}", .{err});
@@ -1488,7 +1501,7 @@ const Subprocess = struct {
         log.info("started subcommand path={s} pid={?}", .{ self.args[0], cmd.pid });
 
         self.process = .{ .fork_exec = cmd };
-        return switch (builtin.os.tag) {
+        return switch (builtin.target.os.tag) {
             .windows => .{
                 .read = pty.out_pipe,
                 .write = pty.in_pipe,
@@ -1586,20 +1599,20 @@ const Subprocess = struct {
     fn killCommand(command: *Command) !void {
         defer command.closeWindowsJobObject();
         if (command.pid) |pid| {
-            switch (builtin.os.tag) {
+            switch (builtin.target.os.tag) {
                 .windows => {
-                    if (windows.kernel32.TerminateProcess(pid, 0) == 0) {
-                        return windows.unexpectedError(windows.kernel32.GetLastError());
+                    if (windows.exp.kernel32.TerminateProcess(pid, 0) == windows.FALSE) {
+                        return windows.unexpectedError(windows.GetLastError());
                     }
 
                     // Termination completes asynchronously. Wait for it, but
                     // not forever: a close blocks the app thread until this
                     // returns, and a process stuck in its kernel teardown
                     // would hold it for good.
-                    switch (windows.kernel32.WaitForSingleObject(pid, kill_wait_ms)) {
-                        std.os.windows.WAIT_OBJECT_0 => {},
-                        std.os.windows.WAIT_TIMEOUT => log.warn("child process still exiting after {d} ms", .{kill_wait_ms}),
-                        else => return windows.unexpectedError(windows.kernel32.GetLastError()),
+                    switch (windows_ext.kernel32.WaitForSingleObject(pid, kill_wait_ms)) {
+                        windows_ext.WAIT_OBJECT_0 => {},
+                        windows_ext.WAIT_TIMEOUT => log.warn("child process still exiting after {d} ms", .{kill_wait_ms}),
+                        else => return windows.unexpectedError(windows_ext.kernel32.GetLastError()),
                     }
                 },
 
@@ -1638,10 +1651,14 @@ const Subprocess = struct {
             // The gist is that it lets us detect when children
             // are still alive without blocking so that we can
             // kill them again.
-            const res = posix.waitpid(pid, std.c.W.NOHANG);
-            log.debug("waitpid result={}", .{res.pid});
-            if (res.pid != 0) break;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            const res_pid = while (true) {
+                const rc = posix.system.waitpid(pid, null, std.c.W.NOHANG);
+                if (posix.errno(rc) == .INTR) continue;
+                break rc;
+            };
+            log.debug("waitpid result={}", .{res_pid});
+            if (res_pid != 0) break;
+            try std.Io.sleep(global.io(), .fromMilliseconds(10), .awake);
         }
     }
 
@@ -1661,7 +1678,7 @@ const Subprocess = struct {
             const pgid = c.getpgid(pid);
             if (pgid == my_pgid) {
                 log.warn("pgid is our own, retrying", .{});
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                std.Io.sleep(global.io(), .fromMilliseconds(10), .awake) catch {};
                 continue;
             }
 
@@ -1795,15 +1812,15 @@ pub const ReadThread = struct {
     /// stage at a time, so buffer contents need no locking. Only the
     /// ring metadata is guarded by the mutex.
     const Pipeline = struct {
-        mutex: std.Thread.Mutex = .{},
+        mutex: std.Io.Mutex = .init,
 
         /// Signaled when a batch is published or the gather stage is
         /// done. Waited on by the parse stage.
-        batch_ready: std.Thread.Condition = .{},
+        batch_ready: std.Io.Condition = .init,
 
         /// Signaled when a batch has been consumed. Waited on by the
         /// gather stage when all buffers are in flight (backpressure).
-        slot_free: std.Thread.Condition = .{},
+        slot_free: std.Io.Condition = .init,
 
         /// The number of valid bytes in each buffer. Set at publish
         /// time by the gather stage, read by the parse stage.
@@ -1847,11 +1864,11 @@ pub const ReadThread = struct {
     /// processOutput's own. Zig 0.15.2 names the caller for a site inlined
     /// into it (PLAN.md §2.7 RQ11, §19.1).
     const process_output_modifier: std.builtin.CallModifier =
-        if (builtin.mode == .Debug) .auto else .always_inline;
+        if (builtin.mode == .debug) .auto else .always_inline;
 
     fn threadMainPosix(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
-        defer posix.close(quit);
+        defer _ = posix.system.close(quit);
 
         // Right now, on Darwin, `std.Thread.setName` can only name the current
         // thread, and we have no way to get the current thread from within it,
@@ -1885,7 +1902,7 @@ pub const ReadThread = struct {
         // can't create it we still run correctly, bridge polls are
         // just bounded by their timeout instead of being interrupted
         // when the parse stage goes idle.
-        if (posix.pipe2(.{
+        if (compat_fd.pipe2(.{
             .CLOEXEC = true,
             .NONBLOCK = true,
         })) |fds| {
@@ -1895,8 +1912,8 @@ pub const ReadThread = struct {
             log.warn("read thread failed to create idle pipe err={}", .{err});
         }
         defer if (pipeline.idle_read_fd >= 0) {
-            posix.close(pipeline.idle_read_fd);
-            posix.close(pipeline.idle_write_fd);
+            compat_fd.close(pipeline.idle_read_fd);
+            compat_fd.close(pipeline.idle_write_fd);
         };
 
         const gather_thread = std.Thread.spawn(
@@ -1911,8 +1928,8 @@ pub const ReadThread = struct {
             return;
         };
         defer gather_thread.join();
-        if (comptime !builtin.os.tag.isDarwin()) {
-            gather_thread.setName("io-gather") catch {};
+        if (comptime !builtin.target.os.tag.isDarwin()) {
+            gather_thread.setName(global.io(), "io-gather") catch {};
         }
 
         // This thread is the parse stage. We consume batches in ring
@@ -1920,11 +1937,11 @@ pub const ReadThread = struct {
         // the ring is drained.
         while (true) {
             const batch: []const u8 = batch: {
-                pipeline.mutex.lock();
-                defer pipeline.mutex.unlock();
+                pipeline.mutex.lockUncancelable(global.io());
+                defer pipeline.mutex.unlock(global.io());
                 while (pipeline.count == 0) {
                     if (pipeline.done) return;
-                    pipeline.batch_ready.wait(&pipeline.mutex);
+                    pipeline.batch_ready.waitUncancelable(global.io(), &pipeline.mutex);
                 }
                 const slot = pipeline.tail;
                 break :batch pipeline.bufs[slot][0..pipeline.lens[slot]];
@@ -1935,27 +1952,27 @@ pub const ReadThread = struct {
             io.processOutput(batch);
 
             {
-                pipeline.mutex.lock();
+                pipeline.mutex.lockUncancelable(global.io());
                 pipeline.tail = (pipeline.tail + 1) % buffer_count;
                 pipeline.count -= 1;
                 const wake = pipeline.count == 0 and
                     pipeline.bridging and
                     pipeline.idle_write_fd >= 0;
-                pipeline.mutex.unlock();
-                pipeline.slot_free.signal();
+                pipeline.mutex.unlock(global.io());
+                pipeline.slot_free.signal(global.io());
 
                 // We ran out of batches while the gather stage is
                 // bridging a refill gap: interrupt its poll so it
                 // delivers what it has instead of sleeping out the
                 // timeout while we sit idle.
                 if (wake) {
-                    _ = posix.write(pipeline.idle_write_fd, "i") catch {};
+                    _ = posix.system.write(pipeline.idle_write_fd, "i", 1);
                 }
             }
 
             // Batch boundary: hand the renderer state mutex off if
             // the renderer is waiting. See renderer.State.lockDemand.
-            io.renderer_state.yieldToDemand();
+            io.renderer_state.yieldToDemand(global.io());
         }
     }
 
@@ -1964,7 +1981,7 @@ pub const ReadThread = struct {
     /// and publishes each batch to the parse stage. This thread owns
     /// all fd monitoring, including the quit fd.
     fn gatherMainPosix(fd: posix.fd_t, quit: posix.fd_t, pipeline: *Pipeline) void {
-        if (builtin.os.tag.isDarwin()) {
+        if (builtin.target.os.tag.isDarwin()) {
             internal_os.macos.pthread_setname_np(&"io-gather".*);
             setQosClass();
         }
@@ -1972,10 +1989,10 @@ pub const ReadThread = struct {
         // However we exit, tell the parse stage the stream is over so
         // it drains the ring and joins us.
         defer {
-            pipeline.mutex.lock();
+            pipeline.mutex.lockUncancelable(global.io());
             pipeline.done = true;
-            pipeline.mutex.unlock();
-            pipeline.batch_ready.signal();
+            pipeline.mutex.unlock(global.io());
+            pipeline.batch_ready.signal(global.io());
         }
 
         // The fds we poll: data on the pty, our quit notification,
@@ -1994,16 +2011,16 @@ pub const ReadThread = struct {
             // we should stop reading and let the kernel queue exert
             // backpressure on the child.
             const buf: *[buffer_capacity]u8 = buf: {
-                pipeline.mutex.lock();
-                defer pipeline.mutex.unlock();
+                pipeline.mutex.lockUncancelable(global.io());
+                defer pipeline.mutex.unlock(global.io());
                 while (pipeline.count == buffer_count) {
-                    pipeline.slot_free.wait(&pipeline.mutex);
+                    pipeline.slot_free.waitUncancelable(global.io(), &pipeline.mutex);
                 }
                 break :buf &pipeline.bufs[pipeline.head];
             };
 
             var total: usize = 0;
-            var bridge_start: ?std.time.Instant = null;
+            var bridge_start: ?std.Io.Timestamp = null;
             var spins: usize = 0;
             var fatal = false;
 
@@ -2032,10 +2049,9 @@ pub const ReadThread = struct {
 
                         // Still dry, so we want to sleep in poll for
                         // the next refill, within our latency budget.
-                        const now = std.time.Instant.now() catch
-                            break :gather;
+                        const now = std.Io.Timestamp.now(global.io(), .awake);
                         if (bridge_start) |start| {
-                            if (now.since(start) >= gather_budget_ns)
+                            if (start.durationTo(now).toNanoseconds() >= gather_budget_ns)
                                 break :gather;
                         } else bridge_start = now;
 
@@ -2053,8 +2069,8 @@ pub const ReadThread = struct {
                         // the idle wake so it can interrupt our poll
                         // the moment that changes.
                         {
-                            pipeline.mutex.lock();
-                            defer pipeline.mutex.unlock();
+                            pipeline.mutex.lockUncancelable(global.io());
+                            defer pipeline.mutex.unlock(global.io());
                             if (pipeline.count == 0) break :gather;
                             pipeline.bridging = true;
                         }
@@ -2137,12 +2153,12 @@ pub const ReadThread = struct {
             // Publish the batch (if any) to the parse stage and rotate
             // to the next buffer.
             if (total > 0) {
-                pipeline.mutex.lock();
+                pipeline.mutex.lockUncancelable(global.io());
                 pipeline.lens[pipeline.head] = total;
                 pipeline.head = (pipeline.head + 1) % buffer_count;
                 pipeline.count += 1;
-                pipeline.mutex.unlock();
-                pipeline.batch_ready.signal();
+                pipeline.mutex.unlock(global.io());
+                pipeline.batch_ready.signal(global.io());
             }
 
             if (fatal) return;
@@ -2176,8 +2192,8 @@ pub const ReadThread = struct {
     /// Clears the bridging flag armed before a bridge poll, closing
     /// the window in which the parse stage writes idle wakes.
     fn clearBridging(pipeline: *Pipeline) void {
-        pipeline.mutex.lock();
-        defer pipeline.mutex.unlock();
+        pipeline.mutex.lockUncancelable(global.io());
+        defer pipeline.mutex.unlock(global.io());
         pipeline.bridging = false;
     }
 
@@ -2196,24 +2212,23 @@ pub const ReadThread = struct {
 
     /// Sets the fd to non-blocking mode. Returns false on failure.
     fn setNonblock(fd: posix.fd_t) bool {
-        const flags = posix.fcntl(
-            fd,
-            posix.F.GETFL,
-            0,
-        ) catch |err| {
-            log.warn("read thread failed to get flags err={}", .{err});
+        const flags = posix.system.fcntl(fd, posix.F.GETFL);
+        if (flags == -1) {
+            log.warn("read thread failed to get flags err=E{s}", .{@tagName(posix.errno(-1))});
             return false;
-        };
+        }
 
-        _ = posix.fcntl(
+        switch (posix.errno(posix.system.fcntl(
             fd,
             posix.F.SETFL,
             flags | @as(u32, @bitCast(posix.O{ .NONBLOCK = true })),
-        ) catch |err| {
-            log.warn("read thread failed to set flags err={}", .{err});
-            return false;
-        };
-
+        ))) {
+            .SUCCESS => {},
+            else => |e| {
+                log.warn("read thread failed to set flags err=E{s}", .{@tagName(e)});
+                return false;
+            },
+        }
         return true;
     }
 
@@ -2222,7 +2237,7 @@ pub const ReadThread = struct {
         io: *termio.Termio,
         quit: posix.fd_t,
         adopted_client_process: ?windows.HANDLE,
-        process_start: std.time.Instant,
+        process_start: std.Io.Timestamp,
     ) void {
         // The pty reader's role, for the renderer-state mutex it takes in
         // processOutput (PLAN.md §2.7 RQ5).
@@ -2231,7 +2246,7 @@ pub const ReadThread = struct {
 
         // Always close our end of the pipe when we exit. This reader stops
         // on `io.stopping` instead; only the POSIX reader polls the pipe.
-        defer posix.close(quit);
+        defer _ = windows.exp.kernel32.CloseHandle(quit);
 
         // Setup our crash metadata
         crash.sentry.thread_state = .{
@@ -2266,7 +2281,7 @@ pub const ReadThread = struct {
             self.io.noteWindowsProcessOutput(traceElapsedNs(process_started));
             // Between chunks, with the renderer-state mutex released. Keep
             // the wait outside the processOutput timing sample.
-            self.io.renderer_state.yieldToDemand();
+            self.io.renderer_state.yieldToDemand(global.io());
         }
     };
 
@@ -2292,8 +2307,8 @@ pub const ReadThread = struct {
         while (!stop.load(.acquire)) {
             var n: windows.DWORD = 0;
             const read_started = traceInstant(trace);
-            if (windows.kernel32.ReadFile(fd, buf.ptr, @intCast(buf.len), &n, null) == 0) {
-                switch (windows.kernel32.GetLastError()) {
+            if (windows_ext.kernel32.ReadFile(fd, buf.ptr, @intCast(buf.len), &n, null) == windows.FALSE) {
+                switch (windows_ext.kernel32.GetLastError()) {
                     // `cancelReadUntilExit`; `stop` decides.
                     .OPERATION_ABORTED => continue,
                     .BROKEN_PIPE => return .eof,
@@ -2320,15 +2335,15 @@ pub const ReadThread = struct {
     fn cancelReadUntilExit(fd: windows.HANDLE, reader: std.Thread) void {
         var warned = false;
         while (true) {
-            if (windows.kernel32.CancelIoEx(fd, null) == 0) switch (windows.kernel32.GetLastError()) {
+            if (windows_ext.kernel32.CancelIoEx(fd, null) == windows.FALSE) switch (windows_ext.kernel32.GetLastError()) {
                 .NOT_FOUND => {},
                 else => |err| if (!warned) {
                     warned = true;
                     log.warn("error interrupting read thread err={}", .{err});
                 },
             };
-            switch (windows.kernel32.WaitForSingleObject(reader.getHandle(), cancel_retry_ms)) {
-                std.os.windows.WAIT_TIMEOUT => {},
+            switch (windows_ext.kernel32.WaitForSingleObject(reader.getHandle(), cancel_retry_ms)) {
+                windows_ext.WAIT_TIMEOUT => {},
                 else => return,
             }
         }
@@ -2339,23 +2354,23 @@ pub const ReadThread = struct {
     fn notifyAdoptedExit(
         io: *termio.Termio,
         client_process: windows.HANDLE,
-        process_start: std.time.Instant,
+        process_start: std.Io.Timestamp,
     ) void {
         var exit_code: windows.DWORD = 0;
-        if (windows.kernel32.GetExitCodeProcess(client_process, &exit_code) == 0) {
-            log.warn("adopted client exit-code query failed err={}", .{windows.kernel32.GetLastError()});
+        if (windows_ext.kernel32.GetExitCodeProcess(client_process, &exit_code) == windows.FALSE) {
+            log.warn("adopted client exit-code query failed err={}", .{windows_ext.kernel32.GetLastError()});
             exit_code = 1;
-        } else if (exit_code == windows.exp.STILL_ACTIVE) {
+        } else if (exit_code == windows_ext.STILL_ACTIVE) {
             // EOF still ends the session. A root process that deliberately
             // closed its output before exiting has no final code to report.
             log.warn("adopted client still active after output EOF; reporting success", .{});
             exit_code = 0;
         }
 
-        const runtime_ms = runtime: {
-            const process_end = std.time.Instant.now() catch break :runtime 0;
-            break :runtime process_end.since(process_start) / std.time.ns_per_ms;
-        };
+        const runtime_ms: u64 = @intCast(@max(
+            0,
+            process_start.untilNow(global.io(), .awake).toMilliseconds(),
+        ));
         _ = io.surface_mailbox.push(.{
             .child_exited = .{
                 .exit_code = exit_code,
@@ -2375,41 +2390,48 @@ const TestPipe = struct {
     fn init() !TestPipe {
         var read: windows.HANDLE = undefined;
         var write: windows.HANDLE = undefined;
-        if (windows.exp.kernel32.CreatePipe(&read, &write, null, 0) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (windows.exp.kernel32.CreatePipe(&read, &write, null, 0) == windows.FALSE) {
+            return windows.unexpectedError(windows_ext.kernel32.GetLastError());
         }
         return .{ .read = read, .write = write };
     }
 
     fn put(self: *TestPipe, data: []const u8) !void {
         var written: windows.DWORD = 0;
-        if (windows.kernel32.WriteFile(self.write.?, data.ptr, @intCast(data.len), &written, null) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (windows_ext.kernel32.WriteFile(self.write.?, data.ptr, @intCast(data.len), &written, null) == 0) {
+            return windows.unexpectedError(windows_ext.kernel32.GetLastError());
         }
     }
 
     /// End any read in progress with EOF. Unblocks a test whose reader the
     /// code under test failed to stop.
     fn closeWrite(self: *TestPipe) void {
-        if (self.write) |handle| _ = windows.CloseHandle(handle);
+        if (self.write) |handle| _ = windows_ext.CloseHandle(handle);
         self.write = null;
     }
 
     fn deinit(self: *TestPipe) void {
         self.closeWrite();
-        _ = windows.CloseHandle(self.read);
+        _ = windows_ext.CloseHandle(self.read);
     }
 };
 
 /// Runs `cancelReadUntilExit` and reports when it returned.
 const TestStopper = struct {
-    done: std.Thread.ResetEvent = .{},
+    done: std.Io.Event = .unset,
 
     fn run(self: *TestStopper, fd: windows.HANDLE, reader: std.Thread) void {
         ReadThread.cancelReadUntilExit(fd, reader);
-        self.done.set();
+        self.done.set(std.testing.io);
     }
 };
+
+fn testWait(event: *std.Io.Event, ms: i64) !void {
+    return event.waitTimeout(std.testing.io, .{ .duration = .{
+        .raw = .fromMilliseconds(ms),
+        .clock = .awake,
+    } });
+}
 
 test "Windows pty reader busy with output when stopped exits at its next read" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -2420,14 +2442,14 @@ test "Windows pty reader busy with output when stopped exits at its next read" {
     // Holds the reader in its first chunk, outside ReadFile, where the cancel
     // that used to be the only stop signal finds nothing to cancel.
     const Sink = struct {
-        entered: std.Thread.ResetEvent = .{},
-        release: std.Thread.ResetEvent = .{},
+        entered: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
         chunks: std.atomic.Value(u32) = .init(0),
 
         fn output(self: *@This(), _: []const u8, _: u64) void {
             if (self.chunks.fetchAdd(1, .acq_rel) == 0) {
-                self.entered.set();
-                self.release.wait();
+                self.entered.set(std.testing.io);
+                self.release.waitUncancelable(std.testing.io);
             }
         }
 
@@ -2447,9 +2469,9 @@ test "Windows pty reader busy with output when stopped exits at its next read" {
     var end: ReadThread.ReadEnd = .eof;
     try pipe.put("first");
     const reader = try std.Thread.spawn(.{}, Sink.read, .{ pipe.read, &stop, &sink, &end });
-    sink.entered.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&sink.entered, 5000) catch {
         pipe.closeWrite();
-        sink.release.set();
+        sink.release.set(std.testing.io);
         reader.join();
         return error.ReaderNeverRead;
     };
@@ -2460,10 +2482,10 @@ test "Windows pty reader busy with output when stopped exits at its next read" {
     stop.store(true, .release);
     var stopper: TestStopper = .{};
     const stopping = try std.Thread.spawn(.{}, TestStopper.run, .{ &stopper, pipe.read, reader });
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    sink.release.set();
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+    sink.release.set(std.testing.io);
 
-    stopper.done.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&stopper.done, 5000) catch {
         pipe.closeWrite();
         stopping.join();
         reader.join();
@@ -2485,15 +2507,15 @@ test "Windows pty reader cancel is retried for a read that starts after the firs
     // ReadFile only after the first cancel found no read to cancel. One
     // cancel left this read, and the joins behind it, blocked for good.
     const LateReader = struct {
-        go: std.Thread.ResetEvent = .{},
+        go: std.Io.Event = .unset,
         err: std.os.windows.Win32Error = .SUCCESS,
 
         fn run(self: *@This(), fd: windows.HANDLE) void {
-            self.go.wait();
+            self.go.waitUncancelable(std.testing.io);
             var buf: [16]u8 = undefined;
             var n: windows.DWORD = 0;
-            if (windows.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == 0) {
-                self.err = windows.kernel32.GetLastError();
+            if (windows_ext.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == windows.FALSE) {
+                self.err = windows_ext.kernel32.GetLastError();
             }
         }
     };
@@ -2502,10 +2524,10 @@ test "Windows pty reader cancel is retried for a read that starts after the firs
     const reader = try std.Thread.spawn(.{}, LateReader.run, .{ &late, pipe.read });
     var stopper: TestStopper = .{};
     const stopping = try std.Thread.spawn(.{}, TestStopper.run, .{ &stopper, pipe.read, reader });
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    late.go.set();
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+    late.go.set(std.testing.io);
 
-    stopper.done.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&stopper.done, 5000) catch {
         pipe.closeWrite();
         stopping.join();
         reader.join();
@@ -2523,7 +2545,7 @@ test "child exit report gives up on a full app mailbox once the surface is closi
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);
     defer app_queue.destroy(alloc);
-    while (app_queue.push(.{ .quit = {} }, .{ .instant = {} }) != 0) {}
+    while (app_queue.push(std.testing.io, .{ .quit = {} }, .{ .instant = {} }) != 0) {}
 
     // The app thread set this before joining the IO thread, so it drains
     // nothing until that thread exits.
@@ -2537,7 +2559,7 @@ test "child exit report gives up on a full app mailbox once the surface is closi
             .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
         },
         .backend = .{ .exec = .{
-            .start = try std.time.Instant.now(),
+            .start = .now(std.testing.io, .awake),
             .write_stream = undefined,
             .process = null,
             .read_thread = undefined,
@@ -2551,18 +2573,18 @@ test "child exit report gives up on a full app mailbox once the surface is closi
     };
 
     const Exit = struct {
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
 
         fn run(self: *@This(), data: *termio.Termio.ThreadData) void {
             processExitCommon(data, 0);
-            self.done.set();
+            self.done.set(std.testing.io);
         }
     };
     var exit: Exit = .{};
     const thread = try std.Thread.spawn(.{}, Exit.run, .{ &exit, &td });
-    exit.done.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&exit.done, 5000) catch {
         // Make room so the waiting report can finish, then fail.
-        _ = app_queue.pop();
+        _ = app_queue.pop(std.testing.io);
         thread.join();
         return error.ChildExitReportWaitedOnClosingSurface;
     };
@@ -2577,23 +2599,23 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
         fn handle(source: windows.HANDLE) !windows.HANDLE {
             var result: windows.HANDLE = undefined;
             const current = std.os.windows.GetCurrentProcess();
-            if (windows.kernel32.DuplicateHandle(
+            if (windows_ext.kernel32.DuplicateHandle(
                 current,
                 source,
                 current,
                 &result,
                 0,
-                std.os.windows.FALSE,
+                windows_ext.FALSE,
                 std.os.windows.DUPLICATE_SAME_ACCESS,
-            ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+            ) == 0) return windows.unexpectedError(windows_ext.kernel32.GetLastError());
             return result;
         }
     }.handle;
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    defer _ = windows.CloseHandle(signal_read);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    defer _ = windows_ext.CloseHandle(signal_read);
 
     const current = std.os.windows.GetCurrentProcess();
     const server_process = try duplicate(current);
@@ -2606,7 +2628,7 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
     var session_owned = true;
     defer if (session_owned) {
         session.pty.deinit();
-        _ = windows.CloseHandle(session.client_process);
+        _ = windows_ext.CloseHandle(session.client_process);
     };
 
     var env = EnvMap.init(std.testing.allocator);
@@ -2633,11 +2655,11 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
     subprocess.stop();
     var byte: [1]u8 = undefined;
     var read: windows.DWORD = 0;
-    try std.testing.expect(windows.kernel32.ReadFile(signal_read, &byte, byte.len, &read, null) == 0);
-    try std.testing.expectEqual(std.os.windows.Win32Error.BROKEN_PIPE, windows.kernel32.GetLastError());
+    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &byte, byte.len, &read, null) == windows.FALSE);
+    try std.testing.expectEqual(std.os.windows.Win32Error.BROKEN_PIPE, windows_ext.kernel32.GetLastError());
     var exit_code: windows.DWORD = 0;
-    try std.testing.expect(windows.kernel32.GetExitCodeProcess(subprocess.adopted_client_process.?, &exit_code) != 0);
-    try std.testing.expectEqual(windows.exp.STILL_ACTIVE, exit_code);
+    try std.testing.expect(windows_ext.kernel32.GetExitCodeProcess(subprocess.adopted_client_process.?, &exit_code) != windows.FALSE);
+    try std.testing.expectEqual(windows_ext.STILL_ACTIVE, exit_code);
     try std.testing.expectError(error.ResizeFailed, subprocess.resize(
         .{ .columns = 80, .rows = 24 },
         .{ .width = 640, .height = 480 },
@@ -2734,16 +2756,16 @@ fn execCommand(
         };
 
         const hush = if (passwd.home) |home| hush: {
-            var dir = std.fs.openDirAbsolute(home, .{}) catch |err| {
+            var dir = std.Io.Dir.openDirAbsolute(global.io(), home, .{}) catch |err| {
                 log.warn(
                     "failed to open home dir, not checking for hushlogin err={}",
                     .{err},
                 );
                 break :hush false;
             };
-            defer dir.close();
+            defer dir.close(global.io());
 
-            break :hush if (dir.access(".hushlogin", .{})) true else |_| false;
+            break :hush if (dir.access(global.io(), ".hushlogin", .{})) true else |_| false;
         } else false;
 
         // If we made it this far we're going to start building
@@ -2818,8 +2840,7 @@ fn execCommand(
                 // Use "exec" to replace the bash process with
                 // our intended command so we don't have a parent
                 // process hanging around.
-                const cmd = try std.fmt.allocPrintSentinel(
-                    alloc,
+                const cmd = try alloc.printSentinel(
                     "exec -l {s}",
                     .{v},
                     0,
@@ -2842,7 +2863,7 @@ fn execCommand(
 
     return switch (command) {
         // We need to clone the command since there's no guarantee the config remains valid.
-        .direct => |_| .{ .args = (try command.clone(alloc)).direct },
+        .direct => .{ .args = (try command.clone(alloc)).direct },
 
         .shell => |v| shell: {
             var args: std.ArrayList([:0]const u8) = try .initCapacity(alloc, 4);
@@ -2854,7 +2875,7 @@ fn execCommand(
 
                 // Note we don't free any of the memory below since it is
                 // allocated in the arena.
-                const windir = std.process.getEnvVarOwned(
+                const windir = global.environ().getAlloc(
                     alloc,
                     "WINDIR",
                 ) catch |err| {
@@ -2889,6 +2910,37 @@ fn execCommand(
             };
         },
     };
+}
+
+/// Append a value to an environment variable such as PATH.
+/// The returned value is always allocated so it must be freed.
+fn appendEnv(
+    alloc: Allocator,
+    current: []const u8,
+    value: []const u8,
+) Allocator.Error![]u8 {
+    // If there is no prior value, we return it as-is
+    if (current.len == 0) return try alloc.dupe(u8, value);
+
+    // Otherwise we must prefix.
+    return try appendEnvAlways(alloc, current, value);
+}
+
+/// Always append value to environment, even when it is empty.
+/// This is useful because some env vars (like MANPATH) want there
+/// to be an empty prefix to preserve existing values.
+///
+/// The returned value is always allocated so it must be freed.
+fn appendEnvAlways(
+    alloc: Allocator,
+    current: []const u8,
+    value: []const u8,
+) Allocator.Error![]u8 {
+    return try alloc.print("{s}{c}{s}", .{
+        current,
+        std.fs.path.delimiter,
+        value,
+    });
 }
 
 /// Get information about the process(es) running within the backend. Returns
@@ -2939,7 +2991,7 @@ test "execCommand windows-direct-command-line keeps argv" {
 }
 
 test "execCommand darwin: shell command" {
-    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    if (comptime !builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -2966,7 +3018,7 @@ test "execCommand darwin: shell command" {
 }
 
 test "execCommand darwin: direct command" {
-    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    if (comptime !builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -2993,7 +3045,7 @@ test "execCommand darwin: direct command" {
 }
 
 test "execCommand: shell command, empty passwd" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -3019,7 +3071,7 @@ test "execCommand: shell command, empty passwd" {
 }
 
 test "execCommand: shell command, error passwd" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -3045,7 +3097,7 @@ test "execCommand: shell command, error passwd" {
 }
 
 test "execCommand: direct command, error passwd" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -3071,7 +3123,7 @@ test "execCommand: direct command, error passwd" {
 }
 
 test "execCommand: direct command, config freed" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -3203,9 +3255,9 @@ test "putWindowsTerm keeps TERM when the child's HOME has the entry" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try terminfo.compiled.encode(testing.allocator, terminfo.ghostty, &out.writer);
-    try tmp.dir.makePath(".terminfo/78");
-    try tmp.dir.writeFile(.{ .sub_path = ".terminfo/78/xterm-ghostty", .data = out.written() });
-    const home = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    try tmp.dir.createDirPath(std.testing.io, ".terminfo/78");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".terminfo/78/xterm-ghostty", .data = out.written() });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(home);
 
     var env: EnvMap = .init(testing.allocator);
@@ -3216,7 +3268,7 @@ test "putWindowsTerm keeps TERM when the child's HOME has the entry" {
     try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
 
     // The same HOME without the entry, as in portable mode.
-    try tmp.dir.deleteTree(".terminfo");
+    try tmp.dir.deleteTree(std.testing.io, ".terminfo");
     try putWindowsTerm(testing.allocator, &env, "xterm-ghostty");
     try testing.expectEqualStrings("xterm-256color", env.get("TERM").?);
 }
@@ -3398,7 +3450,7 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
     // gets the identity too. It names no distribution, so nothing asks one
     // for TERM: that stays wsl.exe's unless the configuration sets it.
     {
-        const system_root = try std.process.getEnvVarOwned(arena.allocator(), "SystemRoot");
+        const system_root = try std.testing.environ.getAlloc(arena.allocator(), "SystemRoot");
         const bash = try std.fs.path.joinZ(arena.allocator(), &.{ system_root, "System32", "bash.exe" });
         var overrides: configpkg.RepeatableStringMap = .{};
         try overrides.parseCLI(arena.allocator(), "WSLENV=GOPATH/l");
@@ -3524,14 +3576,14 @@ test "a pane that starts WSL's bash.exe launcher runs WSL (#520 review)" {
     // integration: WSL's alias lives in a WindowsApps folder, Git's does not.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("WindowsApps");
-    try tmp.dir.makePath("Git\\bin");
-    try tmp.dir.writeFile(.{ .sub_path = "WindowsApps\\bash.exe", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "Git\\bin\\bash.exe", .data = "" });
-    const apps = try tmp.dir.realpathAlloc(a, "WindowsApps");
-    const git = try tmp.dir.realpathAlloc(a, "Git\\bin");
+    try tmp.dir.createDirPath(std.testing.io, "WindowsApps");
+    try tmp.dir.createDirPath(std.testing.io, "Git\\bin");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "WindowsApps\\bash.exe", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Git\\bin\\bash.exe", .data = "" });
+    const apps = try tmp.dir.realPathFileAlloc(std.testing.io, "WindowsApps", a);
+    const git = try tmp.dir.realPathFileAlloc(std.testing.io, "Git\\bin", a);
 
-    const system_root = try std.process.getEnvVarOwned(a, "SystemRoot");
+    const system_root = try std.testing.environ.getAlloc(a, "SystemRoot");
     const system_bash = try std.fs.path.joinZ(a, &.{ system_root, "System32", "bash.exe" });
     const system_argv = [_][:0]const u8{system_bash};
     const alias_argv = [_][:0]const u8{"C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe"};
@@ -3591,7 +3643,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    const k32 = windows.kernel32;
+    const k32 = windows_ext.kernel32;
 
     // The same shape as the ConPTY input pipe in `pty.zig`: an overlapped,
     // outbound server end with 4 KiB of buffering that xev writes to, and
@@ -3600,17 +3652,17 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     const name = try std.fmt.bufPrint(
         &name_buf,
         "\\\\.\\pipe\\LOCAL\\noctty-exec-write-order-{d}-{d}",
-        .{ windows.GetCurrentProcessId(), std.time.nanoTimestamp() },
+        .{ windows.GetCurrentProcessId(), std.Io.Timestamp.now(std.testing.io, .real).toNanoseconds() },
     );
     var name_w_buf: [128]u16 = undefined;
     const name_w_len = try std.unicode.utf8ToUtf16Le(&name_w_buf, name);
     name_w_buf[name_w_len] = 0;
     const name_w = name_w_buf[0..name_w_len :0];
 
-    const server = k32.CreateNamedPipeW(
+    const server = windows.exp.kernel32.CreateNamedPipeW(
         name_w.ptr,
         windows.PIPE_ACCESS_OUTBOUND |
-            windows.exp.FILE_FLAG_FIRST_PIPE_INSTANCE |
+            windows.FILE_FLAG_FIRST_PIPE_INSTANCE |
             windows.FILE_FLAG_OVERLAPPED,
         windows.PIPE_TYPE_BYTE,
         1,
@@ -3622,9 +3674,9 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     if (server == windows.INVALID_HANDLE_VALUE) {
         return windows.unexpectedError(k32.GetLastError());
     }
-    defer _ = windows.CloseHandle(server);
+    defer _ = windows_ext.CloseHandle(server);
 
-    const client = k32.CreateFileW(
+    const client = windows.exp.kernel32.CreateFileW(
         name_w.ptr,
         windows.GENERIC_READ,
         0,
@@ -3636,7 +3688,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     if (client == windows.INVALID_HANDLE_VALUE) {
         return windows.unexpectedError(k32.GetLastError());
     }
-    defer _ = windows.CloseHandle(client);
+    defer _ = windows_ext.CloseHandle(client);
 
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
@@ -3656,11 +3708,11 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
 
     // Two large writes of distinct bytes, each far more chunks than the
     // old 32-slot preallocation.
@@ -3720,14 +3772,14 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
             var idle: usize = 0;
             while (self.len < target) {
                 var available: windows.DWORD = 0;
-                if (windows.exp.kernel32.PeekNamedPipe(self.pipe, null, 0, null, &available, null) == 0) {
+                if (windows.exp.kernel32.PeekNamedPipe(self.pipe, null, 0, null, &available, null) == windows.FALSE) {
                     return windows.unexpectedError(k32.GetLastError());
                 }
                 if (available > 0) {
                     idle = 0;
                     const want: windows.DWORD = @intCast(@min(available, target - self.len));
                     var got: windows.DWORD = 0;
-                    if (k32.ReadFile(self.pipe, self.out[self.len..].ptr, want, &got, null) == 0) {
+                    if (k32.ReadFile(self.pipe, self.out[self.len..].ptr, want, &got, null) == windows.FALSE) {
                         return windows.unexpectedError(k32.GetLastError());
                     }
                     self.len += got;
@@ -3772,4 +3824,54 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     try reader.settle();
 
     try testing.expectEqualSlices(u8, expected.items, received);
+}
+
+test "init frees the env when it fails" {
+    const testing = std.testing;
+
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+
+    const Run = struct {
+        fn initWithEnv(alloc: Allocator, cfg: *const configpkg.Config) !void {
+            var env: EnvMap = .init(alloc);
+            {
+                errdefer env.deinit();
+                try env.put("HOME", "/home/ghostty");
+                try env.put("SHELL", "/bin/sh");
+            }
+
+            // The env is not freed here once init has it: the failing
+            // allocator reports it as a leak unless init freed it.
+            var exec = try init(alloc, .{
+                .env = env,
+                .resources_dir = null,
+                .term = "xterm-ghostty",
+                .rt_pre_exec_info = .init(cfg),
+                .rt_post_fork_info = .init(cfg),
+            });
+            exec.deinit();
+        }
+    };
+
+    // Fail each allocation in turn, while building the env and inside init,
+    // as std.testing.checkAllAllocationFailures does. That function cannot
+    // be used directly: init deliberately falls back to a basic shell when
+    // building the command fails, so some runs succeed despite the failure.
+    // Every run must still free all it allocated.
+    const count = count: {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{});
+        try Run.initWithEnv(failing.allocator(), &config);
+        break :count failing.alloc_index;
+    };
+    for (0..count) |fail_index| {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        Run.initWithEnv(failing.allocator(), &config) catch |err| switch (err) {
+            error.OutOfMemory => {},
+            else => return err,
+        };
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }

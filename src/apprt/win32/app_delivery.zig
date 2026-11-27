@@ -2,13 +2,22 @@
 //! Posting and closing share a lock so no producer can post to a recycled HWND.
 const std = @import("std");
 const sys = @import("sys.zig");
+const global = @import("../../global.zig");
+
+/// The `Io` of the channel mutex's futex waits and wakes. Zig 0.17's
+/// `std.Io.Mutex` takes one; `lockUncancelable` and `unlock` reach only the
+/// OS futex whatever the `std.Io.Threaded` instance, so producers on any
+/// thread lock as they did on 0.15 (`sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
 pub fn Channel(comptime Payload: type) type {
     return struct {
         const Self = @This();
         const Entry = struct { id: usize, message: u32, payload: Payload };
         refs: std.atomic.Value(usize) = .init(1),
-        mutex: std.Thread.Mutex = .{},
+        mutex: std.Io.Mutex = .init,
         hwnd: std.atomic.Value(usize) = .init(0),
         entries: std.ArrayList(Entry) = .empty,
         update_running: std.atomic.Value(bool) = .init(false),
@@ -35,16 +44,16 @@ pub fn Channel(comptime Payload: type) type {
         }
 
         pub fn publish(self: *Self, hwnd: sys.HWND) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             self.hwnd.store(@intFromPtr(hwnd), .release);
         }
 
         /// Stop new posts before destroying the native window. Already owned
         /// payloads remain available for the UI thread's shutdown drain.
         pub fn close(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             self.hwnd.store(0, .release);
         }
 
@@ -53,8 +62,8 @@ pub fn Channel(comptime Payload: type) type {
         }
 
         pub fn notify(self: *Self, message: u32, id: usize) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             return self.postLocked(message, id);
         }
 
@@ -66,11 +75,13 @@ pub fn Channel(comptime Payload: type) type {
 
         /// Ownership transfers only when both insertion and posting succeed.
         pub fn post(self: *Self, message: u32, payload: Payload) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             if (self.hwnd.load(.acquire) == 0) return false;
             const id = id: while (true) {
-                const candidate = std.crypto.random.int(usize);
+                // The CSPRNG 0.15's `std.crypto.random` was, through the Io.
+                const random: std.Random.IoSource = .{ .io = global.io() };
+                const candidate = random.interface().int(usize);
                 if (candidate == 0) continue;
                 for (self.entries.items) |entry| {
                     if (entry.id == candidate) break;
@@ -89,8 +100,8 @@ pub fn Channel(comptime Payload: type) type {
         /// Never derive a pointer from message parameters. Validate both the
         /// capability and its message kind before removing owned storage.
         pub fn take(self: *Self, message: u32, id: usize) ?Payload {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             for (self.entries.items, 0..) |entry, index| {
                 if (entry.id == id and entry.message == message) {
                     return self.entries.orderedRemove(index).payload;
@@ -100,8 +111,8 @@ pub fn Channel(comptime Payload: type) type {
         }
 
         pub fn pop(self: *Self) ?Payload {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             return if (self.entries.pop()) |entry| entry.payload else null;
         }
     };

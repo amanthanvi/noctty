@@ -157,6 +157,9 @@ const COMMAND_QUEUE_INITIAL = 8;
 /// session.
 ///
 pub const Viewer = struct {
+    /// I/O implementation used for all internal state.
+    io: std.Io,
+
     /// Allocator used for all internal state.
     alloc: Allocator,
 
@@ -222,10 +225,10 @@ pub const Viewer = struct {
                 try writer.writeAll(@tagName(@as(TagType, self)));
                 try writer.writeAll(" = ");
 
-                inline for (info.fields) |u_field| {
-                    if (self == @field(TagType, u_field.name)) {
-                        const value = @field(self, u_field.name);
-                        switch (u_field.type) {
+                inline for (info.field_names, info.field_types) |field_name, field_type| {
+                    if (self == @field(TagType, field_name)) {
+                        const value = @field(self, field_name);
+                        switch (field_type) {
                             []const u8 => try writer.print("\"{s}\"", .{std.mem.trim(u8, value, " \t\r\n")}),
                             // Window embeds ArenaAllocator.State; dumping
                             // `{any}` walks freed/poisoned arena nodes.
@@ -289,12 +292,13 @@ pub const Viewer = struct {
     ///
     /// The given allocator is used for all internal state. You must
     /// call deinit when you're done with the viewer to free it.
-    pub fn init(alloc: Allocator) Allocator.Error!Viewer {
+    pub fn init(io: std.Io, alloc: Allocator) Allocator.Error!Viewer {
         // Create our initial command queue
         var command_queue: CommandQueue = try .init(alloc, COMMAND_QUEUE_INITIAL);
         errdefer command_queue.deinit(alloc);
 
         return .{
+            .io = io,
             .alloc = alloc,
             .state = .startup_block,
             // The default value here is meaningless. We don't get started
@@ -663,6 +667,7 @@ pub const Viewer = struct {
             panes.deinit(self.alloc);
         }
         for (windows) |window| try initLayout(
+            self.io,
             self.alloc,
             &self.panes,
             &panes,
@@ -747,7 +752,7 @@ pub const Viewer = struct {
         session_id: usize,
     ) (Allocator.Error || std.Io.Writer.Error)!void {
         // Build up a new viewer. Its the easiest way to reset ourselves.
-        var replacement: Viewer = try .init(self.alloc);
+        var replacement: Viewer = try .init(self.io, self.alloc);
         errdefer replacement.deinit();
 
         // Our actions must start out empty so we don't mix arenas
@@ -1166,6 +1171,7 @@ pub const Viewer = struct {
     /// if a new pane's size is zero or too large for a terminal. Callers
     /// treat any error as fatal and move the viewer to the defunct state.
     fn initLayout(
+        io: std.Io,
         gpa_alloc: Allocator,
         panes_old: *const PanesMap,
         panes_new: *PanesMap,
@@ -1176,6 +1182,7 @@ pub const Viewer = struct {
             .horizontal, .vertical => |layouts| {
                 for (layouts) |l| {
                     try initLayout(
+                        io,
                         gpa_alloc,
                         panes_old,
                         panes_new,
@@ -1209,7 +1216,7 @@ pub const Viewer = struct {
                 ) orelse return error.InvalidLayout;
                 if (cols == 0 or rows == 0) return error.InvalidLayout;
 
-                var t: Terminal = try .init(gpa_alloc, .{
+                var t: Terminal = try .init(io, gpa_alloc, .{
                     .cols = cols,
                     .rows = rows,
                 });
@@ -1553,7 +1560,7 @@ fn testViewer(viewer: *Viewer, steps: []const TestStep) !void {
 }
 
 test "immediate exit" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -1573,7 +1580,7 @@ test "immediate exit" {
 }
 
 test "session changed resets state" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -1605,6 +1612,7 @@ test "session changed resets state" {
                     try testing.expectEqual(1, v.windows.items.len);
                     try testing.expectEqual(2, v.panes.count());
                     try testing.expectEqualStrings("3.5a", v.tmux_version);
+
                     for (actions) |action| switch (action) {
                         .windows => |windows| {
                             // The action must reference viewer-owned state,
@@ -1676,7 +1684,7 @@ test "session changed resets state" {
 }
 
 test "initial flow" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -1857,7 +1865,7 @@ test "initial flow" {
 }
 
 test "layout change" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -1928,7 +1936,7 @@ test "layout change" {
 }
 
 test "layout change with zero width pane becomes defunct" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -1989,7 +1997,7 @@ test "layout change with zero width pane becomes defunct" {
 }
 
 test "layout change with oversized pane becomes defunct" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2051,7 +2059,7 @@ test "layout change with oversized pane becomes defunct" {
 }
 
 test "layout change with a pane over max_cells becomes defunct" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2102,7 +2110,7 @@ test "layout change with a pane over max_cells becomes defunct" {
 }
 
 test "list-windows with zero size pane becomes defunct" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2135,7 +2143,7 @@ test "list-windows with zero size pane becomes defunct" {
 }
 
 test "layout_change does not return command when queue not empty" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2196,7 +2204,7 @@ test "layout_change does not return command when queue not empty" {
 }
 
 test "layout_change returns command when queue was empty" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2263,7 +2271,7 @@ test "layout_change returns command when queue was empty" {
 }
 
 test "window_add queues list_windows when queue empty" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2324,7 +2332,7 @@ test "window_add queues list_windows when queue empty" {
 }
 
 test "list-windows parse failure frees earlier windows" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2356,7 +2364,7 @@ test "list-windows parse failure frees earlier windows" {
 }
 
 test "list-windows with oversized pane frees its window" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2392,7 +2400,7 @@ test "list-windows with oversized pane frees its window" {
 }
 
 test "list-windows with a pane over max_cells frees its windows" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2430,7 +2438,7 @@ test "list-windows with a pane over max_cells frees its windows" {
 }
 
 test "window_add queues list_windows when queue not empty" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2486,7 +2494,7 @@ test "window_add queues list_windows when queue not empty" {
 }
 
 test "two pane flow with pane state" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2670,10 +2678,10 @@ test "two pane flow with pane state" {
 }
 
 test "tmux output state unsplit CSI" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
-    var terminal: Terminal = try .init(testing.allocator, .{
+    var terminal: Terminal = try .init(testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
     });
@@ -2695,10 +2703,10 @@ test "tmux output state unsplit CSI" {
 }
 
 test "tmux output state split CSI" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
-    var terminal: Terminal = try .init(testing.allocator, .{
+    var terminal: Terminal = try .init(testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
     });
@@ -2721,7 +2729,7 @@ test "tmux output state split CSI" {
 }
 
 test "pane state ignores out of bounds scroll region" {
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     try testViewer(&viewer, &.{
@@ -2768,7 +2776,7 @@ test "pane state ignores out of bounds scroll region" {
         .{
             .input = .{ .tmux = .{ .output = .{
                 .pane_id = 0,
-                .data = "\x0b" ** 30,
+                .data = &@as([30]u8, @splat('\x0b')),
             } } },
             .check = (struct {
                 fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
@@ -2802,7 +2810,7 @@ test "pane state scroll region bounds" {
     };
 
     for (cases) |case| {
-        var viewer = try Viewer.init(testing.allocator);
+        var viewer = try Viewer.init(testing.io, testing.allocator);
         defer viewer.deinit();
 
         try testViewer(&viewer, &.{
@@ -2830,7 +2838,7 @@ test "pane state scroll region bounds" {
 
         _ = viewer.next(.{ .tmux = .{ .output = .{
             .pane_id = 0,
-            .data = "\x1b[30;1H" ++ "\x0b" ** 30,
+            .data = "\x1b[30;1H" ++ @as([30]u8, @splat('\x0b')),
         } } });
         try testing.expect(t.screens.active.cursor.y < t.rows);
     }
@@ -2849,7 +2857,7 @@ fn testRawStartupScreen(comptime alternate_on: bool) !void {
 
     defer parser.deinit();
 
-    var viewer = try Viewer.init(testing.allocator);
+    var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
     const input =

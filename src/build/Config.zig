@@ -11,7 +11,7 @@ const WasmTarget = @import("../os/wasm/target.zig").Target;
 const expandPath = @import("../os/path.zig").expand;
 
 /// Standard build configuration options.
-optimize: std.builtin.OptimizeMode,
+optimize: std.lang.Optimize,
 target: std.Build.ResolvedTarget,
 wasm_target: WasmTarget,
 
@@ -35,6 +35,11 @@ wasm_shared: bool = true,
 exe_entrypoint: ExeEntrypoint = .ghostty,
 version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 lib_version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
+
+/// The absolute path the Ghostty executable is installed at, for the Linux
+/// desktop, D-Bus and systemd files that launch it. Null means they name
+/// the executable alone.
+installed_exe_path: ?[]const u8 = null,
 
 /// Binary properties
 pie: bool = false,
@@ -62,22 +67,35 @@ emit_termcap: bool = false,
 emit_test_exe: bool = false,
 /// The test executable's optimize mode (-Dtest-optimize). Debug unless
 /// asked: -Doptimize leaves it alone.
-test_optimize: std.builtin.OptimizeMode = .Debug,
+test_optimize: std.lang.Optimize = .debug,
 emit_themes: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
+
+/// Feature gates for libghostty-vt artifacts (-Dvt-features). The full
+/// Ghostty application ignores this and always enables everything.
+vt_features: TerminalBuildOptions.Features = .{},
 
 /// True when Ghostty is being built as a dependency of another project
 /// rather than as the root project.
 is_dep: bool = false,
 
 /// Environmental properties
-env: std.process.EnvMap,
+env: *const std.process.Environ.Map,
 
 pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Config {
     // Setup our standard Zig target and optimize options, i.e.
     // `-Doptimize` and `-Dtarget`.
     const optimize = b.standardOptimizeOption(.{});
+
+    // Default dependency builds to libghostty-vt-only mode. Consumers can
+    // still explicitly disable this to request the full Ghostty build.
+    const is_dep = b.dep_prefix.len > 0;
+    const emit_lib_vt = b.option(
+        bool,
+        "emit-lib-vt",
+        "Set defaults for a libghostty-vt-only build in the Windows-only fork.",
+    ) orelse is_dep;
     const target = target: {
         var result = b.standardTargetOptions(.{});
 
@@ -92,19 +110,54 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             var query = result.query;
             if (query.abi == null) query.abi = .msvc;
             if (query.os_version_min == null or
-                @intFromEnum(query.os_version_min.?.windows) < @intFromEnum(std.Target.Os.WindowsVersion.win10_rs5))
+                @backingInt(query.os_version_min.?.windows) < @backingInt(std.Target.Os.WindowsVersion.win10_rs5))
             {
                 query.os_version_min = .{ .windows = .win10_rs5 };
             }
             result = b.resolveTargetQuery(query);
         }
 
+        // On wasm, default to enabling the simd128 feature. Every
+        // browser engine has supported it since 2023 or earlier
+        // (Chrome 91, Firefox 89, Safari 16.4) and it is a large
+        // performance win for the terminal hot paths (50%+ on
+        // print-heavy VT streams). Only apply when no explicit CPU
+        // was requested; targets for exotic non-browser runtimes
+        // can opt out with `-Dcpu=generic`.
+        if (result.result.cpu.arch.isWasm() and
+            result.query.cpu_model == .determined_by_arch_os and
+            result.query.cpu_features_add.isEmpty() and
+            result.query.cpu_features_sub.isEmpty())
+        {
+            var query = result.query;
+            query.cpu_features_add.addFeature(
+                @backingInt(std.Target.wasm.Feature.simd128),
+            );
+            result = b.resolveTargetQuery(query);
+        }
+
+        // The full Ghostty build no longer supports iOS; Fail early
+        // with a clear message rather than partway through the build.
+        if (result.result.os.tag == .ios and !emit_lib_vt) {
+            std.log.err(
+                "iOS is not a supported target for the full Ghostty build; " ++
+                    "only libghostty-vt supports iOS (-Demit-lib-vt)",
+                .{},
+            );
+            return error.UnsupportedTarget;
+        }
+
+        // If we have no minimum OS version, we set the default based on
+        // our tag. Not all tags have a minimum so this may be null.
+        if (result.query.os_version_min == null) {
+            result.query.os_version_min = if (emit_lib_vt)
+                osVersionMinLibVt(result.result.os.tag)
+            else
+                osVersionMin(result.result.os.tag);
+        }
+
         break :target result;
     };
-
-    // Detect if Ghostty is a dependency of another project.
-    // dep_prefix is non-empty when this build is running as a dependency.
-    const is_dep = b.dep_prefix.len > 0;
 
     // This is set to true when we're building a system package. For now
     // this is trivially detected using the "system_package_mode" bool
@@ -115,10 +168,10 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     // one exists so this is hardcoded.
     const wasm_target: WasmTarget = .browser;
 
-    // We use env vars throughout the build so we grab them immediately here.
-    var env = try std.process.getEnvMap(b.allocator);
-    errdefer env.deinit();
+    // Grab the environment from build state
+    const env = &b.graph.environ_map;
 
+    // We use env vars throughout the build so we grab them immediately here.
     var config: Config = .{
         .optimize = optimize,
         .target = target,
@@ -170,9 +223,10 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "simd",
         "Build with SIMD-accelerated code paths. Results in significant performance improvements.",
     ) orelse simd: {
-        // We can't build our SIMD dependencies for Wasm. Note that we may
-        // still use SIMD features in the Wasm-builds.
-        if (target.result.cpu.arch.isWasm()) break :simd false;
+        // We can't build our SIMD dependencies for Wasm or freestanding
+        // targets. Note that we may still use SIMD features in the Wasm-builds.
+        if (target.result.cpu.arch.isWasm() or
+            target.result.os.tag == .freestanding) break :simd false;
 
         break :simd true;
     };
@@ -237,6 +291,27 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     else
         try std.SemanticVersion.parse(libVersion);
 
+    // The install prefix is only known once the build runs, too late to
+    // write it into the files that launch Ghostty, so a build installing
+    // anywhere systemd doesn't search has to say where the executable goes.
+    config.installed_exe_path = b.option(
+        []const u8,
+        "installed-exe-path",
+        "Absolute path the ghostty executable will be installed at, written " ++
+            "into the Linux desktop, D-Bus and systemd files. If not specified, " ++
+            "they name the executable alone, which systemd only finds in " ++
+            "/usr/bin or /usr/local/bin.",
+    );
+    if (config.installed_exe_path) |exe_path| {
+        if (!std.fs.path.isAbsolute(exe_path)) {
+            std.log.err(
+                "-Dinstalled-exe-path must be an absolute path, got '{s}'",
+                .{exe_path},
+            );
+            return error.InvalidInstalledExePath;
+        }
+    }
+
     //---------------------------------------------------------------
     // Binary Properties
 
@@ -251,9 +326,9 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "strip",
         "Strip the final executable. Default true for fast and small releases",
     ) orelse switch (optimize) {
-        .Debug => false,
-        .ReleaseSafe => false,
-        .ReleaseFast, .ReleaseSmall => true,
+        .debug => false,
+        .safe => false,
+        .fast, .small => true,
     };
 
     // Follows the optimize mode, not `strip`: a release build that keeps its
@@ -261,8 +336,8 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     // still generate release code, or the PDB would describe a different
     // binary from the one users run.
     config.omit_frame_pointer = switch (optimize) {
-        .Debug, .ReleaseSafe => false,
-        .ReleaseFast, .ReleaseSmall => true,
+        .debug, .safe => false,
+        .fast, .small => true,
     };
 
     // A Windows release image that keeps its PDB. build.zig links it with
@@ -276,11 +351,31 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     //---------------------------------------------------------------
     // Artifacts to Emit
 
-    config.emit_lib_vt = b.option(
-        bool,
-        "emit-lib-vt",
-        "Set defaults for a libghostty-vt-only build in the Windows-only fork.",
-    ) orelse false;
+    config.emit_lib_vt = emit_lib_vt;
+
+    config.vt_features = features: {
+        const list = b.option(
+            []const u8,
+            "vt-features",
+            "Comma-separated libghostty-vt feature modifications applied " ++
+                "to the default all-enabled set, -Dcpu style: `+feature` " ++
+                "or `feature` enables, `-feature` disables, and `all` " ++
+                "means every feature (e.g. `-all,+render-state` for a " ++
+                "render-only build). Only applies to lib artifacts.",
+        ) orelse break :features .{};
+        break :features TerminalBuildOptions.Features.parse(list) catch {
+            var valid: std.ArrayList(u8) = .empty;
+            inline for (@typeInfo(TerminalBuildOptions.Features).@"struct".field_names) |name| {
+                if (valid.items.len > 0) try valid.appendSlice(b.allocator, ", ");
+                try valid.appendSlice(b.allocator, name);
+            }
+            std.log.err(
+                "-Dvt-features={s} contains an unknown feature. Valid features: all, {s}",
+                .{ list, valid.items },
+            );
+            return error.UnknownVtFeature;
+        };
+    };
 
     config.emit_exe = b.option(
         bool,
@@ -295,10 +390,10 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     ) orelse false;
 
     config.test_optimize = b.option(
-        std.builtin.OptimizeMode,
+        std.lang.Optimize,
         "test-optimize",
         "Optimize mode of the Zig test executable ghostty-test (default Debug; -Doptimize does not change it)",
-    ) orelse .Debug;
+    ) orelse .debug;
 
     config.emit_unicode_table_gen = b.option(
         bool,
@@ -344,7 +439,7 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         if (system_package) break :emit_docs true;
 
         // We only default to true if we can find pandoc.
-        const path = expandPath(b.allocator, "pandoc") catch
+        const path = expandPath(b.graph.io, b.allocator, &b.graph.environ_map, "pandoc") catch
             break :emit_docs false;
         defer if (path) |p| b.allocator.free(p);
         break :emit_docs path != null;
@@ -357,8 +452,8 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     ) orelse switch (target.result.os.tag) {
         .windows => true,
         else => switch (optimize) {
-            .Debug => true,
-            .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
+            .debug => true,
+            .safe, .fast, .small => false,
         },
     };
 
@@ -367,8 +462,8 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "emit-termcap",
         "Install Ghostty termcap file",
     ) orelse switch (optimize) {
-        .Debug => true,
-        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => false,
+        .debug => true,
+        .safe, .fast, .small => false,
     };
 
     config.emit_themes = b.option(
@@ -439,7 +534,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "thread_roles", self.thread_roles);
     step.addOption(bool, "d3d11", self.d3d11);
     step.addOption(bool, "renderer_test_tools", self.renderer_test_tools);
-    step.addOption(std.builtin.OptimizeMode, "test_optimize", self.test_optimize);
+    step.addOption(std.lang.Optimize, "test_optimize", self.test_optimize);
     step.addOption(ApprtRuntime, "app_runtime", self.app_runtime);
     step.addOption(FontBackend, "font_backend", self.font_backend);
     step.addOption(RendererBackend, "renderer", self.renderer);
@@ -452,17 +547,19 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // accommodate realistic large branch names for dev versions.
     var app_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "app_version", self.version);
-    step.addOption([:0]const u8, "app_version_string", try std.fmt.bufPrintZ(
+    step.addOption([:0]const u8, "app_version_string", try std.mem.printSentinel(
         &app_version_buf,
         "{f}",
         .{self.version},
+        0,
     ));
     var lib_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "lib_version", self.lib_version);
-    step.addOption([:0]const u8, "lib_version_string", try std.fmt.bufPrintZ(
+    step.addOption([:0]const u8, "lib_version_string", try std.mem.printSentinel(
         &lib_version_buf,
         "{f}",
         .{self.lib_version},
+        0,
     ));
     step.addOption(
         ReleaseChannel,
@@ -493,37 +590,47 @@ pub fn testModule(
 /// thread-role layer (PLAN.md §2.7's build scope): in Debug and ReleaseSafe,
 /// never in ReleaseFast or ReleaseSmall. Every other artifact gets it in no
 /// mode.
-pub fn threadRoles(mode: std.builtin.OptimizeMode) bool {
+pub fn threadRoles(mode: std.lang.Optimize) bool {
     return switch (mode) {
-        .Debug, .ReleaseSafe => true,
-        .ReleaseFast, .ReleaseSmall => false,
+        .debug, .safe => true,
+        .fast, .small => false,
     };
 }
 
 /// Returns the build options for the terminal module. This assumes a
 /// Ghostty executable being built. Callers should modify this as needed.
-pub fn terminalOptions(self: *const Config, artifact: TerminalBuildOptions.Artifact) TerminalBuildOptions {
+pub fn terminalOptions(
+    self: *const Config,
+    artifact: TerminalBuildOptions.Artifact,
+    optimize: std.lang.Optimize,
+) TerminalBuildOptions {
     return .{
         .artifact = artifact,
         .simd = self.simd,
         .oniguruma = true,
         .c_abi = false,
+        // The application requires every feature; only lib artifacts
+        // may trim them.
+        .features = switch (artifact) {
+            .ghostty => .{},
+            .lib => self.vt_features,
+        },
         .version = switch (artifact) {
             .ghostty => self.version,
             .lib => self.lib_version,
         },
-        .slow_runtime_safety = switch (self.optimize) {
-            .Debug => true,
-            .ReleaseSafe,
-            .ReleaseSmall,
-            .ReleaseFast,
+        .slow_runtime_safety = switch (optimize) {
+            .debug => true,
+            .safe,
+            .small,
+            .fast,
             => false,
         },
     };
 }
 
 /// Returns a baseline CPU target retaining all the other CPU configs.
-pub fn baselineTarget(self: *const Config) std.Build.ResolvedTarget {
+pub fn baselineTarget(self: *const Config, io: std.Io) std.Build.ResolvedTarget {
     // Set our cpu model as baseline. There may need to be other modifications
     // we need to make such as resetting CPU features but for now this works.
     var q = self.target.query;
@@ -533,7 +640,7 @@ pub fn baselineTarget(self: *const Config) std.Build.ResolvedTarget {
     // handle the native case.
     return .{
         .query = q,
-        .result = std.zig.system.resolveTargetQuery(q) catch
+        .result = std.zig.system.resolveTargetQuery(io, q) catch
             @panic("unable to resolve baseline query"),
     };
 }
@@ -561,6 +668,34 @@ pub fn fromOptions() Config {
         .d3d11 = options.d3d11,
         .renderer_test_tools = options.renderer_test_tools,
     };
+}
+
+/// Returns the minimum OS version for the given OS tag. This shouldn't
+/// be used generally, it should only be used for Darwin-based OS currently.
+pub fn osVersionMin(tag: std.Target.Os.Tag) ?std.Target.Query.OsVersion {
+    return switch (tag) {
+        // We support back to the earliest officially supported version
+        // of macOS by Apple. EOL versions are not supported.
+        .macos => .{ .semver = .{
+            .major = 13,
+            .minor = 0,
+            .patch = 0,
+        } },
+
+        // This should never happen currently. If we add a new target then
+        // we should add a new case here.
+        else => null,
+    };
+}
+
+/// Returns the minimum OS version for lib-vt build.
+///
+/// This should only be used for Darwin targets.
+pub fn osVersionMinLibVt(tag: std.Target.Os.Tag) ?std.Target.Query.OsVersion {
+    // lib-vt is the only thing we still build for iOS, so its deployment
+    // target lives here rather than in osVersionMin.
+    if (tag == .ios) return .{ .semver = .{ .major = 13, .minor = 0, .patch = 0 } };
+    return osVersionMin(tag);
 }
 
 /// The possible entrypoints for the exe artifact. This has no effect on

@@ -211,6 +211,18 @@ control("the build's own artifact selector selects its arm", tree(**{
                                  '    self.config.terminalOptions(.ghostty).add(b, step.root_module);\n}\n')}), 0,
         "ENTRY-OK app src/worker.zig startSelected -> Target.run: src/worker.zig:23 run enters worker:probe",
         "RESULT PASS", registry=SWITCH_REGISTRY)
+control("the build's artifact selector in upstream 1.4's spelling, with the optimize mode, selects its arm", tree(**{
+    "src/worker.zig": SWITCH_WORKER + (
+        'const options = @import("terminal_options");\n'
+        'const Target = switch (options.artifact) {\n    .ghostty => Scoped,\n    .other => Unscoped,\n};\n'),
+    "src/terminal/build_options.zig": ('pub fn add(self: Options, b: *Build, m: *Module) void {\n'
+                                       '    const opts = b.addOptions();\n'
+                                       '    opts.addOption(Artifact, "artifact", self.artifact);\n'
+                                       '    m.addOptions("terminal_options", opts);\n}\n'),
+    "src/build/SharedDeps.zig": ('pub fn add(self: *const SharedDeps, step: *Compile) void {\n'
+                                 '    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);\n}\n')}), 0,
+        "ENTRY-OK app src/worker.zig startSelected -> Target.run: src/worker.zig:23 run enters worker:probe",
+        "RESULT PASS", registry=SWITCH_REGISTRY)
 
 # Stone round 4, Opus L1: a guarded role call (`if (false) ...`) may never run, so it is no scope; and the scope is
 # the first statement executed, so a statement before it fails, while a `defer` before it (which runs nothing where
@@ -357,6 +369,63 @@ control("a discarded scope (`_ = R.enter`) is no entry scope", tree(**{"src/work
     '    _ = thread_role.enter(.{ .worker = "probe" });\n')}), 1,
         "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
         absent=("ENTRY-OK app src/worker.zig start",))
+
+# 1B.6 (PLAN.md §2.7 RQ7, decision 19): an `Io` task entry is bound to its task call, and an `async` task, which
+# std may run inline on its caller, keeps the caller's role there: its target opens with enterIfNone.
+TASK_WORKER = WORKER + '''pub fn startTask(io: std.Io) void {
+    var f = io.async(taskMain, .{});
+    f.await(io);
+}
+pub fn startGroup(io: std.Io, group: *std.Io.Group) void {
+    group.async(io, groupMain, .{});
+}
+pub fn startConcurrent(io: std.Io) void {
+    var f = io.concurrent(concurrentMain, .{}) catch return;
+    f.await(io);
+}
+fn taskMain() void {
+    const role = thread_role.enterIfNone(.search);
+    defer role.exit();
+}
+fn groupMain() void {
+    const role = thread_role.enterIfNone(.search);
+    defer role.exit();
+}
+fn concurrentMain() void {
+    const role = thread_role.enter(.search);
+    defer role.exit();
+}
+'''
+TASK_REGISTRY = (REGISTRY + "src/worker.zig\tstartTask\tio.async\ttaskMain\tsearch\tan Io task\n"
+                 "src/worker.zig\tstartGroup\tgroup.async\tgroupMain\tsearch\ta group task\n"
+                 "src/worker.zig\tstartConcurrent\tio.concurrent\tconcurrentMain\tsearch\ta concurrent task\n")
+control("Io task entries bind to their task calls; async ones open with enterIfNone, a concurrent one with enter",
+        tree(**{"src/worker.zig": TASK_WORKER}), 0,
+        "ENTRY-OK app src/worker.zig startTask -> taskMain: src/worker.zig:33 taskMain enters search",
+        "ENTRY-OK app src/worker.zig startGroup -> groupMain: src/worker.zig:37 groupMain enters search",
+        "ENTRY-OK app src/worker.zig startConcurrent -> concurrentMain: src/worker.zig:41 concurrentMain enters search",
+        "RESULT PASS", registry=TASK_REGISTRY)
+control("an async task that opens with enter fails ENTRY-TASK-ENTER", tree(**{"src/worker.zig": TASK_WORKER.replace(
+    "fn taskMain() void {\n    const role = thread_role.enterIfNone(.search);",
+    "fn taskMain() void {\n    const role = thread_role.enter(.search);")}), 1,
+        "FAIL ENTRY-TASK-ENTER app src/worker.zig startTask -> taskMain: its target (src/worker.zig:33) opens with "
+        "enter", registry=TASK_REGISTRY, absent=("ENTRY-OK app src/worker.zig startTask",))
+control("a group task that opens with enter fails ENTRY-TASK-ENTER", tree(**{"src/worker.zig": TASK_WORKER.replace(
+    "fn groupMain() void {\n    const role = thread_role.enterIfNone(.search);",
+    "fn groupMain() void {\n    const role = thread_role.enter(.search);")}), 1,
+        "FAIL ENTRY-TASK-ENTER app src/worker.zig startGroup -> groupMain", registry=TASK_REGISTRY)
+control("a concurrent task or a thread that opens with enterIfNone is no entry scope", tree(**{
+    "src/worker.zig": TASK_WORKER.replace(
+        "fn concurrentMain() void {\n    const role = thread_role.enter(.search);",
+        "fn concurrentMain() void {\n    const role = thread_role.enterIfNone(.search);").replace(
+        '    const role = thread_role.enter(.{ .worker = "probe" });',
+        '    const role = thread_role.enterIfNone(.{ .worker = "probe" });')}), 1,
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig startConcurrent -> concurrentMain",
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain", registry=TASK_REGISTRY)
+control("an Io task entry whose function makes no such task call fails", tree(**{"src/worker.zig": TASK_WORKER}), 1,
+        "FAIL ENTRY-SPAWN-NOT-FOUND app src/worker.zig startTask -> otherMain: startTask in src/worker.zig makes no "
+        "io.async of otherMain",
+        registry=TASK_REGISTRY + "src/worker.zig\tstartTask\tio.async\totherMain\tsearch\tno such task\n")
 
 if failures:
     for f in failures:

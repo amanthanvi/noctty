@@ -40,9 +40,9 @@ pub const QuerySearch = struct {
 
         /// Must be held while the terminal is read or written. `step` and
         /// `deinit` take it themselves, so their caller must not hold it:
-        /// with the thread-role layer on the build panics (PN1), a Debug
-        /// build without it panics with "Deadlock detected", and a release
-        /// build without it hangs.
+        /// with the thread-role layer on the build panics (PN1), and a build
+        /// without it hangs (Zig 0.17's `std.Io.Mutex` has no owner, so it has
+        /// no re-entry check in any mode and no "Deadlock detected" in Debug).
         mutex: *StateMutex,
     };
 
@@ -146,7 +146,7 @@ pub const QuerySearch = struct {
             switch (cur.search.tick()) {
                 .complete, .progress => {},
                 .blocked => {
-                    self.term.mutex.lock();
+                    self.term.mutex.lockUncancelable();
                     defer self.term.mutex.unlock();
                     self.feedLocked(cur);
                 },
@@ -304,7 +304,7 @@ pub const QuerySearch = struct {
                 cur.search.viewport.reset();
                 cur.search.stale_viewport_matches = true;
 
-                self.term.mutex.lock();
+                self.term.mutex.lockUncancelable();
                 defer self.term.mutex.unlock();
                 self.feedLocked(cur);
                 return .replay;
@@ -334,7 +334,7 @@ pub const QuerySearch = struct {
         // No needle means stop the search, and an invalid one starts none.
         self.current = next;
         if (self.current) |*cur| {
-            self.term.mutex.lock();
+            self.term.mutex.lockUncancelable();
             defer self.term.mutex.unlock();
             self.feedLocked(cur);
         }
@@ -373,14 +373,14 @@ pub const QuerySearch = struct {
 
     fn refresh(self: *QuerySearch) void {
         const cur = if (self.current) |*cur| cur else return;
-        self.term.mutex.lock();
+        self.term.mutex.lockUncancelable();
         defer self.term.mutex.unlock();
         self.feedLocked(cur);
     }
 
     fn select(self: *QuerySearch, to: ScreenSearch.Select) void {
         const cur = if (self.current) |*cur| cur else return;
-        self.term.mutex.lock();
+        self.term.mutex.lockUncancelable();
         defer self.term.mutex.unlock();
 
         // A screen can be removed or replaced between refresh ticks (and the
@@ -409,7 +409,7 @@ pub const QuerySearch = struct {
     fn stop(self: *QuerySearch) void {
         const cur = if (self.current) |*cur| cur else return;
         {
-            self.term.mutex.lock();
+            self.term.mutex.lockUncancelable();
             defer self.term.mutex.unlock();
             cur.search.deinit(self.term.terminal);
         }
@@ -569,7 +569,7 @@ test "an invalid query clears the previous search in one report" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -606,7 +606,7 @@ test "a query that matches nothing is not reported as invalid" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -646,7 +646,7 @@ test "a query that runs out of memory still stops the previous search" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -677,7 +677,7 @@ test "equivalent query replays search state" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -719,7 +719,7 @@ fn testRowsContaining(alloc: Allocator, list: *PageList, needle: []const u8) ![]
                 const cp = cell.codepoint();
                 text[x] = if (cp > 0 and cp < 0x80) @intCast(cp) else ' ';
             }
-            if (std.ascii.indexOfIgnoreCase(text[0..cells.len], needle) != null) {
+            if (std.ascii.findIgnoreCase(text[0..cells.len], needle) != null) {
                 try rows.append(alloc, y);
             }
             y += 1;
@@ -736,14 +736,14 @@ test "reported match rows follow streamed output while the scrollback is pruned"
 
     // Room for about three pages, so the output below prunes the oldest.
     const page_size = page_size: {
-        var probe: Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+        var probe: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 4 });
         defer probe.deinit(alloc);
         break :page_size probe.screens.active.pages.page_size;
     };
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 20,
         .rows = 4,
-        .max_scrollback = 3 * page_size,
+        .max_scrollback_bytes = 3 * page_size,
     });
     defer t.deinit(alloc);
     const list = &t.screens.active.pages;
@@ -788,7 +788,7 @@ test "select after the searched screen is removed" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -823,7 +823,7 @@ test "the first select with nothing selected starts at the newest match" {
     var mutex: StateMutex = .{};
 
     for ([_]ScreenSearch.Select{ .next, .prev }) |first| {
-        var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+        var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 4 });
         defer t.deinit(alloc);
 
         var stream = t.vtStream();
@@ -912,7 +912,7 @@ test "a full reset that re-creates the alternate screen at the same address drop
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(term_alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, term_alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(term_alloc);
 
     var stream = t.vtStream();
@@ -953,10 +953,10 @@ test "a pattern that fails at run time ends the query with one clear" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list = &t.screens.active.pages;
@@ -1016,10 +1016,10 @@ test "a pattern that fails while the report is built ends the query with one cle
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list = &t.screens.active.pages;
@@ -1067,7 +1067,7 @@ test "a replacing query whose first feed fails ends with one clear" {
     const role = thread_role.fixture(.search);
     defer role.exit();
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();

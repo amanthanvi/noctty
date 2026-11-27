@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const global = @import("../global.zig");
 const posix = std.posix;
 const windows = @import("windows.zig");
 
@@ -63,8 +64,8 @@ pub fn restoreMaxFiles(lim: rlimit) void {
 /// POSIX this returns `$TMPDIR`/`$TMP` (or `"/tmp"` as a fallback)
 /// without allocating. Always pair with `freeTmpDir` to release any
 /// allocation.
-pub fn allocTmpDir(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
-    if (builtin.os.tag == .windows) {
+pub fn allocTmpDir(allocator: std.mem.Allocator, environ: std.process.Environ) std.mem.Allocator.Error![]const u8 {
+    if (builtin.target.os.tag == .windows) {
         // GetTempPathW guarantees the result fits in MAX_PATH+1.
         var buf: [windows.MAX_PATH + 1:0]u16 = undefined;
         const len = windows.exp.kernel32.GetTempPathW(buf.len, &buf);
@@ -84,14 +85,14 @@ pub fn allocTmpDir(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const
         }
         return allocator.dupe(u8, "C:\\Windows\\Temp");
     }
-    const tmpdir = posix.getenv("TMPDIR") orelse posix.getenv("TMP") orelse return "/tmp";
+    const tmpdir = environ.getPosix("TMPDIR") orelse environ.getPosix("TMP") orelse return "/tmp";
     return std.mem.trimEnd(u8, tmpdir, &.{std.fs.path.sep});
 }
 
 /// Free a path returned by `allocTmpDir` if it allocated memory.
 /// This is a no-op on POSIX.
 pub fn freeTmpDir(allocator: std.mem.Allocator, dir: []const u8) void {
-    if (builtin.os.tag != .windows) return;
+    if (builtin.target.os.tag != .windows) return;
     allocator.free(dir);
 }
 
@@ -110,7 +111,7 @@ pub const random_basename_len = b64_encoder.calcSize(random_basename_bytes);
 pub fn randomBasename(buf: []u8) RandomBasenameError![]const u8 {
     if (buf.len < random_basename_len) return error.BufferTooSmall;
     var rand_buf: [random_basename_bytes]u8 = undefined;
-    std.crypto.random.bytes(&rand_buf);
+    global.io().random(&rand_buf);
     return b64_encoder.encode(buf[0..random_basename_len], &rand_buf);
 }
 
@@ -124,43 +125,45 @@ pub fn randomTmpPath(
     allocator: std.mem.Allocator,
     prefix: []const u8,
 ) std.mem.Allocator.Error![]u8 {
-    const tmp_dir = try allocTmpDir(allocator);
-    defer freeTmpDir(allocator, tmp_dir);
     var name_buf: [random_basename_len]u8 = undefined;
     const basename = randomBasename(&name_buf) catch unreachable;
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         "{s}{c}{s}{s}",
-        .{ tmp_dir, std.fs.path.sep, prefix, basename },
+        .{ global.tmpDirPath(), std.fs.path.sep, prefix, basename },
     );
 }
+
+/// The SDK's `SetEnvironmentVariableW` (Zig 0.17's std declares it no more), for the allocTmpDir tests.
+extern "kernel32" fn SetEnvironmentVariableW(
+    lpName: [*:0]const u16,
+    lpValue: ?[*:0]const u16,
+) callconv(.winapi) c_int;
 
 test "allocTmpDir without TMP follows GetTempPathW to TEMP" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    const kernel32 = std.os.windows.kernel32;
     const tmp_name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
     const temp_name = std.unicode.utf8ToUtf16LeStringLiteral("TEMP");
 
-    // getenvW points into the environment block, which a change can move.
-    const saved_tmp = if (std.process.getenvW(tmp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    // getWindows points into the environment block, which a change can move.
+    const saved_tmp = if (testing.environ.getWindows(tmp_name)) |v| try alloc.dupeSentinel(u16, v, 0) else null;
     defer if (saved_tmp) |v| alloc.free(v);
-    const saved_temp = if (std.process.getenvW(temp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    const saved_temp = if (testing.environ.getWindows(temp_name)) |v| try alloc.dupeSentinel(u16, v, 0) else null;
     defer if (saved_temp) |v| alloc.free(v);
-    defer _ = kernel32.SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
-    defer _ = kernel32.SetEnvironmentVariableW(temp_name, if (saved_temp) |v| v.ptr else null);
+    defer _ = SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
+    defer _ = SetEnvironmentVariableW(temp_name, if (saved_temp) |v| v.ptr else null);
 
     // GetTempPathW does not check that the directory exists, and its
     // result always ends in a separator.
-    try testing.expect(kernel32.SetEnvironmentVariableW(tmp_name, null) != 0);
-    try testing.expect(kernel32.SetEnvironmentVariableW(
+    try testing.expect(SetEnvironmentVariableW(tmp_name, null) != 0);
+    try testing.expect(SetEnvironmentVariableW(
         temp_name,
         std.unicode.utf8ToUtf16LeStringLiteral("C:\\noctty-test-temp\\"),
     ) != 0);
 
-    const dir = try allocTmpDir(alloc);
+    const dir = try allocTmpDir(alloc, testing.environ);
     defer freeTmpDir(alloc, dir);
     try testing.expectEqualStrings("C:\\noctty-test-temp", dir);
 }
@@ -170,19 +173,18 @@ test "allocTmpDir keeps the separator of a drive root" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    const kernel32 = std.os.windows.kernel32;
     const tmp_name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
 
-    const saved_tmp = if (std.process.getenvW(tmp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    const saved_tmp = if (testing.environ.getWindows(tmp_name)) |v| try alloc.dupeSentinel(u16, v, 0) else null;
     defer if (saved_tmp) |v| alloc.free(v);
-    defer _ = kernel32.SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
+    defer _ = SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
 
-    try testing.expect(kernel32.SetEnvironmentVariableW(
+    try testing.expect(SetEnvironmentVariableW(
         tmp_name,
         std.unicode.utf8ToUtf16LeStringLiteral("C:\\"),
     ) != 0);
 
-    const dir = try allocTmpDir(alloc);
+    const dir = try allocTmpDir(alloc, testing.environ);
     defer freeTmpDir(alloc, dir);
     try testing.expectEqualStrings("C:\\", dir);
 }
@@ -200,4 +202,32 @@ test randomBasename {
 
     var small: [random_basename_len - 1]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, randomBasename(&small));
+}
+
+// Two Zig 0.17.1 std behaviours the port depends on, which differ from
+// 0.15.2's and which no compile error shows (council F3, the lead's QR-30).
+test "Zig 0.17 pin: Dir.openFile opens a directory unless allow_directory is false" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "folder", .default_dir);
+    // 0.17's default opens it; 0.15.2's Windows openFile refused it with
+    // error.IsDir (`std.os.windows.OpenFile`'s `filter = .file_only`).
+    const opened = try tmp.dir.openFile(io, "folder", .{});
+    opened.close(io);
+    try std.testing.expectError(error.IsDir, tmp.dir.openFile(io, "folder", .{ .allow_directory = false }));
+}
+
+test "Zig 0.17 pin: readFileAlloc's limit refuses a file of exactly that many bytes" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "eight", .data = "12345678" });
+    // 0.15.2's `readFileAlloc(alloc, path, 8)` read it; 0.17's `.limited(8)`
+    // refuses it, so 0.15's bound is `.limited(n + 1)`.
+    try std.testing.expectError(error.StreamTooLong, tmp.dir.readFileAlloc(io, "eight", alloc, .limited(8)));
+    const data = try tmp.dir.readFileAlloc(io, "eight", alloc, .limited(8 + 1));
+    defer alloc.free(data);
+    try std.testing.expectEqual(@as(usize, 8), data.len);
 }

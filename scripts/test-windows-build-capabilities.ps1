@@ -6,14 +6,11 @@ $manifestPath = Join-Path $fixtureRoot "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    # A path below the bin directory, as the packaging scripts list the
-    # ghostty-vt.dll placeholder.
-    "ghostty-vt-stub\ghostty-vt.dll",
     "noctty-terminal-handoff-proxy.dll"
 )
 
 try {
-    New-Item -ItemType Directory -Path (Join-Path $fixtureRoot "ghostty-vt-stub") -Force | Out-Null
+    New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
     foreach ($runtimeFile in $runtimeFiles) {
         Set-Content -LiteralPath (Join-Path $fixtureRoot $runtimeFile) -Value $runtimeFile -Encoding UTF8
     }

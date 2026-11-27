@@ -143,13 +143,13 @@ fn registerSearchIconFont() void {
     }
 }
 
-pub var search_icon_font_registration = std.once(registerSearchIconFont);
+pub var search_icon_font_registration = @import("../../os/once.zig").once(registerSearchIconFont);
 
 fn logSearchIconFontRejected() void {
     log.warn("search bar icon font lacks a Codicon glyph; drawing geometric search icons", .{});
 }
 
-var search_icon_font_rejection_log = std.once(logSearchIconFontRejected);
+var search_icon_font_rejection_log = @import("../../os/once.zig").once(logSearchIconFontRejected);
 
 /// The search bar's Codicons font at `dpi`, or null when it is unavailable,
 /// in which case `win32_icons` draws the buttons.
@@ -199,16 +199,16 @@ const search_bar_button_roles = std.enums.values(Role);
 
 /// The docked search bar's keyboard stops in Tab order: the query, then each
 /// button in the order the bar lays them out.
-pub const search_focus_stop_count = 1 + std.meta.fields(Role).len;
+pub const search_focus_stop_count = 1 + @typeInfo(Role).@"enum".field_names.len;
 
 pub fn searchFocusStopOfRole(role: Role) usize {
-    return 1 + @intFromEnum(role);
+    return 1 + @backingInt(role);
 }
 
 /// The button at a search stop; null for the query (stop 0) or past the end.
 fn searchFocusStopRole(stop: usize) ?Role {
     if (stop == 0 or stop >= search_focus_stop_count) return null;
-    return @enumFromInt(stop - 1);
+    return @fromBackingInt(@intCast(stop - 1));
 }
 
 const SearchBarResultsVisual = struct {
@@ -822,12 +822,12 @@ pub const SurfaceControls = struct {
     }
 
     fn searchControlUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
-        return searchBarButtonName(@enumFromInt(tag));
+        return searchBarButtonName(@fromBackingInt(@intCast(tag)));
     }
 
     fn searchToggleUiaState(ctx: *anyopaque, tag: usize) bool {
         const self: *Surface = @ptrCast(@alignCast(ctx));
-        return self.searchBarButtonActive(@enumFromInt(tag));
+        return self.searchBarButtonActive(@fromBackingInt(@intCast(tag)));
     }
 
     fn searchResultsUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
@@ -913,7 +913,7 @@ pub const SurfaceControls = struct {
 
     pub fn searchBarButtonPrevProc(self: *const Surface, hwnd: HWND) ?*const anyopaque {
         const role = self.searchBarButtonRole(hwnd) orelse return null;
-        return self.search_bar_button_prev_procs[@intFromEnum(role)];
+        return self.search_bar_button_prev_procs[@backingInt(role)];
     }
 
     pub fn applySearchBarFont(self: *Surface, font: ?*anyopaque) void {
@@ -1030,15 +1030,15 @@ pub const SurfaceControls = struct {
         host.subclassButton(
             hwnd,
             &hostButtonProc,
-            &self.search_bar_button_prev_procs[@intFromEnum(role)],
+            &self.search_bar_button_prev_procs[@backingInt(role)],
         );
-        self.search_bar_button_uia_providers[@intFromEnum(role)] = self.createChromeUiaProvider(hwnd, .{
+        self.search_bar_button_uia_providers[@backingInt(role)] = self.createChromeUiaProvider(hwnd, .{
             .ctx = @ptrCast(self),
             .role = switch (role) {
                 .regex, .case_sensitive, .whole_word => .toggle,
                 else => .button,
             },
-            .tag = @intFromEnum(role),
+            .tag = @backingInt(role),
             .name = &searchControlUiaName,
             .toggled = if (role == .regex or role == .case_sensitive or role == .whole_word)
                 &searchToggleUiaState
@@ -1224,8 +1224,8 @@ pub const SurfaceControls = struct {
         self.search_bar_edit_hwnd = null;
         self.search_bar_bg_hwnd = null;
         self.search_bar_edit_prev_proc = null;
-        self.search_bar_button_prev_procs = [_]?*const anyopaque{null} ** 6;
-        self.search_bar_button_uia_providers = [_]?*win32_uia.ChromeControlProvider{null} ** 6;
+        self.search_bar_button_prev_procs = @as([6]?*const anyopaque, @splat(null));
+        self.search_bar_button_uia_providers = @as([6]?*win32_uia.ChromeControlProvider, @splat(null));
         self.search_bar_label_prev_procs = .{ null, null };
         self.search_bar_bg_placement = .{};
         self.search_bar_edit_placement = .{};
@@ -1400,7 +1400,7 @@ pub const SurfaceControls = struct {
     }
 
     pub fn readSearchBarEditText(self: *Surface) ![:0]u8 {
-        const edit_hwnd = self.search_bar_edit_hwnd orelse return try self.app.core_app.alloc.dupeZ(u8, "");
+        const edit_hwnd = self.search_bar_edit_hwnd orelse return try self.app.core_app.alloc.dupeSentinel(u8, "", 0);
         return try readWindowTextUtf8Alloc(self.app.core_app.alloc, edit_hwnd);
     }
 
@@ -1460,7 +1460,7 @@ const TestCoreStep = struct {
 fn applyDockedSearch(surface: *Surface, out: docked_search.Outcome) anyerror!void {
     if (out.toggled) |role| {
         const now = surface.searchBarButtonActive(role);
-        if (surface.search_bar_button_uia_providers[@intFromEnum(role)]) |provider| {
+        if (surface.search_bar_button_uia_providers[@backingInt(role)]) |provider| {
             provider.raiseToggleChanged(!now, now);
         }
         surface.invalidateSearchButtons();

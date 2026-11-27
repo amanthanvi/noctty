@@ -28,10 +28,11 @@ pub fn build(b: *std.Build) !void {
     // If we have a VERSION file (present in source tarballs) then we
     // use that as the version source of truth. Otherwise we fall back
     // to what is in the build.zig.zon.
-    const file_version: ?[]const u8 = if (b.build_root.handle.readFileAlloc(
-        b.allocator,
+    const file_version: ?[]const u8 = if (b.root.root_dir.handle.readFileAlloc(
+        b.graph.io,
         "VERSION",
-        128,
+        b.allocator,
+        .limited(128),
     )) |content| std.mem.trim(
         u8,
         content,
@@ -55,9 +56,25 @@ pub fn build(b: *std.Build) !void {
     // Zig's cache key does not see the environment, so Config feeds the same
     // condition into the build options: that is what keeps a link cached
     // without the flag from being reused.
+    //
+    // From Zig 0.17 this script runs in its own configure process, and the
+    // links run in the make process, which reads its own environment: a
+    // value put into `b.graph.environ_map` here never reaches lld. So the
+    // caller sets `_LINK_` (scripts/build-package-windows.ps1 and
+    // scripts/package-windows.ps1 do), and a release build that keeps its
+    // symbols without it stops here, before anything links: a Fail step
+    // would stop only its dependents, and the make process would still link
+    // (and cache) the 2 MB of dead code.
     if (config.release_symbols) {
-        const inherited = b.graph.env_map.get("_LINK_") orelse "";
-        try b.graph.env_map.put("_LINK_", b.fmt("{s} -OPT:REF", .{inherited}));
+        // The configure cache does not key on the environment.
+        b.graph.poisonCache();
+        const link_env = b.graph.environ_map.get("_LINK_") orelse "";
+        if (std.ascii.findIgnoreCase(link_env, "-OPT:REF") == null and
+            std.ascii.findIgnoreCase(link_env, "/OPT:REF") == null)
+        {
+            std.debug.print("a Windows release build with -Dstrip=false links with -OPT:REF: set _LINK_ to include -OPT:REF (scripts/package-windows.ps1 does)\n", .{});
+            std.process.exit(1);
+        }
     }
 
     const test_filters = b.option(
@@ -72,8 +89,7 @@ pub fn build(b: *std.Build) !void {
     // so on CI's four-core runners one process left three cores idle.
     // Not with --fuzz: the build runner would rebuild the one test compile
     // concurrently for each sharded run step, and a build script cannot see
-    // --fuzz to refuse it (Zig 0.15.2's libfuzzer does not build for Windows
-    // anyway).
+    // --fuzz to refuse it.
     const test_shards = b.option(
         u32,
         "test-shards",
@@ -149,26 +165,26 @@ pub fn build(b: *std.Build) !void {
             }),
             .use_llvm = true,
         });
-        conpty_host.subsystem = .Console;
-        conpty_host.linkSystemLibrary("advapi32");
+        conpty_host.subsystem = .console;
+        conpty_host.root_module.linkSystemLibrary("advapi32", .{});
         // It shares the app's deps, but never the runtime thread-role layer.
         const conpty_host_deps = deps.withoutThreadRoles();
         _ = try conpty_host_deps.add(conpty_host);
         b.installArtifact(conpty_host);
     }
 
+    // The modules exported for Zig consumers of libghostty-vt, made once:
+    // they are named modules of this package, and Zig 0.17 refuses a second
+    // module of the same name.
+    const lib_vt_mod = if (want_lib_vt_graph)
+        try @import("src/build/GhosttyZig.zig").init(b, &config, &deps)
+    else
+        null;
+
     // libghostty-vt is retained in this fork, but normal app builds
     // shouldn't pay to build/install it unless explicitly requested.
-    if (want_lib_vt_graph) {
-        const GhosttyZig = @import("src/build/GhosttyZig.zig");
+    if (lib_vt_mod) |mod| {
         const GhosttyLibVt = @import("src/build/GhosttyLibVt.zig");
-
-        // The modules exported for Zig consumers of libghostty-vt.
-        const mod = try GhosttyZig.init(
-            b,
-            &config,
-            &deps,
-        );
 
         const libghostty_vt_shared = shared: {
             if (config.target.result.cpu.arch.isWasm()) {
@@ -225,11 +241,6 @@ pub fn build(b: *std.Build) !void {
             const TerminalHandoffProxy = @import("src/build/TerminalHandoffProxy.zig");
             const handoff_proxy = try TerminalHandoffProxy.init(b, &config);
             handoff_proxy.install();
-            // The portable ZIP's ghostty-vt.dll placeholder, in its own
-            // directory under zig-out\bin (src/build/GhosttyVtStub.zig).
-            const GhosttyVtStub = @import("src/build/GhosttyVtStub.zig");
-            const vt_stub = try GhosttyVtStub.init(b, &config);
-            vt_stub.install();
             if (config.bundled_conpty) {
                 const ConptyRedist = @import("src/build/ConptyRedist.zig");
                 ConptyRedist.install(b, config.target);
@@ -243,32 +254,33 @@ pub fn build(b: *std.Build) !void {
     // (src/apprt/win32_aumid.zig) as siblings of the exe, and only
     // zig-out/bin has them. Running the cached binary registers the exe
     // path as the toast IconUri, and Windows then caches that icon-less
-    // resolution for the rest of the logon session.
+    // resolution for the rest of the logon session. The installed exe finds
+    // zig-out/share/ghostty by climbing from its own path
+    // (src/os/resourcesdir.zig), so the step sets no GHOSTTY_RESOURCES_DIR
+    // (Zig 0.17 knows the install prefix only when the build runs). One
+    // difference from the 0.15 build: in a release mode a
+    // GHOSTTY_RESOURCES_DIR the shell already has wins over the climb, so
+    // `zig build run -Doptimize=ReleaseFast` from inside a noctty or Ghostty
+    // shell reads that installation's resources. Removing the variable in
+    // the step would copy the configure-time environment into the cached
+    // configuration.
     if (config.app_runtime != .none) {
         const run_cmd = if (config.emit_exe) run: {
-            const cmd = b.addSystemCommand(&.{
-                b.getInstallPath(.bin, exe.?.exe.out_filename),
-            });
+            const cmd = std.Build.Step.Run.create(b, "run noctty");
+            cmd.addFileArg(b.graph.path(.install_bin, exe.?.exe.out_filename));
             cmd.step.dependOn(b.getInstallStep());
             break :run cmd;
         } else b.addRunArtifact(exe.?.exe);
-        if (b.args) |args| run_cmd.addArgs(args);
-        if (install_resources) run_cmd.setEnvironmentVariable(
-            "GHOSTTY_RESOURCES_DIR",
-            b.getInstallPath(.prefix, "share/ghostty"),
-        );
+        run_cmd.addPassthruArgs();
         run_step.dependOn(&run_cmd.step);
     }
 
-    // Zig module tests
-    if (want_lib_vt_graph) {
-        const GhosttyZig = @import("src/build/GhosttyZig.zig");
-        const mod = try GhosttyZig.init(
-            b,
-            &config,
-            &deps,
-        );
-
+    // Zig module tests, on modules of their own: the libraries above write
+    // into their root modules (GhosttyLibVt: pic, and no stack protector on
+    // MSVC for the static library), and the tests run as the 0.15 build ran
+    // them, from a second set (anonymous, so no second named module).
+    if (lib_vt_mod) |lib_mod| {
+        const mod = try lib_mod.retarget(b, &config, &deps, config.target);
         const mod_vt_test = b.addTest(.{
             .name = "ghostty-vt-test",
             .root_module = mod.vt,
@@ -285,10 +297,7 @@ pub fn build(b: *std.Build) !void {
         });
         addTestRuns(b, test_lib_vt_step, mod_vt_c_test, test_shards);
     } else {
-        try test_lib_vt_step.addError(
-            "test-lib-vt requires -Demit-lib-vt=true in the Windows-only fork",
-            .{},
-        );
+        test_lib_vt_step.dependOn(&b.addFail("test-lib-vt requires -Demit-lib-vt=true in the Windows-only fork").step);
     }
 
     // Tests
@@ -300,8 +309,8 @@ pub fn build(b: *std.Build) !void {
             // -Dtest-optimize sets the mode, not the `.optimize` below.
             .root_module = config.testModule(b, .{
                 .root_source_file = b.path("src/main.zig"),
-                .target = config.baselineTarget(),
-                .optimize = .Debug,
+                .target = config.baselineTarget(b.graph.io),
+                .optimize = .debug,
                 .strip = false,
                 .omit_frame_pointer = false,
                 .unwind_tables = .sync,
@@ -327,7 +336,7 @@ pub fn build(b: *std.Build) !void {
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/build/version_fixture_main.zig"),
                     .target = config.target,
-                    .optimize = .Debug,
+                    .optimize = .debug,
                 }),
             });
             try GhosttyExe.addWindowsResource(b, &config, fixture_exe);
@@ -346,8 +355,8 @@ pub fn build(b: *std.Build) !void {
             .filters = test_filters,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/test_shard.zig"),
-                .target = config.baselineTarget(),
-                .optimize = .Debug,
+                .target = config.baselineTarget(b.graph.io),
+                .optimize = .debug,
             }),
         });
         test_step.dependOn(&b.addRunArtifact(shard_test).step);
@@ -356,15 +365,12 @@ pub fn build(b: *std.Build) !void {
         //test_step.dependOn(test_lib_vt_step);
 
     } else {
-        try test_step.addError(
-            "test requires -Dtest-filter=<name> or -Demit-test-exe=true in the Windows-only fork",
-            .{},
-        );
+        test_step.dependOn(&b.addFail("test requires -Dtest-filter=<name> or -Demit-test-exe=true in the Windows-only fork").step);
     }
 
     // update-translations does what it sounds like and updates the "pot"
     // files. These should be committed to the repo.
-    try translations_step.addError("update-translations is not supported in the Windows-only fork", .{});
+    translations_step.dependOn(&b.addFail("update-translations is not supported in the Windows-only fork").step);
 
     // Benchmarks. Standalone `main()` exes under `bench/`, each exposed
     // as a `bench:<name>` step that builds + runs with forwarded args.
@@ -386,11 +392,11 @@ pub fn build(b: *std.Build) !void {
         // bench:*` cannot measure Debug integrity checks hidden inside an
         // otherwise release binary.
         var bench_config = config;
-        bench_config.optimize = .ReleaseFast;
+        bench_config.optimize = .fast;
         // Never with the runtime thread-role layer, whatever the mode.
         const bench_deps = (try SharedDeps.init(b, &bench_config)).withoutThreadRoles();
         inline for (benches) |bench| {
-            try addBenchStep(b, &bench_deps, config.baselineTarget(), bench.name, bench.root);
+            try addBenchStep(b, &bench_deps, config.baselineTarget(b.graph.io), bench.name, bench.root);
         }
     } else {
         inline for (benches) |bench| {
@@ -439,13 +445,13 @@ fn addBenchStep(
         .root_module = b.createModule(.{
             .root_source_file = b.path(src),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     _ = try deps.add(exe);
-    addBenchCoreImport(b, exe, target, .ReleaseFast);
+    addBenchCoreImport(b, exe, target, .fast);
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const step = b.step(
         "bench:" ++ name,
         "Build and run bench/" ++ name ++ " microbench",
@@ -457,7 +463,7 @@ fn addBenchCoreImport(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
     const bench_core = b.createModule(.{
         .root_source_file = b.path("src/main_bench.zig"),

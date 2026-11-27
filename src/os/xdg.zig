@@ -6,8 +6,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const homedir = @import("homedir.zig");
-const env_os = @import("env.zig");
-const windows_os = @import("windows.zig");
+const windows_ext = @import("windows_ext.zig");
 
 pub const portable_marker_names = [_][]const u8{
     "noctty.portable",
@@ -17,9 +16,9 @@ pub const portable_marker_names = [_][]const u8{
 
 const PortableMarker = enum { explicit, legacy_config };
 
-fn portableMarkerInDir(directory: std.fs.Dir) ?PortableMarker {
+fn portableMarkerInDir(io: std.Io, directory: std.Io.Dir) ?PortableMarker {
     for (portable_marker_names) |name| {
-        const stat = directory.statFile(name) catch continue;
+        const stat = directory.statFile(io, name, .{}) catch continue;
         if (stat.kind != .file) continue;
         return if (std.mem.eql(u8, name, "config.ghostty")) .legacy_config else .explicit;
     }
@@ -28,21 +27,22 @@ fn portableMarkerInDir(directory: std.fs.Dir) ?PortableMarker {
 
 /// Detect portable mode from a real executable directory. Markers must be
 /// regular files so an unrelated directory cannot relocate application data.
-pub fn detectPortableRoot(alloc: Allocator, exe_dir: []const u8) !?[]u8 {
-    return detectPortableRootWithInstallerManaged(alloc, exe_dir, null);
+pub fn detectPortableRoot(io: std.Io, alloc: Allocator, exe_dir: []const u8) !?[]u8 {
+    return detectPortableRootWithInstallerManaged(io, alloc, exe_dir, null);
 }
 
 fn detectPortableRootWithInstallerManaged(
+    io: std.Io,
     alloc: Allocator,
     exe_dir: []const u8,
     installer_managed_override: ?bool,
 ) !?[]u8 {
-    var directory = try std.fs.openDirAbsolute(exe_dir, .{});
-    defer directory.close();
-    const marker = portableMarkerInDir(directory) orelse return null;
+    var directory = try std.Io.Dir.openDirAbsolute(io, exe_dir, .{});
+    defer directory.close(io);
+    const marker = portableMarkerInDir(io, directory) orelse return null;
     if (marker == .legacy_config) {
         const installer_managed = installer_managed_override orelse
-            (builtin.os.tag == .windows and windows_os.innoUninstallRegistryMatchesInstallDir(exe_dir));
+            (builtin.os.tag == .windows and windows_ext.innoUninstallRegistryMatchesInstallDir(exe_dir));
         if (installer_managed) return null;
     }
     return try alloc.dupe(u8, exe_dir);
@@ -55,14 +55,18 @@ const PortableRootCache = struct {
 };
 
 var portable_root_cache: PortableRootCache = .{};
-var portable_root_once = std.once(initPortableRootCache);
+var portable_root_once = @import("once.zig").once(initPortableRootCache);
 
 fn initPortableRootCache() void {
     if (builtin.os.tag != .windows) return;
 
+    // The first caller may run before the global state (and its Io) exists,
+    // so the one-time lookup takes std's single-threaded Io: a blocking call
+    // on the calling thread, as 0.15.2's std.fs was.
+    const io = std.Io.Threaded.global_single_threaded.io();
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_dir = std.fs.selfExeDirPath(&exe_dir_buf) catch return;
-    const root = detectPortableRoot(std.heap.page_allocator, exe_dir) catch return;
+    const exe_dir = exe_dir_buf[0 .. std.process.executableDirPath(io, &exe_dir_buf) catch return];
+    const root = detectPortableRoot(io, std.heap.page_allocator, exe_dir) catch return;
     defer if (root) |value| std.heap.page_allocator.free(value);
     const value = root orelse return;
     if (value.len > portable_root_cache.path.len) return;
@@ -109,8 +113,8 @@ pub const Options = struct {
 };
 
 /// Get the XDG user config directory. The returned value is allocated.
-pub fn config(alloc: Allocator, opts: Options) ![]u8 {
-    return try dir(alloc, opts, .{
+pub fn config(io: std.Io, alloc: Allocator, environ_map: *const std.process.Environ.Map, opts: Options) ![]u8 {
+    return try dir(io, alloc, environ_map, opts, .{
         .env = "XDG_CONFIG_HOME",
         .windows_env = "LOCALAPPDATA",
         .default_subdir = ".config",
@@ -118,8 +122,8 @@ pub fn config(alloc: Allocator, opts: Options) ![]u8 {
 }
 
 /// Get the XDG cache directory. The returned value is allocated.
-pub fn cache(alloc: Allocator, opts: Options) ![]u8 {
-    return try dir(alloc, opts, .{
+pub fn cache(io: std.Io, alloc: Allocator, environ_map: *const std.process.Environ.Map, opts: Options) ![]u8 {
+    return try dir(io, alloc, environ_map, opts, .{
         .env = "XDG_CACHE_HOME",
         .windows_env = "LOCALAPPDATA",
         .default_subdir = ".cache",
@@ -127,8 +131,8 @@ pub fn cache(alloc: Allocator, opts: Options) ![]u8 {
 }
 
 /// Get the XDG state directory. The returned value is allocated.
-pub fn state(alloc: Allocator, opts: Options) ![]u8 {
-    return try dir(alloc, opts, .{
+pub fn state(io: std.Io, alloc: Allocator, environ_map: *const std.process.Environ.Map, opts: Options) ![]u8 {
+    return try dir(io, alloc, environ_map, opts, .{
         .env = "XDG_STATE_HOME",
         .windows_env = "LOCALAPPDATA",
         .default_subdir = ".local/state",
@@ -143,7 +147,9 @@ const InternalOptions = struct {
 
 /// Unified helper to get XDG directories that follow a common pattern.
 fn dir(
+    io: std.Io,
     alloc: Allocator,
+    environ_map: *const std.process.Environ.Map,
     opts: Options,
     internal_opts: InternalOptions,
 ) ![]u8 {
@@ -161,32 +167,30 @@ fn dir(
         });
     }
 
-    // First check the env var. On Windows we have to allocate so this tracks
-    // both whether we have the env var and whether we own it.
-    // on Windows we treat `LOCALAPPDATA` as a fallback for `XDG_CONFIG_HOME`
-    const env_ = try env_os.getenvNotEmpty(alloc, internal_opts.env) orelse switch (builtin.os.tag) {
-        else => null,
-        .windows => try env_os.getenvNotEmpty(alloc, internal_opts.windows_env),
+    // First check the env var. On Windows we treat `LOCALAPPDATA` as a
+    // fallback for `XDG_CONFIG_HOME`
+    const env = switch (builtin.target.os.tag) {
+        .windows => environ_map.get(internal_opts.env) orelse environ_map.get(internal_opts.windows_env) orelse "",
+        else => environ_map.get(internal_opts.env) orelse "",
     };
-    defer if (env_) |env| env.deinit(alloc);
 
-    if (env_) |env| {
+    if (env.len > 0) {
         // If we have a subdir, then we use the env as-is to avoid a copy.
         if (opts.subdir) |subdir| {
             return try std.fs.path.join(alloc, &[_][]const u8{
-                env.value,
+                env,
                 subdir,
             });
         }
 
-        return try alloc.dupe(u8, env.value);
+        return try alloc.dupe(u8, env);
     }
 
     // On Windows, a stripped-down shell may not have LOCALAPPDATA set
     // even though the known folder still exists.
     if (builtin.os.tag == .windows) {
         var windows_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (try windows_os.knownFolderPathUtf8(&windows_os.FOLDERID_LocalAppData, &windows_buf)) |local_appdata| {
+        if (try windows_ext.knownFolderPathUtf8(&windows_ext.FOLDERID_LocalAppData, &windows_buf)) |local_appdata| {
             if (opts.subdir) |subdir| {
                 return try std.fs.path.join(alloc, &[_][]const u8{
                     local_appdata,
@@ -200,7 +204,7 @@ fn dir(
 
     // Get our home dir
     var buf: [1024]u8 = undefined;
-    if (try homedir.home(&buf)) |home| {
+    if (try homedir.home(io, environ_map, &buf)) |home| {
         return try std.fs.path.join(alloc, &[_][]const u8{
             home,
             internal_opts.default_subdir,
@@ -230,10 +234,13 @@ pub fn parseTerminalExec(argv: []const [*:0]const u8) ?[]const [*:0]const u8 {
 
 test {
     const testing = std.testing;
+    const io = testing.io;
     const alloc = testing.allocator;
+    var environ_map = try testing.environ.createMap(alloc);
+    defer environ_map.deinit();
 
     {
-        const value = try config(alloc, .{});
+        const value = try config(io, alloc, &environ_map, .{});
         defer alloc.free(value);
         try testing.expect(value.len > 0);
     }
@@ -244,27 +251,27 @@ test "portable marker detection requires a regular file" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const exe_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const exe_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(exe_dir);
 
-    try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
+    try testing.expect((try detectPortableRoot(testing.io, alloc, exe_dir)) == null);
 
     for (portable_marker_names) |marker| {
-        try tmp.dir.makeDir(marker);
-        try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
-        try tmp.dir.deleteDir(marker);
+        try tmp.dir.createDir(std.testing.io, marker, .default_dir);
+        try testing.expect((try detectPortableRoot(testing.io, alloc, exe_dir)) == null);
+        try tmp.dir.deleteDir(std.testing.io, marker);
 
-        const file = try tmp.dir.createFile(marker, .{});
-        file.close();
-        const root = (try detectPortableRoot(alloc, exe_dir)).?;
+        const file = try tmp.dir.createFile(std.testing.io, marker, .{});
+        file.close(std.testing.io);
+        const root = (try detectPortableRoot(testing.io, alloc, exe_dir)).?;
         defer alloc.free(root);
         try testing.expectEqualStrings(exe_dir, root);
-        try tmp.dir.deleteFile(marker);
+        try tmp.dir.deleteFile(std.testing.io, marker);
     }
 
-    const ignored = try tmp.dir.createFile("config", .{});
-    ignored.close();
-    try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
+    const ignored = try tmp.dir.createFile(std.testing.io, "config", .{});
+    ignored.close(std.testing.io);
+    try testing.expect((try detectPortableRoot(testing.io, alloc, exe_dir)) == null);
 
     const path_root = if (builtin.os.tag == .windows) "D:\\apps\\noctty" else "/apps/noctty";
 
@@ -298,34 +305,37 @@ test "ambiguous portable config marker does not override an installer-managed di
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const exe_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const exe_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(exe_dir);
 
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "user configuration" });
-    try testing.expect((try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)) == null);
-    const legacy_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, false)).?;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "user configuration" });
+    try testing.expect((try detectPortableRootWithInstallerManaged(testing.io, alloc, exe_dir, true)) == null);
+    const legacy_root = (try detectPortableRootWithInstallerManaged(testing.io, alloc, exe_dir, false)).?;
     defer alloc.free(legacy_root);
     try testing.expectEqualStrings(exe_dir, legacy_root);
 
     for ([_][]const u8{ "noctty.portable", "portable.txt" }) |explicit_marker| {
-        try tmp.dir.writeFile(.{ .sub_path = explicit_marker, .data = explicit_marker });
-        const explicit_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)).?;
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = explicit_marker, .data = explicit_marker });
+        const explicit_root = (try detectPortableRootWithInstallerManaged(testing.io, alloc, exe_dir, true)).?;
         defer alloc.free(explicit_root);
         try testing.expectEqualStrings(exe_dir, explicit_root);
-        try tmp.dir.deleteFile(explicit_marker);
+        try tmp.dir.deleteFile(std.testing.io, explicit_marker);
     }
 }
 
 test "cache directory paths" {
     const testing = std.testing;
+    const io = testing.io;
     const alloc = testing.allocator;
-    const mock_home = if (builtin.os.tag == .windows) "C:\\Users\\test" else "/Users/test";
+    const mock_home = if (builtin.target.os.tag == .windows) "C:\\Users\\test" else "/Users/test";
+    var environ_map = try testing.environ.createMap(alloc);
+    defer environ_map.deinit();
 
     // Test when XDG_CACHE_HOME is not set
     {
         // Test base path
         {
-            const cache_path = try cache(alloc, .{ .home = mock_home });
+            const cache_path = try cache(io, alloc, &environ_map, .{ .home = mock_home });
             defer alloc.free(cache_path);
             const expected = try std.fs.path.join(alloc, &.{ mock_home, ".cache" });
             defer alloc.free(expected);
@@ -334,7 +344,7 @@ test "cache directory paths" {
 
         // Test with subdir
         {
-            const cache_path = try cache(alloc, .{
+            const cache_path = try cache(io, alloc, &environ_map, .{
                 .home = mock_home,
                 .subdir = "ghostty",
             });
@@ -347,28 +357,14 @@ test "cache directory paths" {
 }
 
 test "fallback when xdg env empty" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
+    const io = std.testing.io;
     const alloc = std.testing.allocator;
-
-    const saved_home = home: {
-        const home = std.posix.getenv("HOME") orelse break :home null;
-        break :home try alloc.dupeZ(u8, home);
-    };
-    defer env: {
-        const home = saved_home orelse {
-            _ = env_os.unsetenv("HOME");
-            break :env;
-        };
-        _ = env_os.setenv("HOME", home);
-        std.testing.allocator.free(home);
-    }
-    const temp_home = "/tmp/ghostty-test-home";
-    _ = env_os.setenv("HOME", temp_home);
 
     const DirCase = struct {
         name: [:0]const u8,
-        func: fn (Allocator, Options) anyerror![]u8,
+        func: fn (std.Io, Allocator, *std.process.Environ.Map, Options) anyerror![]u8,
         default_subdir: []const u8,
     };
 
@@ -379,19 +375,10 @@ test "fallback when xdg env empty" {
     };
 
     inline for (cases) |case| {
-        // Save and restore each environment variable
-        const saved_env = blk: {
-            const value = std.posix.getenv(case.name) orelse break :blk null;
-            break :blk try alloc.dupeZ(u8, value);
-        };
-        defer env: {
-            const value = saved_env orelse {
-                _ = env_os.unsetenv(case.name);
-                break :env;
-            };
-            _ = env_os.setenv(case.name, value);
-            alloc.free(value);
-        }
+        var environ_map = try std.testing.environ.createMap(alloc);
+        defer environ_map.deinit();
+        const temp_home = "/tmp/ghostty-test-home";
+        try environ_map.put("HOME", temp_home);
 
         const expected = try std.fs.path.join(alloc, &[_][]const u8{
             temp_home,
@@ -400,8 +387,8 @@ test "fallback when xdg env empty" {
         defer alloc.free(expected);
 
         // Test with empty string - should fallback to home
-        _ = env_os.setenv(case.name, "");
-        const actual = try case.func(alloc, .{});
+        try environ_map.put(case.name, "");
+        const actual = try case.func(io, alloc, &environ_map, .{});
         defer alloc.free(actual);
 
         try std.testing.expectEqualStrings(expected, actual);
@@ -409,30 +396,14 @@ test "fallback when xdg env empty" {
 }
 
 test "fallback when xdg env empty and subdir" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
-    const env = @import("env.zig");
+    const io = std.testing.io;
     const alloc = std.testing.allocator;
-
-    const saved_home = home: {
-        const home = std.posix.getenv("HOME") orelse break :home null;
-        break :home try alloc.dupeZ(u8, home);
-    };
-    defer env: {
-        const home = saved_home orelse {
-            _ = env.unsetenv("HOME");
-            break :env;
-        };
-        _ = env.setenv("HOME", home);
-        std.testing.allocator.free(home);
-    }
-
-    const temp_home = "/tmp/ghostty-test-home";
-    _ = env.setenv("HOME", temp_home);
 
     const DirCase = struct {
         name: [:0]const u8,
-        func: fn (Allocator, Options) anyerror![]u8,
+        func: fn (std.Io, Allocator, *const std.process.Environ.Map, Options) anyerror![]u8,
         default_subdir: []const u8,
     };
 
@@ -443,19 +414,10 @@ test "fallback when xdg env empty and subdir" {
     };
 
     inline for (cases) |case| {
-        // Save and restore each environment variable
-        const saved_env = blk: {
-            const value = std.posix.getenv(case.name) orelse break :blk null;
-            break :blk try alloc.dupeZ(u8, value);
-        };
-        defer env: {
-            const value = saved_env orelse {
-                _ = env.unsetenv(case.name);
-                break :env;
-            };
-            _ = env.setenv(case.name, value);
-            alloc.free(value);
-        }
+        var environ_map = try std.testing.environ.createMap(alloc);
+        defer environ_map.deinit();
+        const temp_home = "/tmp/ghostty-test-home";
+        try environ_map.put("HOME", temp_home);
 
         const expected = try std.fs.path.join(alloc, &[_][]const u8{
             temp_home,
@@ -465,8 +427,8 @@ test "fallback when xdg env empty and subdir" {
         defer alloc.free(expected);
 
         // Test with empty string - should fallback to home
-        _ = env.setenv(case.name, "");
-        const actual = try case.func(alloc, .{ .subdir = "ghostty" });
+        try environ_map.put(case.name, "");
+        const actual = try case.func(io, alloc, &environ_map, .{ .subdir = "ghostty" });
         defer alloc.free(actual);
 
         try std.testing.expectEqualStrings(expected, actual);

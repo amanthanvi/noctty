@@ -104,16 +104,16 @@ pub fn encode(alloc: Allocator, source: Source, writer: *std.Io.Writer) Error!vo
 
 /// Write `source` into the terminfo database directory `dir`, one file per
 /// name in fileNames, each in the directory hexDir names.
-pub fn writeDatabase(alloc: Allocator, source: Source, dir: std.fs.Dir) !void {
+pub fn writeDatabase(io: std.Io, alloc: Allocator, source: Source, dir: std.Io.Dir) !void {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try encode(alloc, source, &out.writer);
 
     for (try fileNames(source)) |name| {
         const hex = hexDir(name);
-        var sub_dir = try dir.makeOpenPath(&hex, .{});
-        defer sub_dir.close();
-        try sub_dir.writeFile(.{ .sub_path = name, .data = out.written() });
+        var sub_dir = try dir.createDirPathOpen(io, &hex, .{});
+        defer sub_dir.close(io);
+        try sub_dir.writeFile(io, .{ .sub_path = name, .data = out.written() });
     }
 }
 
@@ -690,20 +690,20 @@ test "writeDatabase" {
         .names = &.{ "xterm-test", "test", "Test Terminal" },
         .capabilities = &.{.{ .name = "am", .value = .{ .boolean = {} } }},
     };
-    try writeDatabase(testing.allocator, src, tmp.dir);
+    try writeDatabase(testing.io, testing.allocator, src, tmp.dir);
 
     var expected: std.Io.Writer.Allocating = .init(testing.allocator);
     defer expected.deinit();
     try encode(testing.allocator, src, &expected.writer);
 
     for ([_][]const u8{ "78/xterm-test", "74/test" }) |path| {
-        const data = try tmp.dir.readFileAlloc(testing.allocator, path, max_entry_size);
+        const data = try tmp.dir.readFileAlloc(testing.io, path, testing.allocator, .limited(max_entry_size));
         defer testing.allocator.free(data);
         try testing.expectEqualSlices(u8, expected.written(), data);
     }
 
     // The description gets no file.
-    try testing.expectError(error.FileNotFound, tmp.dir.access("54/Test Terminal", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "54/Test Terminal", .{}));
 }
 
 test "names that cannot be encoded or written" {
@@ -711,15 +711,15 @@ test "names that cannot be encoded or written" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try testing.expectError(error.InvalidName, writeDatabase(testing.allocator, .{
+    try testing.expectError(error.InvalidName, writeDatabase(testing.io, testing.allocator, .{
         .names = &.{ "bad/name", "Bad" },
         .capabilities = &.{},
     }, tmp.dir));
-    try testing.expectError(error.InvalidName, writeDatabase(testing.allocator, .{
+    try testing.expectError(error.InvalidName, writeDatabase(testing.io, testing.allocator, .{
         .names = &.{ "bad|name", "Bad" },
         .capabilities = &.{},
     }, tmp.dir));
-    try testing.expectError(error.InvalidName, writeDatabase(testing.allocator, .{
+    try testing.expectError(error.InvalidName, writeDatabase(testing.io, testing.allocator, .{
         .names = &.{},
         .capabilities = &.{},
     }, tmp.dir));

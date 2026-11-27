@@ -31,6 +31,7 @@ Makefile text eol=lf
 # Text data files - always LF (embedded in Zig, parsed with \n split)
 *.txt text eol=lf
 src/terminal/testdata/replay/*.vt text eol=lf
+src/unicode/testdata/*.tsv text eol=lf
 # The ran-list fixtures' stderr is the runner's own bytes: a test name in it may
 # hold CR LF or bytes that are not UTF-8 (test/windows/ran-list-fixtures/bytes.zig),
 # so no line end is converted, and git's whitespace check leaves its bytes alone.

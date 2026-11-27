@@ -11,12 +11,13 @@
 //! this boundary.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const sys = @import("win32/sys.zig");
 
 const windows = std.os.windows;
 const GUID = windows.GUID;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const HMODULE = ?*anyopaque;
 const HWND = ?*anyopaque;
 
@@ -512,7 +513,7 @@ const DeviceCreateSurfaceFn = *const fn (
 const VisualSetContentFn = *const fn (*anyopaque, ?*anyopaque) callconv(.winapi) HRESULT;
 const SurfaceBeginDrawFn = *const fn (
     *anyopaque,
-    ?*const windows.RECT,
+    ?*const win32_types.RECT,
     *const GUID,
     *?*anyopaque,
     *Point,

@@ -6,6 +6,11 @@
 # required stages, the record verdict and the workload hash), its build admission (a repository with only a plain
 # zig-out build is refused), the shared state guard's paths, and its native layer's struct layout (compiled and
 # checked against the SDK's x64 sizes). No noctty is started.
+# What a sample's private bytes (PrivateUsage, the commit charge) hold on Zig 0.17.1: each live worker of the global
+# `Io`'s pool (`global.io_pool` in src/global.zig, at most four) commits 1 MiB of its 16 MiB stack reserve plus three
+# guard pages (12 KiB), so idle worker stacks add up to about 4 MiB, more once a task has grown its stack past the
+# commit, which stays committed (measured in src/sync/io_tasks.zig; the 2026-11-26 STATE-MUTEX-017-01 entry in
+# docs/agents/log/renderer.md, trap (4)). A surface thread commits 1 MiB of its 16 MiB too.
 $workingSetScript = Join-Path $repoRoot 'test\windows\hidden-win11-working-set.ps1'
 # Ordinal string equality for every comparison of config, argv, path, receipt and hash text here (Sol and Opus,
 # round 5): -ceq and -cne are culture-aware and skip a soft hyphen.
@@ -1090,7 +1095,7 @@ try {
     # outside a test build is xdg.config's, rooted at the portable root (a test build names its own root instead:
     # `test_config_root`, w1a/1a6-test-config-guard).
     $fileLoadZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\config\file_load.zig') -Raw
-    if (-not $fileLoadZig.Contains('configHomePath(alloc, "ghostty/config")') -or -not $fileLoadZig.Contains('configHomePath(alloc, "winghostty/config.ghostty")') -or -not $fileLoadZig.Contains('return try xdg.config(alloc, .{ .subdir = subdir });')) { throw 'The stray-config list is not file_load.zig''s legacy paths.' }
+    if (-not $fileLoadZig.Contains('configHomePath(alloc, "ghostty/config")') -or -not $fileLoadZig.Contains('configHomePath(alloc, "winghostty/config.ghostty")') -or -not $fileLoadZig.Contains('return try xdg.config(global.io(), alloc, &environ_map, .{ .subdir = subdir });')) { throw 'The stray-config list is not file_load.zig''s legacy paths.' }
 } finally { [IO.Directory]::Delete($configDir, $true) }
 
 # What the payload checks and the transport check read from the product: the session budget and overhead, the UIA

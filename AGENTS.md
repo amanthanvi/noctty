@@ -9,10 +9,12 @@ reading step under [Self-Correction Log](#self-correction-log).
 - **Build:** `zig build` (also stages the pinned `conpty.dll` and
   `OpenConsole.exe` beside the exe; staging traps: the 2026-10-10 bundled
   ConPTY entry in `docs/agents/log/conpty.md`)
-- **Test (Zig):** `zig build test -Demit-test-exe=true --summary all`
+- **Test (Zig):** `zig build test -Demit-test-exe=true --summary all --test-timeout 120s`
   (full suite, ~6.8k tests, several minutes). This is the only invocation that
   is trustworthy on its own, and `--summary all` is part of it: the count is
-  the evidence.
+  the evidence. `--test-timeout 120s` has Zig 0.17.1's build runner report a
+  test still running after two minutes as timed out instead of waiting on it
+  (CI passes it on every `zig build test` step).
   - `-Dtest-shards=4` runs it as four concurrent processes with the same
     count, about a third of the time (test-harnesses.md: 2026-11-11
     TEST-SHARDS-01).
@@ -26,8 +28,9 @@ reading step under [Self-Correction Log](#self-correction-log).
     whose fully qualified name (file path, `.test.`, test name) contains the
     token, for quick iteration; it is not evidence on its own. Read the
     count: the `N/M tests passed` line counts the matching tests plus about
-    70 unnamed `test { ... }` blocks that no filter excludes, so a token that
-    matches nothing still reports about 70 passes, not zero. Use `ConPTY` to
+    90 unnamed `test { ... }` blocks that no filter excludes (87 at 1B.6),
+    so a token that matches nothing still reports about 90 passes, not
+    zero. Use `ConPTY` to
     reach the probe tests in `src/pty_transport_probe.zig`. A filtered build
     compiles the whole tree, about a minute.
     `Build Summary: 41/41 steps succeeded` counts build steps, not tests.
@@ -36,7 +39,7 @@ reading step under [Self-Correction Log](#self-correction-log).
 - **Formatting (Zig):** `zig fmt .`
 - **Formatting (other):** `prettier -w .`
 - Run `zig build*` through `scripts/dev-windows.cmd` (or an equivalent
-  VS-dev + Zig 0.15.2 shell); the ambient shell can miss the native toolchain
+  VS-dev + Zig 0.17.1 shell); the ambient shell can miss the native toolchain
   and fail with misleading dependency errors. A build root on another drive
   than the effective Zig global cache (a review clone under `H:\scratch`
   with the default `%LOCALAPPDATA%\zig`) asserts in the build runner: set
@@ -122,7 +125,12 @@ reading step under [Self-Correction Log](#self-correction-log).
   the original `LOCALAPPDATA`), or, for a build root on another drive than
   that cache, to a cache on the build root's drive: a build root and its
   effective cache must share a drive (build-release-ci.md: 2026-11-13
-  BUILD-CROSS-DRIVE-CACHE). A test that
+  BUILD-CROSS-DRIVE-CACHE). Zig 0.17.1 also unpacks a build's packages into
+  `zig-pkg/` in the build root (`ZIG_LOCAL_PKG_DIR` moves it), which the
+  redirect does not move: leave `ZIG_LOCAL_PKG_DIR` unset or on the build
+  root's drive, since the packages' own build steps then run from it, as they
+  ran from the global cache before (inferred from 0.17.1's
+  `lib/compiler/Maker/Fetch.zig`, not yet measured). A test that
   reached the real `%LOCALAPPDATA%\noctty` once put the user's launches into
   safe mode. (window-frame.md: 2026-09-23 "Item (b) of the #262 entry";
   test-harnesses.md: 2026-09-23 #261 trap 2.) Give each PowerShell you type
@@ -251,9 +259,11 @@ that govern each symbol you change, or that none does.
 
 - [conpty.md](docs/agents/log/conpty.md): `src/pty.zig`, the pty reader (and
   its stack size, `os.surfaceThreadSpawnConfig`, and how much of it code
-  uses, `stackUse` in `os/main.zig`, including the reparse walk the kitty
+  uses, `stackUse` in `os/main.zig`, `win32_prefixed_path.convert`'s frame
+  among it, including the reparse walk the kitty
   file open runs there: `os/local_path.zig` `walk`, `openRoot`,
-  `readLinkTarget`) and write pool in
+  `readLinkTarget`; and the stacks of the global `Io.Threaded` instance's
+  workers, `src/global.zig` `io_impl`) and write pool in
   `termio/Exec.zig`, `ResizePseudoConsole` and the renderer lock
   `Termio.resize` holds across it, in-box conhost
   versus the bundled `conpty.dll`/`OpenConsole.exe`
@@ -266,7 +276,16 @@ that govern each symbol you change, or that none does.
   terminal replies reach a console program through ConPTY's input and in what
   shape (the reply-path harness
   `test/windows/hidden-win11-conpty-reply-path.ps1` and its reader
-  `test/windows/console-reply-reader.c`), the
+  `test/windows/console-reply-reader.c`), the width ConPTY gives a code
+  point and the pins that make noctty's match it (`conpty_width_pins` in
+  `src/build/uucode_config.zig`, the probe's table
+  `src/unicode/testdata/conpty_width.tsv` and its test in
+  `src/unicode/main.zig`, the width harness
+  `test/windows/hidden-win11-conpty-width.ps1` and its probe
+  `test/windows/conpty-width-probe.c`), which sequences a console host
+  passes on to noctty and where (the passthrough harness
+  `test/windows/hidden-win11-conpty-passthru.ps1` and its probe
+  `test/windows/conpty-passthru-probe.c`, run at each ConPTY pin bump), the
   Ctrl+C-ignore attribute hosted shells inherit
   (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under
@@ -276,8 +295,10 @@ that govern each symbol you change, or that none does.
   `windows_visual_studio.devShellPrelude`, `win32_powershell_install.zig`):
   the OSC 133 and OSC 7 marks a shell emits and the directory and host names
   in them, Nushell's `@complete external` floor, PSReadLine hooks, execution
-  policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty or
-  modifyOtherKeys flags set (`CSI <99u`, `CSI >4;0m`).
+  policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty
+  keyboard, modifyOtherKeys or Kitty paste-event modes set (`CSI <99u`,
+  `CSI >4;0m`, `CSI ?5522l`; cmd's PROMPT: `buildCmdPrompt`,
+  `cmd_prompt_prefix`).
 - [terminal-core.md](docs/agents/log/terminal-core.md): `src/terminal/` (VT
   parser limits, `PageList` and its page serials (`page_serial_epoch`,
   `nodeIsValid`, the source renewal in `PageList.split`), `PageList.Node`'s
@@ -286,10 +307,11 @@ that govern each symbol you change, or that none does.
   `pagePreservingState()`, `pageAssumeResident()`, `storage()` and
   `Node.owned`), the page owner in `destroyNodeExt` and `compact`, the
   Node section of `docs/upstream-merge-policy.md`, and their callers in
-  `src/inspector/widgets/pagelist.zig`, `snapshotDocumentWindow` in
-  `src/apprt/win32_uia/text.zig` and the session readers in
-  `src/apprt/win32/session.zig` (`captureTerminalScrollbackSnapshotAlloc`,
-  `terminalScreenIsUnpainted`), OSC parsers,
+  `src/inspector/widgets/pagelist.zig`, `snapshotDocumentWindow` and its
+  `formatDocument` in `src/apprt/win32_uia/text.zig` and the session
+  readers in `src/apprt/win32/session.zig`
+  (`captureTerminalScrollbackSnapshotAlloc` with `lastTextPin` and
+  `formatPlainPreserving`, `terminalScreenIsUnpainted`), OSC parsers,
   OSC 133 exit codes, prompt typeahead
   in `semantic_command.zig` and what drops its last command when rows or
   cells move (`invalidateRange`, `invalidateMarginShift`, from
@@ -300,7 +322,10 @@ that govern each symbol you change, or that none does.
   (`search/pattern.zig`: `Pattern`), one query over a terminal and its
   reports (`search/query_search.zig`: `QuerySearch.step`), the selection
   and search-highlight rows of `RenderState` (`render.zig`),
-  `TerminalFormatter`/`ScreenFormatter` output for undo snapshots and Copy as
+  `TerminalFormatter`/`ScreenFormatter` output for undo snapshots (the
+  snapshot's own page walk: `captureTerminalUndoStateBytes`,
+  `formatTerminalUndoVt` and `terminalUndoTrailingBlankRows` in
+  `src/apprt/win32.zig`) and Copy as
   HTML, Kitty graphics commands, placements and deletes in
   `kitty/graphics_command.zig`, `kitty/graphics_storage.zig` and
   `kitty/graphics_exec.zig`, the file reads of `kitty/graphics_image.zig`
@@ -345,9 +370,14 @@ that govern each symbol you change, or that none does.
   backend loads (the OpenGL32 static import), and the renderer-state mutex
   with its runtime thread-role layer (`src/sync/state_mutex.zig`:
   `StateMutex`, the types of its carriers, `assertHeld`, the demand acquire
-  `State.lockDemand` forwards to, the panics PN1 to PN7; the roles in
-  `src/sync/thread_role.zig`: `enter`, `fixture`, and `assertWindowProc`,
-  which every fork window and subclass procedure calls first; the
+  `State.lockDemand` forwards to, the panics PN1 to PN7, the call sites'
+  one spelling `lockUncancelable()` and `unlock()` and the test-only
+  `lock()`, and its inner `Io`, `innerIo`; the roles in
+  `src/sync/thread_role.zig`: `enter`, `fixture`, `enterIfNone`, which an
+  `Io` task opens with (`src/sync/io_tasks.zig`, acceptance test 19), and
+  `assertWindowProc`, which every fork window and subclass procedure calls
+  first; the global `Io`'s pool, `global.io_pool`; the other sync
+  primitive, `src/os/once.zig`; the
   pair recorder `src/sync/recorder.zig` and its dump `src/sync/dump.zig`;
   and a site it keys by build mode, `stream_handler.surfaceMessageWriter`'s
   calling convention).
@@ -432,7 +462,9 @@ that govern each symbol you change, or that none does.
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
-  palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
+  palette (`win32_palette.zig`, `win32/palette_controller.zig`, the
+  commands it leaves out of upstream's defaults: `listsAction` in
+  `win32_palette_catalog.zig`, its live
   theme preview, one window's at a time (`Host.showOverlay`, which closes
   every other window's palette; `Surface.toggleTabOverview`, which closes
   what is open first like every overlay's open; the error
@@ -562,7 +594,8 @@ that govern each symbol you change, or that none does.
   `origin.Derivation` at `.automatic`,
   `useRecovery`, the queries `defaultProfile`, `nocttyCommand`,
   `commandLineNamesProfile`, `filesDefine` and `defaultProfileForKey`, and
-  `keepSources`), profile
+  `keepSources`; the process environment it reads: `src/global.zig`
+  `environ`, `environMap` and `syncEnviron`, `os/env.zig` `setenv`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`, profile key equality
@@ -605,7 +638,10 @@ that govern each symbol you change, or that none does.
   the empty bracketed paste and the paste of copied files
   (`Surface.completeClipboardPasteWithoutText`, `selectClipboardContents`,
   `win32_ole.extractHdrop`), OSC 52 prompts and
-  replies, paste protection (`win32_paste_protection.zig`), drag-and-drop
+  replies, Kitty paste events (mode 5522) and OSC 5522 reads
+  (`Surface.sendPasteEvent`, `serveKittyClipboardRead`,
+  `ClipboardSource.mimes`, `has_text`),
+  paste protection (`win32_paste_protection.zig`), drag-and-drop
   (`win32_surface_drop*.zig`), pending clipboard confirmations.
 - [settings.md](docs/agents/log/settings.md): the Settings window
   (`win32_settings.zig`, `win32_settings_fields.zig`): its controls and when
@@ -627,7 +663,8 @@ that govern each symbol you change, or that none does.
   where each shown value comes from (`config.origin`,
   `win32_settings_reference.savedOrigin`), the opacity trackbar and the number
   up-downs, the Profiles page (`ReferenceList`, `ListKind.profiles`,
-  `win32_settings_profiles.zig`) and the identity patcher that saves it
+  `win32_settings_profiles.zig`, and the `Lists` its model's moves and
+  hides give) and the identity patcher that saves it
   (`win32/settings_patch.zig`, `FileEnd`), the config line reader it shares
   with the loader (`cli/args.zig` `LineIterator.takes`, `read_failed`,
   `Config.loadReader`), the keyboard pin in Settings dialog tests
@@ -648,8 +685,10 @@ that govern each symbol you change, or that none does.
 - [config.md](docs/agents/log/config.md): config loading and reload outside
   the Settings window: the config file reader (`cli/args.zig` `LineIterator`,
   `streamDelimiterEnding`, `parseIntoField`, `ProfileMap`,
-  `Config.file_read_buffer_len`), Windows environment expansion
-  (`src/config/windows_shell.zig` `expandProfileText`), `--config-file` and
+  `Config.file_read_buffer_len`), a `command-palette-entry` action and the
+  tagged-union parse it takes (`parseTaggedUnion`), Windows environment
+  expansion (`src/config/windows_shell.zig` `expandProfileText`),
+  `--config-file` and
   `startup_cwd` on reload, diagnostics shown in the GUI, conditional replay
   (`Replay.Iterator`, `Config.finalize`, `loadTheme`,
   `changeConditionalState`), command-line values put
@@ -682,31 +721,50 @@ that govern each symbol you change, or that none does.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   (including the `bench:*` steps' `addBenchCoreImport`, and the test
   executable's mode, `-Dtest-optimize` through `Config.testModule`) and
-  resources, the
+  resources, Zig 0.17's build graph (the configure process, its cache and
+  what a build script reads at configure time; the host-tool steps
+  `src/build/ConptyRedist.zig` and `src/build/ThreadRoleTextCheck.zig`;
+  module modes, `SharedDeps.assertModuleOptimizeMode` and
+  `SharedDeps.uucodeModule`; what a `Run` step hands its child, as
+  `src/build/GhosttyPkgConfig.zig` does its generator
+  `src/extra/pkg-config.zig`, and the two checks that no build file copies
+  the environment into a step, `Contracts.21-BuildEnvironment.ps1` and
+  `scripts/check-configure-environment.ps1`; which files `test-lib-vt` parses and
+  compiles), the ARM64 build's aarch64-only compile fixes (the handoff
+  proxy's `sanitize_c` in `src/build/TerminalHandoffProxy.zig`, the
+  `std_options` of highway's library root `pkg/highway/src/detect.zig`,
+  the early `<stdint.h>` in `pkg/dcimgui/ext.cpp`), the
   Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
   `scripts/dev-windows.cmd` keeps when set and otherwise sets to
   `%LOCALAPPDATA%\zig`), the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
   `CloseApplications` closes, and what it installs and deletes; the
-  placeholder staging contract and its controls,
-  `Get-PlaceholderStagingProblems` and `Assert-PlaceholderControlFails` in
+  runtime staging contract and its controls,
+  `Get-RuntimeStagingProblems` and `Assert-StagingControlFails` in
   `Contracts.93-ConPty.ps1`), signing,
   the updater (including `RegisterApplicationRestart` while an installer
-  closes noctty, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
+  closes noctty, with `stagedInstallerRunning`; the staging lock's and the
+  staged-Setup check's path compares, `lockedHandleMatchesPath` and
+  `processRunsFromStage`, over `win32/sys.zig`'s
+  `getFinalPathNameByHandle` and `eqlIgnoreCaseWtf16`, and its folder
+  identity fallback over `FILE_ID_INFO`, `stagedImageByIdentity` with
+  its root check `onStageRoot`, and `identityFrom`; the folders it makes
+  before that check, `makeDirPath`; what a sharing violation reads as
+  (`FileBusy`, `installerImageInUse`) and which opens wait for it (re-check
+  item 34: the one-attempt opens `openFileOnce`, `dirOpenFileOnce` and
+  `dirCreateFileOnce` in `win32/sys.zig`, their callers, and the held-file
+  fixture `HeldFile`); `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
   `requirePayloadEntries`, `swapPayload`, `rollback`, `fileMatches`,
-  `verifyBackupManifest`, `checkSetupRetiresLibVt`, `retired_placeholders`
-  and `checkPackagingStagesPlaceholders` in
+  `verifyBackupManifest`, `checkSetupRetiresLibVt` and
+  `checkPackagingStagesPlaceholders` in
   `src/update/portable_apply.zig`, `verifyPortablePayload` and
   `verifyInstalledPortablePayloadAgainstManifest` in
   `src/update/github_releases.zig`, and the packaging scripts'
-  `$runtimeFiles`; the portable ZIP's `ghostty-vt.dll` placeholder:
-  `src/build/GhosttyVtStub.zig`, `src/ghostty_vt_stub/`,
-  `scripts/ghostty-vt-stub.ps1` `Assert-GhosttyVtStub`, and its packaged
-  smoke `test/windows/test_dll_init.c`), release workflows and package managers
+  `$runtimeFiles`), release workflows and package managers
   (WinGet, Scoop, Chocolatey): `scripts/release-publication-state.ps1`
   (`Get-ReleaseByTag`, `Assert-RemoteReleaseTag`, `Get-CreatedReleaseDraft`,
   `Confirm-ReleasePublication`), `scripts/release-evidence.ps1`
@@ -744,7 +802,8 @@ that govern each symbol you change, or that none does.
   the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
   the measure-AUMID builds an A/B compares
   (`Invoke-InteractiveWin11MeasureBuild` in
-  `scripts/interactive-win11-measure-lib.ps1`), the shared real-state guard
+  `scripts/interactive-win11-measure-lib.ps1`, and the package folder
+  it sets outside the source, `ZIG_LOCAL_PKG_DIR`), the shared real-state guard
   and its clipboard reading (`scripts/interactive-win11-state-guard.ps1`:
   `Test-InteractiveWin11ClipboardObservable`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
@@ -799,16 +858,22 @@ that govern each symbol you change, or that none does.
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
   `addTestRuns` in `build.zig`, and the names tests share across processes), the
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
-  `std.Progress.lockStdErr`, the search-thread tests in
-  `src/terminal/search/Thread.zig`), the test exe's isolated children and
+  `std.debug.lockStderr`, 0.15.2's `std.Progress.lockStdErr`, the
+  search-thread tests in `src/terminal/search/Thread.zig`), a test that
+  can hang and its watchdog (`TestMouseSurface.click` in `src/Surface.zig`;
+  a re-entered `std.Io.Mutex`), the test exe's isolated children and
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
   `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
   `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
-  acceptance tests there and in `src/sync/state_mutex.zig`, acceptance
-  test 9's checker `ci/thread_role_points.py` (its `Resolver`) with its
+  acceptance tests there and in `src/sync/state_mutex.zig` and
+  `src/sync/io_tasks.zig`, acceptance
+  test 9's checker `ci/thread_role_points.py` (its `Resolver`, and the
+  `Io` task entries `spawn_targets` binds, `task_target`) with its
   controls `ci/test_thread_role_points.py`, the
   thread-role dumps' symboliser and the in-process compare
-  (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
+  (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW` and inline frames,
+  `Session.locateSite` and `wrapper_skip`; `src/sync/compare.zig`, and the
+  run compare `ci/role_compare3.py` with its controls in `ci/controls.py`;
   the table they read, `ci/lock-inventory-threads.tsv`, what its static
   gate reads as a caller edge, and what its inventory reads as a
   renderer-state site, by a receiver's last name), the relock tests and
@@ -847,7 +912,10 @@ that govern each symbol you change, or that none does.
   dropping `pub` from a declaration another file probes by name
   (`@hasDecl(apprt.Surface, ...)` in `src/Surface.zig` and
   `src/renderer/Thread.zig`, the runtime hooks such as
-  `noteRendererFollowupCallback`),
+  `noteRendererFollowupCallback`) or its own file probes (on Zig 0.17,
+  `Minimums` in `src/font/Metrics.zig`), a `std.Io.Dir` `openFile` or
+  `openFileAbsolute` that means a file (0.17's `allow_directory`, and the
+  contract that holds it, `Contracts.22-OpenFileDirectory.ps1`),
   adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
   (the budget in `win32/facade_budget.zig`, and the facade importer list in
   `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps

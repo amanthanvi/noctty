@@ -8,10 +8,13 @@
 //! reached through another local symlink, so nothing it opens contacts a
 //! share.
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
-const os_windows = @import("windows.zig");
+const os_windows = @import("windows_ext.zig");
 const os_path = @import("path.zig");
 
 const OBJ_DONT_REPARSE = 0x1000;
@@ -55,10 +58,10 @@ pub const Found = struct {
     path: []u8,
     /// Open for its attributes (and its data with `How.data`), sharing read,
     /// write and delete.
-    file: std.fs.File,
+    file: std.Io.File,
 
     pub fn deinit(self: Found, alloc: Allocator) void {
-        self.file.close();
+        windows.CloseHandle(self.file.handle);
         alloc.free(self.path);
     }
 
@@ -74,13 +77,13 @@ pub const Found = struct {
             .file => |file| file,
             .missing, .refused => return null,
         };
-        defer dir.close();
+        defer windows.CloseHandle(dir.handle);
         const leaf_w = std.unicode.utf8ToUtf16LeAlloc(alloc, leaf) catch return null;
         defer alloc.free(leaf_w);
         var pattern = unicodeString(leaf_w);
         var buffer: [@sizeOf(windows.FILE_DIRECTORY_INFORMATION) + windows.NAME_MAX * 2]u8 align(@alignOf(windows.FILE_DIRECTORY_INFORMATION)) = undefined;
         var io: windows.IO_STATUS_BLOCK = undefined;
-        if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .FileDirectoryInformation, windows.TRUE, &pattern, windows.TRUE) != .SUCCESS) return null;
+        if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .Directory, .TRUE, &pattern, .TRUE) != .SUCCESS) return null;
         const info: *const windows.FILE_DIRECTORY_INFORMATION = @ptrCast(&buffer);
         const name_w: [*]const u16 = @ptrCast(&info.FileName);
         return std.unicode.utf16LeToUtf8Alloc(alloc, name_w[0 .. info.FileNameLength / 2]) catch null;
@@ -89,8 +92,9 @@ pub const Found = struct {
 
 /// Open what `path` names, on a local drive only. As given, `path` must be
 /// drive-absolute (`X:\` or `X:/`) with no `:` after the drive: Zig 0.15.2's
-/// `resolve` panics on some other shapes (a share whose second name is the
-/// other separator, `\\a\/`). It is then resolved, and refused past
+/// `resolve` panicked on some other shapes (a share whose second name is the
+/// other separator, `\\a\/`; 0.17.1's does not), and they are no local file
+/// anyway. It is then resolved, and refused past
 /// PATH_MAX_WIDE bytes. The drive must be fixed, removable, a CD-ROM or a RAM
 /// disk; each name is opened under OBJ_DONT_REPARSE relative to its checked
 /// parent, a symlink or junction is followed only to a local drive or a
@@ -282,20 +286,23 @@ fn resolveOpenPath(alloc: Allocator, dir: ?[]const u8, text: []const u8) Allocat
 /// `path` as an absolute path, if it exists. Relative to `dir` when that is
 /// set.
 fn existingPath(alloc: Allocator, dir: ?[]const u8, path: []const u8) Allocator.Error!?[]const u8 {
-    // Zig's `resolve` indexes an empty slice (a panic) when a drive-relative
-    // name such as `D:x` is joined onto a path (measured with `b:x`, `D:x`).
-    // No default pattern produces one, but a custom `link` regex can.
-    // Zig's parser takes any byte before the ':' as a drive (`1:x` panics too).
+    // Zig 0.15.2's `resolve` indexed an empty slice (a panic) when a
+    // drive-relative name such as `D:x` was joined onto a path (measured with
+    // `b:x`, `D:x`). No default pattern produces one, but a custom `link` regex
+    // can. Its parser takes any byte before the ':' as a drive (`1:x` panicked
+    // too). 0.17.1's rewrite took `b:x` and `1:x` as text and as a base
+    // without a panic (settings.md trap 14, 1B.6; this join was not tried);
+    // the refusal stays, since such text names no local file.
     if (path.len >= 2 and path[1] == ':' and !std.fs.path.isAbsolute(path)) return null;
 
-    // A share or device path is never resolved either: `resolve` unwraps a null
-    // on a server whose share is a lone separator (`\\a\/`), and it is the
-    // opener's to refuse anyway.
+    // A share or device path is never resolved either: 0.15.2's `resolve`
+    // unwrapped a null on a server whose share is a lone separator (`\\a\/`),
+    // and it is the opener's to refuse anyway.
     if (os_path.isNetworkOrDevicePath(path)) return null;
 
-    // The same two panics as a base: a drive with no root (`C:`, `b:x`) and
-    // `\\a\/`. A pane's directory should be neither, but a launch directory
-    // is not screened like a reported one.
+    // The same two shapes as a base, which 0.15.2's `resolve` panicked on: a
+    // drive with no root (`C:`, `b:x`) and `\\a\/`. A pane's directory should
+    // be neither, but a launch directory is not screened like a reported one.
     if (dir) |base| if (!std.fs.path.isAbsolute(base) or os_path.isNetworkOrDevicePath(base)) return null;
 
     // Always the output of `resolve`, which `windowsPathIsRepresentable`
@@ -321,7 +328,7 @@ fn existingPath(alloc: Allocator, dir: ?[]const u8, path: []const u8) Allocator.
     // `faccessatW` has an `unreachable`.
     return switch (try open(alloc, resolved, .{})) {
         .found => |found| found: {
-            found.file.close();
+            windows.CloseHandle(found.file.handle);
             break :found found.path;
         },
         .missing, .refused => null,
@@ -385,7 +392,7 @@ fn windowsPathIsRepresentable(path: []const u8) bool {
     // of nothing else (`b:.`, `b: `) is empty by the time NT sees it, and NT
     // answers STATUS_OBJECT_NAME_INVALID. `b:x.` and `b: x` are fine
     // (measured: not found).
-    if (std.mem.trimRight(u8, stream, ". ").len == 0) return false;
+    if (std.mem.trimEnd(u8, stream, ". ").len == 0) return false;
     // A NUL would truncate in a wide-string API, so a check could run against
     // a shorter path than the one we hand back to be opened.
     if (std.mem.indexOfScalar(u8, stream, 0) != null) return false;
@@ -404,7 +411,7 @@ fn windowsPathIsRepresentable(path: []const u8) bool {
 /// Windows maps them. They are refused too: this is the one place that has to
 /// hold on every build, and the only check here that `open` does not repeat.
 fn windowsNameIsDevice(name: []const u8) bool {
-    const stem = std.mem.trimRight(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
+    const stem = std.mem.trimEnd(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
     for ([_][]const u8{ "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" }) |device| {
         if (std.ascii.eqlIgnoreCase(stem, device)) return true;
     }
@@ -492,30 +499,38 @@ fn allDigits(text: []const u8) bool {
 
 /// What `lookup` found at a resolved path.
 const Lookup = union(enum) {
-    file: std.fs.File,
+    file: std.Io.File,
     missing,
     refused,
 };
 
+/// `handle`, which `create` opened, as a `std.Io.File`. `create` opens every
+/// handle FILE_SYNCHRONOUS_IO_NONALERT, which `std.Io.File.Flags` spells
+/// `nonblocking = false`.
+fn openedFile(handle: windows.HANDLE) std.Io.File {
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
+}
+
 fn lookup(alloc: Allocator, path: []const u8, how: How) Lookup {
-    // Zig 0.15.2's `sliceToPrefixedFileW` writes past its fixed buffer for a
-    // longer path; a WTF-8 byte is at most one unit, so this always fits.
+    // Zig's `sliceToPrefixedFileW` (0.15.2's, and 0.17's in `std.Io.Threaded`)
+    // writes past its fixed buffer for a longer path; a WTF-8 byte is at most
+    // one unit, so this always fits.
     if (path.len > windows.PATH_MAX_WIDE) return .refused;
     const root_len = localRoot(path) orelse return .refused;
     // Under `.refuse` there is no direct open: an open that follows no link
     // still reaches a placeholder's provider, which can recall it then.
     if (how.cloud == .open) {
-        var wide = windows.sliceToPrefixedFileW(null, path) catch return .refused;
+        var wide = std.Io.Threaded.sliceToPrefixedFileW(null, path, .{}) catch return .refused;
         // Windows 10 can reject the DOS drive alias itself under OBJ_DONT_REPARSE.
         // Resolve only that alias; all filesystem components retain the guard.
         if (root_len == 3 and !os_windows.directVolumePath(&wide)) return .refused;
         var handle: windows.HANDLE = undefined;
         const status = create(wide.span(), null, OBJ_DONT_REPARSE, .{ .read_data = how.data }, &handle);
-        if (status == .SUCCESS) return .{ .file = .{ .handle = handle } };
+        if (status == .SUCCESS) return .{ .file = openedFile(handle) };
         // Under OBJ_DONT_REPARSE a reparse point on the way is reported before a
         // missing name after it, so a missing name here crossed no link.
         if (notFound(status)) return .missing;
-        if (@intFromEnum(status) != STATUS_REPARSE_POINT_ENCOUNTERED) return .refused;
+        if (@backingInt(status) != STATUS_REPARSE_POINT_ENCOUNTERED) return .refused;
     }
 
     // Walk relative to already opened parents. An absolute prefix-by-prefix
@@ -527,16 +542,16 @@ fn lookup(alloc: Allocator, path: []const u8, how: How) Lookup {
     const walk_data = how.data and how.cloud == .open;
     const file = walk(alloc, path, walk_data, 0, &state) orelse return if (state.not_found) .missing else .refused;
     if (!hasLocalFinalPath(file.handle)) {
-        file.close();
+        windows.CloseHandle(file.handle);
         return .refused;
     }
     if (how.data and !walk_data) {
         // The same file again, through its handle (an empty name relative to
         // it, as ReOpenFile does), not by its path.
-        defer file.close();
+        defer windows.CloseHandle(file.handle);
         var data: windows.HANDLE = undefined;
         if (create(&.{}, file.handle, 0, .{ .no_follow = true, .read_data = true }, &data) != .SUCCESS) return .refused;
-        return .{ .file = .{ .handle = data } };
+        return .{ .file = openedFile(data) };
     }
     return .{ .file = file };
 }
@@ -570,8 +585,8 @@ fn unicodeString(wide: []const u16) windows.UNICODE_STRING {
 
 fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options: CreateOptions, handle: *windows.HANDLE) windows.NTSTATUS {
     var name = unicodeString(name_w);
-    var attrs: windows.OBJECT_ATTRIBUTES = .{
-        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
+    var attrs: win32_types.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(win32_types.OBJECT_ATTRIBUTES),
         .RootDirectory = parent,
         .ObjectName = &name,
         .Attributes = attributes,
@@ -579,18 +594,18 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
         .SecurityQualityOfService = null,
     };
     var io: windows.IO_STATUS_BLOCK = undefined;
-    return windows.ntdll.NtCreateFile(
+    return win32_sys.NtCreateFile(
         handle,
-        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE | (if (options.read_data) @as(u32, windows.FILE_READ_DATA) else 0),
+        win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE | (if (options.read_data) @as(u32, win32_types.FILE_READ_DATA) else 0),
         &attrs,
         &io,
         null,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         // Pin only reparse objects against replacement and reparse-data writes.
         // Ordinary files (including actively written logs) retain shared access.
-        if (options.pin_reparse) windows.FILE_SHARE_READ else windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
-        windows.FILE_OPEN,
-        windows.FILE_SYNCHRONOUS_IO_NONALERT | (if (options.no_follow) @as(u32, windows.FILE_OPEN_REPARSE_POINT) else 0),
+        if (options.pin_reparse) win32_types.FILE_SHARE_READ else win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
+        win32_types.FILE_OPEN,
+        win32_types.FILE_SYNCHRONOUS_IO_NONALERT | (if (options.no_follow) @as(u32, win32_types.FILE_OPEN_REPARSE_POINT) else 0),
         null,
         0,
     );
@@ -602,7 +617,7 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
 /// (`os.surfaceThreadSpawnConfig`), so this frame holds no name or reparse
 /// buffer: `openRoot` and `readLinkTarget` hold those, and return before the
 /// walk recurses.
-fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state: *Walk) ?std.fs.File {
+fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state: *Walk) ?std.Io.File {
     if (depth >= 32) return null;
     const root_len = localRoot(path) orelse return null;
     var parent: windows.HANDLE = undefined;
@@ -610,7 +625,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
     var own_parent = true;
     defer if (own_parent) windows.CloseHandle(parent);
     const root_info = attributeTag(parent) orelse return null;
-    if (root_info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 or !hasLocalFinalPath(parent)) return null;
+    if (root_info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 or !hasLocalFinalPath(parent)) return null;
     var start = root_len;
     while (start < path.len) {
         if (state.remaining == 0) return null;
@@ -630,11 +645,11 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
         defer if (own_child) windows.CloseHandle(child);
         const info = componentInfo(child, path[start..end]) orelse return null;
         if (state.cloud == .refuse and recalls(info)) return null;
-        if (info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+        if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
             var pinned: windows.HANDLE = undefined;
             if (create(name_w, parent, 0, .{ .no_follow = true, .read_data = last and read_data, .pin_reparse = true }, &pinned) != .SUCCESS) return null;
             const still_same = if (componentInfo(pinned, path[start..end])) |pinned_info|
-                pinned_info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 and pinned_info.ReparseTag == info.ReparseTag
+                pinned_info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 and pinned_info.ReparseTag == info.ReparseTag
             else
                 false;
             if (!still_same) {
@@ -643,10 +658,10 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
             }
             windows.CloseHandle(child);
             child = pinned;
-            if (info.ReparseTag == windows.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == windows.IO_REPARSE_TAG_MOUNT_POINT) {
+            if (info.ReparseTag == win32_types.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == win32_types.IO_REPARSE_TAG_MOUNT_POINT) {
                 const target = readLinkTarget(alloc, child, info.ReparseTag, path[0..start]) orelse return null;
                 defer alloc.free(target);
-                const joined = std.fs.path.resolve(alloc, &.{ target, path[if (last) end else end + 1..] }) catch return null;
+                const joined = resolveBelow(alloc, target, path[if (last) end else end + 1..]) orelse return null;
                 defer alloc.free(joined);
                 // Keep the reparse handle alive while resolving its target.
                 return walk(alloc, joined, read_data, depth + 1, state);
@@ -664,7 +679,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
         }
         if (last) {
             own_child = false;
-            return .{ .handle = child };
+            return openedFile(child);
         }
         windows.CloseHandle(parent);
         parent = child;
@@ -672,7 +687,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
         start = end + 1;
     }
     own_parent = false;
-    return .{ .handle = parent };
+    return openedFile(parent);
 }
 
 /// Open the root of `path` (`localRoot`'s `root_len` bytes) under
@@ -680,7 +695,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
 /// to a direct volume device. Never inlined: its name buffers (a PathSpace is
 /// 64 KiB) must not join the walk's frame.
 noinline fn openRoot(path: []const u8, root_len: usize, parent: *windows.HANDLE) bool {
-    var root_w = windows.sliceToPrefixedFileW(null, path[0..root_len]) catch return false;
+    var root_w = std.Io.Threaded.sliceToPrefixedFileW(null, path[0..root_len], .{}) catch return false;
     if (root_len == 3 and !os_windows.directVolumePath(&root_w)) return false;
     if (root_len == 49) {
         // OBJ_DONT_REPARSE rejects the mount manager's Volume{GUID} alias.
@@ -704,14 +719,14 @@ noinline fn openRoot(path: []const u8, root_len: usize, parent: *windows.HANDLE)
 /// the walk's frame.
 noinline fn readLinkTarget(alloc: Allocator, link: windows.HANDLE, tag: u32, parent: []const u8) ?[]u8 {
     var buffer: [windows.MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(4) = @splat(0);
-    windows.DeviceIoControl(link, windows.FSCTL_GET_REPARSE_POINT, null, &buffer) catch return null;
+    win32_sys.deviceIoControl(link, win32_types.FSCTL_GET_REPARSE_POINT, null, &buffer) catch return null;
     return reparseTarget(alloc, &buffer, tag, parent);
 }
 
-fn attributeTag(handle: windows.HANDLE) ?windows.FILE_ATTRIBUTE_TAG_INFO {
-    var info: windows.FILE_ATTRIBUTE_TAG_INFO = undefined;
+fn attributeTag(handle: windows.HANDLE) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
+    var info: win32_types.FILE_ATTRIBUTE_TAG_INFO = undefined;
     var io: windows.IO_STATUS_BLOCK = undefined;
-    if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .FileAttributeTagInformation) != .SUCCESS) return null;
+    if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .AttributeTag) != .SUCCESS) return null;
     return info;
 }
 
@@ -721,19 +736,19 @@ fn isCloudTag(tag: u32) bool {
 
 /// A cloud placeholder, or anything else marked for recall from remote
 /// storage: reading it (for some, opening it) fetches it from there first.
-fn recalls(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
-    if (info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 and isCloudTag(info.ReparseTag)) return true;
-    return info.FileAttributes & (windows.FILE_ATTRIBUTE_OFFLINE | windows.FILE_ATTRIBUTE_RECALL_ON_OPEN |
-        windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
+fn recalls(info: win32_types.FILE_ATTRIBUTE_TAG_INFO) bool {
+    if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 and isCloudTag(info.ReparseTag)) return true;
+    return info.FileAttributes & (win32_types.FILE_ATTRIBUTE_OFFLINE | win32_types.FILE_ATTRIBUTE_RECALL_ON_OPEN |
+        win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
 }
 
 /// `attributeTag` for the component `name`, which `test_cloud` can make look
 /// like a placeholder.
-fn componentInfo(handle: windows.HANDLE, name: []const u8) ?windows.FILE_ATTRIBUTE_TAG_INFO {
+fn componentInfo(handle: windows.HANDLE, name: []const u8) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
     var info = attributeTag(handle) orelse return null;
     if (builtin.is_test) if (test_cloud.name) |cloud| if (std.mem.eql(u8, cloud, name)) {
         info.FileAttributes |= test_cloud.attributes;
-        if (test_cloud.attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) info.ReparseTag = test_cloud.tag;
+        if (test_cloud.attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0) info.ReparseTag = test_cloud.tag;
     };
     return info;
 }
@@ -744,13 +759,13 @@ fn componentInfo(handle: windows.HANDLE, name: []const u8) ?windows.FILE_ATTRIBU
 /// presents it, the open that can recall it.
 pub const test_cloud = struct {
     pub var name: ?[]const u8 = null;
-    pub var attributes: u32 = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    pub var attributes: u32 = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
     pub var tag: u32 = IO_REPARSE_TAG_CLOUD | 0x6000;
     pub var reopened: usize = 0;
 
     pub fn reset() void {
         name = null;
-        attributes = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+        attributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
         tag = IO_REPARSE_TAG_CLOUD | 0x6000;
         reopened = 0;
     }
@@ -762,25 +777,70 @@ fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const
     const length: usize = std.mem.readInt(u16, buffer[4..6], .little);
     const offset: usize = std.mem.readInt(u16, buffer[8..10], .little);
     const name_len: usize = std.mem.readInt(u16, buffer[10..12], .little);
-    const base: usize = if (tag == windows.IO_REPARSE_TAG_SYMLINK) 20 else 16;
+    const base: usize = if (tag == win32_types.IO_REPARSE_TAG_SYMLINK) 20 else 16;
     if (length + 8 > buffer.len or base + offset + name_len > length + 8 or (offset | name_len) & 1 != 0) return null;
     const name_w: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, buffer[base + offset ..][0..name_len]));
     const target = std.unicode.utf16LeToUtf8Alloc(alloc, name_w) catch return null;
     defer alloc.free(target);
     if (std.mem.indexOfScalar(u8, target, 0) != null) return null;
-    const relative = tag == windows.IO_REPARSE_TAG_SYMLINK and std.mem.readInt(u32, buffer[16..20], .little) & windows.SYMLINK_FLAG_RELATIVE != 0;
+    const relative = tag == win32_types.IO_REPARSE_TAG_SYMLINK and std.mem.readInt(u32, buffer[16..20], .little) & windows.SYMLINK_FLAG_RELATIVE != 0;
     if (relative) {
         // Relative targets must not be rooted, drive-relative, streams or UNC.
         if (target.len == 0 or target[0] == '\\' or target[0] == '/' or std.mem.indexOfScalar(u8, target, ':') != null) return null;
-        return std.fs.path.resolve(alloc, &.{ parent, target }) catch null;
+        return resolveBelow(alloc, parent, target);
     }
     const stripped = if (std.mem.startsWith(u8, target, "\\??\\")) target[4..] else target;
     if (os_path.isDriveAbsolutePath(stripped)) return alloc.dupe(u8, stripped) catch null;
     // Volume mount points (including volumes without a drive letter) use this
     // exact local-volume namespace. Other device/NT namespaces remain refused.
-    if (tag == windows.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
+    if (tag == win32_types.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
         return std.fmt.allocPrint(alloc, "\\\\?\\{s}", .{stripped}) catch null;
     return null;
+}
+
+/// `std.fs.path.resolve(&.{ base, rest })` for a `base` the walk reached (a
+/// drive path, or a `\\?\Volume{GUID}\` one) and a relative `rest`, or null.
+/// Zig 0.17's `resolve` takes only the `\\?` of a Volume{GUID} root as the
+/// root, so a `..` climbs into the volume's name (`\\?\Volume{G}\x\` and
+/// `..\..\y` give `\\?\y`) and the root alone loses its `\`, which `localRoot`
+/// needs. 0.15.2 read the GUID as a share, which a `..` stops at, as Windows
+/// does for a relative link. So such a root goes through `resolve` spelled as
+/// a share's (`\\v\`) and comes back; that gave 0.15.2's results for 11 GUID
+/// shapes (measured with both compilers). A drive path resolves the same in
+/// both. A `rest` that moves the result off the share is refused, and so is
+/// one that is no relative path: two separators first (a UNC or device path,
+/// which the share spelling would turn into another volume: `\\v\Volume{O}\z`
+/// comes back as `\\?\Volume{O}\z`, where 0.15.2 left it UNC for `walk` to
+/// refuse) or a `:` anywhere (a drive or a stream). Both fail closed.
+fn resolveBelow(alloc: Allocator, base: []const u8, rest: []const u8) ?[]u8 {
+    if (rest.len >= 2 and isSeparator(rest[0]) and isSeparator(rest[1])) return null;
+    if (std.mem.indexOfScalar(u8, rest, ':') != null) return null;
+    if (!std.mem.startsWith(u8, base, "\\\\?\\Volume{")) return std.fs.path.resolve(alloc, &.{ base, rest }) catch null;
+    const share = alloc.dupe(u8, base) catch return null;
+    defer alloc.free(share);
+    share[2] = 'v';
+    const resolved = std.fs.path.resolve(alloc, &.{ share, rest }) catch return null;
+    if (!std.mem.startsWith(u8, resolved, "\\\\v\\")) {
+        alloc.free(resolved);
+        return null;
+    }
+    resolved[2] = '?';
+    // A bare `\\?\Volume{GUID}` base with nothing after it: 0.15.2's resolve
+    // gave the root with its `\` (`localRoot` needs it); the share spelling
+    // gives `\\v\Volume{GUID}` without one, so the separator goes back.
+    if (std.mem.indexOfScalarPos(u8, resolved, 4, '\\') == null) {
+        const rooted = std.mem.concat(alloc, u8, &.{ resolved, "\\" }) catch {
+            alloc.free(resolved);
+            return null;
+        };
+        alloc.free(resolved);
+        return rooted;
+    }
+    return resolved;
+}
+
+fn isSeparator(c: u8) bool {
+    return c == '\\' or c == '/';
 }
 
 fn localRoot(path: []const u8) ?usize {
@@ -809,8 +869,8 @@ fn hasLocalFinalPath(handle: windows.HANDLE) bool {
     var buffer: [windows.PATH_MAX_WIDE]u16 = undefined;
     // VOLUME_NAME_DOS normally gives a drive path. A mounted local volume may
     // have no drive letter; VOLUME_NAME_GUID still identifies its local root.
-    var count = os_windows.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 0);
-    if (count == 0) count = os_windows.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 1);
+    var count = win32_sys.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 0);
+    if (count == 0) count = win32_sys.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, 1);
     if (count == 0 or count >= buffer.len) return false;
     const name = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, buffer[0..count]) catch return false;
     defer std.heap.page_allocator.free(name);
@@ -834,7 +894,7 @@ pub const test_links = struct {
         defer alloc.free(target_w);
         const flags: u32 = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE | (if (is_dir) @as(u32, SYMBOLIC_LINK_FLAG_DIRECTORY) else 0);
         if (CreateSymbolicLinkW(link_w, target_w, flags) != 0) return true;
-        return switch (windows.kernel32.GetLastError()) {
+        return switch (std.os.windows.GetLastError()) {
             .PRIVILEGE_NOT_HELD => false,
             else => error.Unexpected,
         };
@@ -843,12 +903,17 @@ pub const test_links = struct {
     /// Make the empty folder `dir` (absolute) a junction to `nt_target`, an
     /// NT path such as `\??\UNC\host\share`. Needs no privilege.
     pub fn junction(alloc: Allocator, dir: []const u8, nt_target: []const u8) !void {
-        var dir_w = try windows.sliceToPrefixedFileW(null, dir);
-        const handle = try windows.OpenFile(dir_w.span(), .{
-            .access_mask = windows.GENERIC_WRITE | windows.SYNCHRONIZE,
-            .creation = windows.FILE_OPEN,
+        var dir_w = try prefixed_path.sliceToPrefixedFileW(dir);
+        // Opened as followed, which an empty folder that is no link yet makes
+        // no difference to, so that the handle is synchronous: `openFile`
+        // opens a no-follow handle without FILE_SYNCHRONOUS_IO_NONALERT (as
+        // std's did), and on ReFS the FSCTL on it returned STATUS_PENDING (in
+        // one of three test executable runs, 2026-11-26) with its status
+        // block on the stack.
+        const handle = try win32_sys.openFile(dir_w.span(), .{
+            .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
+            .creation = win32_types.FILE_OPEN,
             .filter = .dir_only,
-            .follow_symlinks = false,
         });
         defer windows.CloseHandle(handle);
         const target_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, nt_target);
@@ -860,24 +925,25 @@ pub const test_links = struct {
         const buffer = try alloc.alloc(u8, 8 + data_len);
         defer alloc.free(buffer);
         @memset(buffer, 0);
-        std.mem.writeInt(u32, buffer[0..4], windows.IO_REPARSE_TAG_MOUNT_POINT, .little);
+        std.mem.writeInt(u32, buffer[0..4], win32_types.IO_REPARSE_TAG_MOUNT_POINT, .little);
         std.mem.writeInt(u16, buffer[4..6], @intCast(data_len), .little);
         std.mem.writeInt(u16, buffer[10..12], @intCast(target_bytes), .little);
         std.mem.writeInt(u16, buffer[12..14], @intCast(target_bytes + 2), .little);
         @memcpy(buffer[16..][0..target_bytes], std.mem.sliceAsBytes(target_w));
-        try windows.DeviceIoControl(handle, windows.FSCTL_SET_REPARSE_POINT, buffer, null);
+        try win32_sys.deviceIoControl(handle, win32_types.FSCTL_SET_REPARSE_POINT, buffer, null);
     }
 };
 
 test "local path open refuses links to a share before opening them, and tells a missing file apart" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
-    try tmp.dir.makeDir("to-share");
-    try tmp.dir.makeDir("to-real");
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(io, "real", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
+    try tmp.dir.createDir(io, "to-share", .default_dir);
+    try tmp.dir.createDir(io, "to-real", .default_dir);
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     const at = struct {
         fn path(a: Allocator, root: []const u8, rel: []const u8) ![]u8 {
@@ -907,10 +973,10 @@ test "local path open refuses links to a share before opening them, and tells a 
     // The links go first, removed as links (never followed), so the tree's
     // cleanup never reaches the share.
     defer {
-        tmp.dir.deleteDir("to-share") catch {};
-        tmp.dir.deleteDir("to-real") catch {};
-        tmp.dir.deleteFile("file-to-share") catch {};
-        tmp.dir.deleteDir("dir-to-share") catch {};
+        tmp.dir.deleteDir(io, "to-share") catch {};
+        tmp.dir.deleteDir(io, "to-real") catch {};
+        tmp.dir.deleteFile(io, "file-to-share") catch {};
+        tmp.dir.deleteDir(io, "dir-to-share") catch {};
     }
 
     const Case = struct { rel: []const u8, want: std.meta.Tag(Opened), symlink: bool = false };
@@ -934,24 +1000,25 @@ test "local path open refuses links to a share before opening them, and tells a 
         errdefer std.debug.print("local path open of {s} (cloud {t})\n", .{ case.rel, cloud });
         const path = try at.path(alloc, base, case.rel);
         defer alloc.free(path);
-        var timer = try std.time.Timer.start();
+        const started = std.Io.Timestamp.now(io, .awake);
         const opened = try open(alloc, path, .{ .data = true, .cloud = cloud });
         defer if (opened == .found) opened.found.deinit(alloc);
-        try std.testing.expect(timer.read() < 5 * std.time.ns_per_s);
+        try std.testing.expect(started.untilNow(io, .awake).toNanoseconds() < 5 * std.time.ns_per_s);
         try std.testing.expectEqual(case.want, std.meta.activeTag(opened));
         if (opened == .found) {
             try std.testing.expectEqualStrings(path, opened.found.path);
             var buf: [32]u8 = undefined;
-            try std.testing.expectEqualStrings("font-size = 15\n", buf[0..try opened.found.file.readAll(&buf)]);
+            try std.testing.expectEqualStrings("font-size = 15\n", buf[0..try opened.found.file.readPositionalAll(io, &buf, 0)]);
         }
     };
 }
 
 test "local path open refuses a path past PATH_MAX_WIDE before converting it" {
     const alloc = std.testing.allocator;
-    // Zig 0.15.2 converts a path into a fixed buffer of PATH_MAX_WIDE units
-    // without checking that it fits, and a longer name overflows the walk's
-    // 16-bit name length: either panic ends the process.
+    // Zig (0.15.2, and 0.17.1's `std.Io.Threaded.sliceToPrefixedFileW`)
+    // converts a path into a fixed buffer of PATH_MAX_WIDE units without
+    // checking that it fits, and a longer name overflows the walk's 16-bit
+    // name length: either panic ends the process.
     for ([_]usize{ windows.PATH_MAX_WIDE + 1, 40000 }) |len| {
         const path = try alloc.alloc(u8, len);
         defer alloc.free(path);
@@ -965,7 +1032,7 @@ test "local path open refuses a path past PATH_MAX_WIDE before converting it" {
     // A path at the bound is looked at: the walk finds no such folder.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(base);
     const path = try alloc.alloc(u8, windows.PATH_MAX_WIDE);
     defer alloc.free(path);
@@ -976,13 +1043,14 @@ test "local path open refuses a path past PATH_MAX_WIDE before converting it" {
 
 test "local path open refuses a cloud placeholder before opening it as its provider presents it" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\cloud.ghostty", .data = "font-size = 15\n" });
-    try tmp.dir.makeDir("to-real");
-    defer tmp.dir.deleteDir("to-real") catch {};
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(io, "real", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "real\\cloud.ghostty", .data = "font-size = 15\n" });
+    try tmp.dir.createDir(io, "to-real", .default_dir);
+    defer tmp.dir.deleteDir(io, "to-real") catch {};
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     const real_dir = try std.fs.path.join(alloc, &.{ base, "real" });
     defer alloc.free(real_dir);
@@ -996,15 +1064,15 @@ test "local path open refuses a cloud placeholder before opening it as its provi
     // A plain local file made to read as a placeholder. Behind a junction
     // the direct open stops at the link, so `.open` walks to it too.
     const Case = struct { name: []const u8, attributes: u32, rel: []const u8 };
-    const placeholder = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    const placeholder = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
     for ([_]Case{
         .{ .name = "cloud.ghostty", .attributes = placeholder, .rel = "to-real\\cloud.ghostty" },
         .{ .name = "cloud.ghostty", .attributes = placeholder, .rel = "real\\cloud.ghostty" },
         // A placeholder folder on the way.
-        .{ .name = "real", .attributes = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_OPEN, .rel = "to-real\\cloud.ghostty" },
+        .{ .name = "real", .attributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_OPEN, .rel = "to-real\\cloud.ghostty" },
         // Marked for recall without a cloud tag (another provider).
-        .{ .name = "cloud.ghostty", .attributes = windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, .rel = "real\\cloud.ghostty" },
-        .{ .name = "cloud.ghostty", .attributes = windows.FILE_ATTRIBUTE_OFFLINE, .rel = "real\\cloud.ghostty" },
+        .{ .name = "cloud.ghostty", .attributes = win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, .rel = "real\\cloud.ghostty" },
+        .{ .name = "cloud.ghostty", .attributes = win32_types.FILE_ATTRIBUTE_OFFLINE, .rel = "real\\cloud.ghostty" },
     }) |case| {
         errdefer std.debug.print("local path open of {s} with {s} as a placeholder ({x})\n", .{ case.rel, case.name, case.attributes });
         test_cloud.reset();
@@ -1047,10 +1115,11 @@ fn testProductionDosMapping(cloud: Cloud) !void {
         }
     };
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
-    const path = try tmp.dir.realpathAlloc(alloc, "safe.txt");
+    try tmp.dir.writeFile(io, .{ .sub_path = "safe.txt", .data = "safe" });
+    const path = try tmp.dir.realPathFileAlloc(io, "safe.txt", alloc);
     defer alloc.free(path);
     const how: How = .{ .data = true, .cloud = cloud };
     // Enter the actual production path, injecting only the OS device query.
@@ -1072,19 +1141,20 @@ fn testProductionDosMapping(cloud: Cloud) !void {
     };
     defer opened.deinit(alloc);
     var data: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 4), try opened.file.read(&data));
+    try std.testing.expectEqual(@as(usize, 4), try opened.file.readPositional(io, &.{&data}, 0));
     try std.testing.expectEqualStrings("safe", &data);
 }
 
 test "local path open allows only the cloud reparse tag family" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\cloud.ghostty", .data = "" });
-    try tmp.dir.makeDir("to-real");
-    defer tmp.dir.deleteDir("to-real") catch {};
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(io, "real", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "real\\cloud.ghostty", .data = "" });
+    try tmp.dir.createDir(io, "to-real", .default_dir);
+    defer tmp.dir.deleteDir(io, "to-real") catch {};
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     const real_dir = try std.fs.path.join(alloc, &.{ base, "real" });
     defer alloc.free(real_dir);
@@ -1113,7 +1183,7 @@ test "local path open allows only the cloud reparse tag family" {
         try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .cloud = .refuse }));
     }
     // Any other tag on a file that is no link is refused, under either policy.
-    for ([_]u32{ windows.IO_REPARSE_TAG_SYMLINK, windows.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
+    for ([_]u32{ win32_types.IO_REPARSE_TAG_SYMLINK, win32_types.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
         errdefer std.debug.print("local path open of a reparse tag {x}\n", .{tag});
         test_cloud.reset();
         test_cloud.name = "cloud.ghostty";
@@ -1127,21 +1197,22 @@ test "local path open allows only the cloud reparse tag family" {
 
 test "local path open walks local volume GUID mount targets" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\safe.txt", .data = "safe" });
-    try tmp.dir.makeDir("by-volume");
-    defer tmp.dir.deleteDir("by-volume") catch {};
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(io, "real", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "real\\safe.txt", .data = "safe" });
+    try tmp.dir.createDir(io, "by-volume", .default_dir);
+    defer tmp.dir.deleteDir(io, "by-volume") catch {};
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     // A junction to the folder by its volume's GUID, as a mount point names a
     // volume (`\??\Volume{...}\`): the walk reaches the folder through the
     // volume's own root, with no drive letter on the way.
-    var real = try tmp.dir.openDir("real", .{});
-    defer real.close();
+    var real = try tmp.dir.openDir(io, "real", .{});
+    defer real.close(io);
     var wide: [windows.PATH_MAX_WIDE]u16 = undefined;
-    const count = os_windows.GetFinalPathNameByHandleW(real.fd, &wide, wide.len, 1);
+    const count = win32_sys.GetFinalPathNameByHandleW(real.handle, &wide, wide.len, 1);
     try std.testing.expect(count > 0 and count < wide.len);
     const by_guid = try std.unicode.utf16LeToUtf8Alloc(alloc, wide[0..count]);
     defer alloc.free(by_guid);
@@ -1162,7 +1233,7 @@ test "local path open walks local volume GUID mount targets" {
         };
         defer opened.deinit(alloc);
         var data: [4]u8 = undefined;
-        try std.testing.expectEqual(@as(usize, 4), try opened.file.read(&data));
+        try std.testing.expectEqual(@as(usize, 4), try opened.file.readPositional(io, &.{&data}, 0));
         try std.testing.expectEqualStrings("safe", &data);
     }
 
@@ -1173,12 +1244,66 @@ test "local path open walks local volume GUID mount targets" {
     try std.testing.expectEqual(Opened.refused, try open(alloc, guid_file, .{}));
 }
 
+test "local path walk joins a link's target below a volume GUID root as Zig 0.15.2 did" {
+    // Each expected path is what 0.15.2's `std.fs.path.resolve` gave for the
+    // pair (read from a run of it on 2026-11-26): a `..` stops at the volume's
+    // root, and the root alone keeps its `\` for `localRoot`.
+    const alloc = std.testing.allocator;
+    const g = "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}";
+    for ([_]struct { []const u8, []const u8, ?[]const u8 }{
+        .{ g ++ "\\", "safe.txt", g ++ "\\safe.txt" },
+        // A mount point to a volume's root, as the last name, with or without
+        // the root's separator.
+        .{ g ++ "\\", "", g ++ "\\" },
+        .{ g, "", g ++ "\\" },
+        .{ g, "safe.txt", g ++ "\\safe.txt" },
+        .{ g ++ "\\folder", "safe.txt", g ++ "\\folder\\safe.txt" },
+        .{ g ++ "\\folder\\", "", g ++ "\\folder" },
+        // A relative link's target against its folder.
+        .{ g ++ "\\x\\", "..\\y", g ++ "\\y" },
+        .{ g ++ "\\x\\", "..\\..\\y", g ++ "\\y" },
+        .{ g ++ "\\", "..\\..", g ++ "\\" },
+        .{ g ++ "\\a\\b\\", "..\\..\\..\\c\\.\\d", g ++ "\\c\\d" },
+        .{ g ++ "\\x\\", "..\\..\\Volume{fedcba98-7654-3210-fedc-ba9876543210}\\z", g ++ "\\Volume{fedcba98-7654-3210-fedc-ba9876543210}\\z" },
+        // A drive path is `resolve`'s own.
+        .{ "C:\\x\\", "..\\..\\..\\y", "C:\\y" },
+        .{ "C:\\real", "", "C:\\real" },
+        // Nothing the walk joins leaves the volume this way: a `rest` with
+        // two separators first or a `:` is no relative path, refused on
+        // either base (the share spelling would read `\\v\...` as a path
+        // on this volume's own share and turn it into another volume).
+        .{ g ++ "\\x", "D:\\y", null },
+        .{ g ++ "\\x", "\\\\v\\Volume{fedcba98-7654-3210-fedc-ba9876543210}\\z", null },
+        .{ g ++ "\\x\\", "\\\\v\\Volume{fedcba98-7654-3210-fedc-ba9876543210}\\z", null },
+        .{ g ++ "\\x", "//v/Volume{fedcba98-7654-3210-fedc-ba9876543210}/z", null },
+        .{ g ++ "\\x", "\\/server/share", null },
+        .{ g ++ "\\x", "/\\server\\share", null },
+        .{ g ++ "\\x", "\\\\?\\C:\\y", null },
+        .{ g ++ "\\x", "y:stream", null },
+        .{ "C:\\x", "\\\\server\\share\\y", null },
+        .{ "C:\\x", "\\\\.\\pipe\\y", null },
+        .{ "C:\\x", "D:y", null },
+        .{ "C:\\x", "y:stream", null },
+        // One separator first stays rooted on the base's own volume.
+        .{ g ++ "\\x\\", "\\y", g ++ "\\y" },
+        .{ "C:\\x\\", "\\y", "C:\\y" },
+    }) |case| {
+        const got = resolveBelow(alloc, case[0], case[1]);
+        defer if (got) |p| alloc.free(p);
+        std.testing.expectEqualStrings(case[2] orelse "(null)", got orelse "(null)") catch |err| {
+            std.debug.print("resolve below {s} of {s}\n", .{ case[0], case[1] });
+            return err;
+        };
+    }
+}
+
 test "local path open finds the name its folder stores" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "Mixed Case.txt", .data = "" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(io, .{ .sub_path = "Mixed Case.txt", .data = "" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(root);
     const spelled = try std.fs.path.join(alloc, &.{ root, "mixed case.TXT" });
     defer alloc.free(spelled);
@@ -1202,7 +1327,7 @@ test "local path open finds the name its folder stores" {
     }
 
     // A folder at a drive's root, whose parent is the root itself.
-    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    const system_root = try std.testing.environ.getAlloc(alloc, "SystemRoot");
     defer alloc.free(system_root);
     const windows_dir = switch (try open(alloc, system_root, .{})) {
         .found => |hit| hit,
@@ -1237,12 +1362,15 @@ fn testUrlPath(alloc: Allocator, url: []const u8) ![]const u8 {
 }
 
 test "pwd keeps a file URI's drive path as a Windows path, with a single fallback allocator" {
-    // `std.heap.stackFallback(...).get()` is single-use, so the decode and
-    // `pwd` share the one allocator the stream handler takes from it.
+    // The decode and `pwd` share the one allocator the stream handler takes
+    // from its stack-first allocator (Zig 0.15.2's `stackFallback(...).get()`
+    // was single-use; 0.17's `BufferFirstAllocator`, which the handler uses
+    // now, is not, and the handler still takes it once).
     var arena_alloc = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_alloc.deinit();
-    var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
-    const scratch = stack_alloc.get();
+    var stack_alloc_buf: [1024]u8 = undefined;
+    var stack_alloc: std.heap.BufferFirstAllocator = .init(&stack_alloc_buf, arena_alloc.allocator());
+    const scratch = stack_alloc.allocator();
     const raw = try testUrlPath(scratch, "file://localhost/C:/Users/test/project");
     try std.testing.expectEqualStrings("C:\\Users\\test\\project", try pwd(scratch, .{ .url_path = raw }));
     try expectPwd("C:\\Users\\aman\\src", .{ .url_path = "/C:/Users/aman/src" });
@@ -1400,15 +1528,16 @@ pub fn testMsysPath(alloc: Allocator, prefix: []const u8, windows_path: []const 
 
 test "link target: text Windows cannot name gives null, and no text aborts" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir);
 
     // Positive controls: near misses of the refused shapes are ordinary
     // names, found with and without a location. DEL is legal in a name.
     for ([_][]const u8{ "leaf\x7f", "nul1", "nulls.txt", "console", "com", "com10", "lpt", "aux1.txt", "...x", "a.b" }) |name| {
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "" });
         const want = try std.fs.path.join(alloc, &.{ dir, name });
         defer alloc.free(want);
         const absolute = try std.fmt.allocPrint(alloc, "{s}:12", .{want});
@@ -1425,7 +1554,7 @@ test "link target: text Windows cannot name gives null, and no text aborts" {
     // it is an ordinary file, as these are on Windows 11: `open` would find
     // them, and this is the one refusal it does not repeat.
     for ([_][]const u8{ "con", "Aux.log", "prn", "com9", "LPT1.txt", "nul.txt" }) |name| {
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "" });
         const absolute = try std.fmt.allocPrint(alloc, "{s}\\{s}:12", .{ dir, name });
         defer alloc.free(absolute);
         const relative = try std.fmt.allocPrint(alloc, "{s}(1,2)", .{name});
@@ -1513,13 +1642,14 @@ test "link target: text Windows cannot name gives null, and no text aborts" {
 
 test "link target: link text resolves to the file it names, without its line and column" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "weird(1)", .data = "" });
-    try tmp.dir.makePath("sub dir");
-    try tmp.dir.writeFile(.{ .sub_path = "sub dir/b.zig", .data = "" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "weird(1)", .data = "" });
+    try tmp.dir.createDirPath(io, "sub dir");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub dir/b.zig", .data = "" });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir);
 
     // Text that is not MSYS2's reads the same in every pane.
@@ -1634,7 +1764,7 @@ test "link target: link text resolves to the file it names, without its line and
 
 test "link target: rooted text ignores the pane's directory" {
     const alloc = std.testing.allocator;
-    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    const system_root = try std.testing.environ.getAlloc(alloc, "SystemRoot");
     defer alloc.free(system_root);
     if (!os_path.isDriveAbsolutePath(system_root)) return error.SkipZigTest;
     // Rooted text names the hosts file on the pane's drive; read against the
@@ -1656,12 +1786,13 @@ test "link target: rooted text ignores the pane's directory" {
 
 test "link target: an MSYS2 or Cygwin drive path is the Windows path it names (#514)" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
-    try tmp.dir.makePath("conf.d");
-    try tmp.dir.writeFile(.{ .sub_path = "conf.d/b.zig", .data = "" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "" });
+    try tmp.dir.createDirPath(io, "conf.d");
+    try tmp.dir.writeFile(io, .{ .sub_path = "conf.d/b.zig", .data = "" });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir);
     if (!os_path.isDriveAbsolutePath(dir)) return error.SkipZigTest;
 
@@ -1793,34 +1924,38 @@ test "link target: an MSYS2 or Cygwin drive path is the Windows path it names (#
 
 test "link target: a link through a symlink to a share is never stat-ed" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    tmp.dir.symLink("\\\\pkg42-no-such-host\\share", "link", .{ .is_directory = true }) catch |err| switch (err) {
-        error.AccessDenied => return error.SkipZigTest, // no symlink privilege
+    tmp.dir.symLink(io, "\\\\pkg42-no-such-host\\share", "link", .{ .is_directory = true }) catch |err| switch (err) {
+        // No symlink privilege: Zig 0.17 reports STATUS_PRIVILEGE_NOT_HELD as
+        // PermissionDenied, where 0.15.2 said AccessDenied.
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
         else => return err,
     };
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir);
 
     // `accessAbsolute` follows the link and waits on the (here nonexistent)
     // server on the calling thread; `open` refuses it first, which is also
     // why this has a bound.
-    var timer = try std.time.Timer.start();
+    const started = std.Io.Timestamp.now(io, .awake);
     for ([_][]const u8{ "link\\report.txt:12", "link/report.txt", "link\\sub\\a.cs(3,4)" }) |text| {
         try expectLinkTarget(null, text, .{ .dir = dir, .wsl = false });
         const absolute = try std.fs.path.join(alloc, &.{ dir, text });
         defer alloc.free(absolute);
         try expectLinkTarget(null, absolute, .{ .wsl = false });
     }
-    try std.testing.expect(timer.read() < 2 * std.time.ns_per_s);
+    try std.testing.expect(started.untilNow(io, .awake).toNanoseconds() < 2 * std.time.ns_per_s);
 }
 
 test "link target: a relative link never resolves onto a network or device pwd" {
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "file.txt", .data = "" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "" });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir);
     for ([_]bool{ false, true }) |wsl| {
         for ([_][]const u8{
@@ -1843,10 +1978,10 @@ test "link target: a relative link never resolves onto a network or device pwd" 
 }
 
 test "link target: a pwd that is no absolute local path gives null and never aborts" {
-    // `resolve` does not always return an absolute path (a pwd that opens
-    // with `\/` comes back as `server\share\file.txt`), and it panics on a
-    // base that is a drive with no root (`C:`, `b:x`) or a share whose second
-    // name is the other separator (`\\a\/`).
+    // `resolve` does not always return an absolute path, and Zig 0.15.2's
+    // panicked on a base that is a drive with no root (`C:`, `b:x`) or a share
+    // whose second name is the other separator (`\\a\/`); 0.17.1's does not
+    // (settings.md trap 14), and every such pwd still gives null.
     for ([_]bool{ false, true }) |wsl| for ([_][]const u8{
         "#x",
         "relative",
@@ -2006,10 +2141,11 @@ const sweep_random_len = 8;
 fn sweepLinkText(alphabet: []const u8, sizes: SweepSizes) !SweepCount {
     if (sizes.parts == 0 or sizes.part >= sizes.parts) return error.SweepPart;
     const alloc = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "" });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir);
     const bases = [_]?[]const u8{ null, dir, "\\/server/share", "/c" };
     var count: SweepCount = .{
@@ -2056,7 +2192,7 @@ fn sweepRegexMatchesOni(alphabet: []const u8, max_len: usize, dirs: []const ?[]c
     // A match is a string over the alphabet too: one bit per such string,
     // at its number in bijective base `alphabet.len`, runs each match once
     // however many strings hold it.
-    var digit = [_]usize{0} ** 256;
+    var digit = @as([256]usize, @splat(0));
     for (alphabet, 1..) |c, d| digit[c] = d;
     var total: usize = 1;
     for (0..max_len) |_| total = try std.math.add(usize, try std.math.mul(usize, total, alphabet.len), 1);
@@ -2131,12 +2267,12 @@ test "link target: no text in the full sweep aborts or leaks" {
     // `_RANDOM` (`SweepSizes`); `_SEED`, `_PART` and `_PARTS` let processes
     // split the random strings.
     const alloc = std.testing.allocator;
-    const run = std.process.getEnvVarOwned(alloc, "NOCTTY_RUN_LOCAL_PATH_SWEEP") catch return error.SkipZigTest;
+    const run = std.testing.environ.getAlloc(alloc, "NOCTTY_RUN_LOCAL_PATH_SWEEP") catch return error.SkipZigTest;
     defer alloc.free(run);
     if (!std.mem.eql(u8, run, "1")) return error.SkipZigTest;
     const Env = struct {
         fn number(a: Allocator, name: []const u8, default: usize) !usize {
-            const value = std.process.getEnvVarOwned(a, name) catch return default;
+            const value = std.testing.environ.getAlloc(a, name) catch return default;
             defer a.free(value);
             return std.fmt.parseInt(usize, value, 0);
         }

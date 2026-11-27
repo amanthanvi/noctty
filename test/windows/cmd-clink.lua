@@ -119,6 +119,11 @@ local function prompt_checks()
             right == "RIGHT> " and ok == true,
             "replacing stopping theme has one A/B/cwd with Clink integration " .. integration)
         if integration == "off" then
+            -- Kitty keys, modifyOtherKeys and Kitty paste events (5522) a TUI
+            -- left set are reset in front of A.
+            local mode_reset = ESC .. "[<99u" .. ESC .. "[>4;0m" .. ESC .. "[?5522l"
+            check(value:find(mode_reset .. ESC .. "]133;A;redraw=0", 1, true) == 1,
+                "keyboard modes and paste events reset in front of the prompt's A")
             check(value:find("redraw=0", 1, true) ~= nil and
                 value:find("kitty-shell-cwd://localhost/" .. os.getcwd(), 1, true) ~= nil and
                 value:find(ESC .. "]133;A", 1, true) < value:find("TOP", 1, true) and

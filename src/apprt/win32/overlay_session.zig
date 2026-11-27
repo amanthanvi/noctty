@@ -237,7 +237,7 @@ test "win32 a prompt that replaces another dismisses it" {
     // The user's own paste in the other tab replaces it: the read's payload
     // is released, not parked until that tab's next request. The user's
     // prompt keeps its wording, opens armed and keeps its payload.
-    try surface_b.requestPasteConfirm(.paste, "a\nb");
+    try surface_b.requestPasteConfirm(.{ .paste = .standard }, "a\nb");
     try std.testing.expect(surface_a.pending_clipboard_op == null);
     const payload = host.confirm_payload.?;
     try std.testing.expectEqualStrings("Allow clipboard paste?", payload.title);
@@ -246,7 +246,7 @@ test "win32 a prompt that replaces another dismisses it" {
     try std.testing.expectEqualStrings("a\nb", surface_b.pending_clipboard_op.?.paste.data);
 
     // A tab replacing its own prompt keeps the new request.
-    try surface_b.requestPasteConfirm(.paste, "c\nd");
+    try surface_b.requestPasteConfirm(.{ .paste = .standard }, "c\nd");
     try std.testing.expectEqualStrings("c\nd", surface_b.pending_clipboard_op.?.paste.data);
 
     host.invokeConfirmCancel();
@@ -259,7 +259,7 @@ test "win32 a prompt that replaces another dismisses it" {
     try std.testing.expect(surface_a.pending_clipboard_op == null);
 
     // A user prompt has no arming to hold.
-    try surface_b.requestPasteConfirm(.paste, "e\nf");
+    try surface_b.requestPasteConfirm(.{ .paste = .standard }, "e\nf");
     host.holdProgramConfirm();
     try std.testing.expectEqual(@as(u64, 0), host.confirm_payload.?.armed_at_ms);
     host.invokeConfirmCancel();

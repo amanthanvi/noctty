@@ -1,6 +1,7 @@
 //! Command palette orchestration. Host and Surface retain coordination.
 const win32 = @import("../win32.zig");
 const runtime = win32.palette_controller_runtime;
+const global = @import("../../global.zig");
 const App = runtime.App;
 const HDC = runtime.HDC;
 const HGDIOBJ = runtime.HGDIOBJ;
@@ -743,21 +744,24 @@ fn writePaletteMruLine(writer: *std.Io.Writer, mru_key: []const u8) std.Io.Write
 /// The key a palette-mru.txt line holds: the line's escapes decoded when
 /// escaping the result gives the line back, otherwise the line as it is.
 fn paletteMruKeyFromLine(alloc: std.mem.Allocator, line: []const u8) std.mem.Allocator.Error![:0]u8 {
-    // An odd run of trailing backslashes escapes the closing quote, and Zig
-    // 0.15.2's parseWrite then reads past the end of the literal.
-    if ((line.len - std.mem.trimEnd(u8, line, "\\").len) % 2 == 1) return alloc.dupeZ(u8, line);
+    // An odd run of trailing backslashes escapes the closing quote, and std's
+    // parseWrite then reads past the end of the literal: in Zig 0.15.2 and
+    // still in 0.17.1, where `parseAlloc` of `"abc\"` panics out of bounds
+    // in Debug and ReleaseSafe (the 2026-10-30 palette-mru.txt entry in
+    // chrome-overlays.md).
+    if ((line.len - std.mem.trimEnd(u8, line, "\\").len) % 2 == 1) return alloc.dupeSentinel(u8, line, 0);
     const quoted = try std.mem.concat(alloc, u8, &.{ "\"", line, "\"" });
     defer alloc.free(quoted);
     const decoded = std.zig.string_literal.parseAlloc(alloc, quoted) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidLiteral => return alloc.dupeZ(u8, line),
+        error.InvalidLiteral => return alloc.dupeSentinel(u8, line, 0),
     };
     defer alloc.free(decoded);
     // parseAlloc stops at the first unescaped quote, so compare.
     var escaped: std.Io.Writer.Allocating = .init(alloc);
     defer escaped.deinit();
     escaped.writer.print("{f}", .{std.zig.fmtString(decoded)}) catch return error.OutOfMemory;
-    return alloc.dupeZ(u8, if (std.mem.eql(u8, escaped.written(), line)) decoded else line);
+    return alloc.dupeSentinel(u8, if (std.mem.eql(u8, escaped.written(), line)) decoded else line, 0);
 }
 
 /// Decodes palette-mru.txt into `mru`, newest first. A line is a whole key:
@@ -780,7 +784,7 @@ test "win32 palette MRU lines keep keys with line breaks and tabs, and read earl
     // action can hold a CR, an LF or a tab.
     const keys = [_][]const u8{ "text:make\r", "text:a\nb", "text:x\t", "text:\\x15", "text:\"hi\" \xf0\x9f\x91\xbb", "text:hello ", "goto_tab:1" };
     for (keys) |mru_key| try writePaletteMruLine(&file.writer, mru_key);
-    var read: [keys.len + 1]?[:0]const u8 = .{null} ** (keys.len + 1);
+    var read: [keys.len + 1]?[:0]const u8 = @splat(null);
     readPaletteMru(alloc, file.written(), &read);
     defer for (read) |key| if (key) |k| alloc.free(k);
     for (keys, read[0..keys.len]) |mru_key, key| {
@@ -816,12 +820,17 @@ pub const AppControls = struct {
         const path = self.paletteMruPath() orelse return;
         defer self.core_app.alloc.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch return;
-        defer file.close();
+        const io = global.io();
+        // One attempt, at start on the UI thread (re-check item 34): a busy
+        // file starts the list empty at once, where std 0.17 would wait
+        // about four seconds first.
+        const file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false }) catch return;
+        defer file.close(io);
 
         // Cap read size at 64 KB — way more than the 5 × ~200-char
         // actions we expect, but bounded so a corrupted file can't OOM.
-        const raw = file.readToEndAlloc(self.core_app.alloc, 64 * 1024) catch return;
+        var reader = file.readerStreaming(io, &.{});
+        const raw = reader.interface.allocRemaining(self.core_app.alloc, .limited(64 * 1024)) catch return;
         defer self.core_app.alloc.free(raw);
 
         readPaletteMru(self.core_app.alloc, raw, &self.palette_mru);
@@ -837,8 +846,9 @@ pub const AppControls = struct {
         const path = self.paletteMruPath() orelse return;
         defer self.core_app.alloc.free(path);
 
+        const io = global.io();
         if (std.fs.path.dirname(path)) |dir| {
-            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => {
                     std.log.warn("palette MRU: mkdir failed path={f} err={}", .{ redact.bytes(dir), err });
@@ -847,14 +857,16 @@ pub const AppControls = struct {
             };
         }
 
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
+        // One attempt (re-check item 34): a busy file loses this save at
+        // once, where std 0.17 would hold up the quit about four seconds.
+        const file = sys.dirCreateFileOnce(std.Io.Dir.cwd(), path, .{ .truncate = true }) catch |err| {
             std.log.warn("palette MRU: create failed path={f} err={}", .{ redact.bytes(path), err });
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
         var fbuf: [1024]u8 = undefined;
-        var fw = file.writer(&fbuf);
+        var fw = file.writer(io, &fbuf);
         for (self.palette_mru) |slot| {
             if (slot) |owned| {
                 writePaletteMruLine(&fw.interface, owned) catch return;
@@ -888,7 +900,7 @@ pub const AppControls = struct {
             return;
         }
         // Insert as new head. Free whatever falls off the end.
-        const duped = try self.core_app.alloc.dupeZ(u8, action);
+        const duped = try self.core_app.alloc.dupeSentinel(u8, action, 0);
         errdefer self.core_app.alloc.free(duped);
         if (self.palette_mru[self.palette_mru.len - 1]) |oldest| {
             self.core_app.alloc.free(oldest);
@@ -1062,6 +1074,8 @@ pub const HostControls = struct {
                 const command_entry = snap.commands[index];
                 const cval = snap.cvals[index];
                 const action_text = std.mem.span(cval.action);
+                // The rows `appendActionSnapshot` would list, no more.
+                if (!win32_palette.catalog.listsAction(action_text)) continue;
                 var id = win32_palette.catalog.actionStableId(command_entry.title, action_text);
                 id.value ^= @as(u64, @intCast(index + 1)) *% 0x9e37_79b9_7f4a_7c15;
                 if (!self.appendPaletteDescriptor(.{

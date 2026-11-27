@@ -141,7 +141,7 @@ pub fn Recorder(comptime capacity: usize) type {
                     state = slot.state.cmpxchgStrong(.empty, .writing, .acquire, .acquire) orelse {
                         slot.site = site;
                         slot.acquire = acquire;
-                        slot.tag = @intFromEnum(std.meta.activeTag(role));
+                        slot.tag = @backingInt(std.meta.activeTag(role));
                         if (role == .worker) {
                             slot.name_ptr = role.worker.ptr;
                             slot.name_len = role.worker.len;
@@ -229,13 +229,13 @@ const Slot = extern struct {
 
     comptime {
         var fields: usize = 0;
-        for (@typeInfo(Slot).@"struct".fields) |field| fields += @sizeOf(field.type);
+        for (@typeInfo(Slot).@"struct".field_types) |T| fields += @sizeOf(T);
         if (fields != @sizeOf(Slot)) @compileError("a recorder slot has padding");
     }
 
     /// Whether this published slot holds the pair.
     fn matches(self: *const Slot, site: usize, role: Role) bool {
-        if (self.site != site or self.tag != @intFromEnum(std.meta.activeTag(role))) return false;
+        if (self.site != site or self.tag != @backingInt(std.meta.activeTag(role))) return false;
         if (role != .worker) return true;
         return std.mem.eql(u8, self.name_ptr.?[0..self.name_len], role.worker);
     }
@@ -244,7 +244,7 @@ const Slot = extern struct {
 fn hash(site: usize, role: Role) u64 {
     var h = std.hash.Wyhash.init(0);
     h.update(std.mem.asBytes(&site));
-    h.update(&.{@intFromEnum(std.meta.activeTag(role))});
+    h.update(&.{@backingInt(std.meta.activeTag(role))});
     if (role == .worker) h.update(role.worker);
     return h.final();
 }
@@ -372,7 +372,7 @@ test "a thread that finds its pair published waits until the pair is written" {
     var other: Other = .{ .rec = &rec };
     const thread = try std.Thread.spawn(.{}, Other.run, .{&other});
     // It waits for the write; a pair it does not hold would not wait.
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
     try testing.expect(!other.done.load(.acquire));
     try testing.expectEqual(Outcome.new, rec.insert(0x20, .ui, .lock));
     slot.state.store(.written, .release);
@@ -455,7 +455,7 @@ test "a thread waiting on a pair whose write fails writes it itself" {
     };
     var other: Other = .{ .rec = &rec };
     const thread = try std.Thread.spawn(.{}, Other.run, .{&other});
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
     try testing.expect(!other.done.load(.acquire));
     // This thread's write failed: the waiter takes the pair to write.
     slot.state.store(.unwritten, .release);
@@ -545,11 +545,11 @@ test "a 256-slot recorder, eight threads: one shared pair and 16 each make 129 p
     try testing.expectEqual(@as(usize, 129), n);
 
     var buf: [dump.pair_line_max]u8 = undefined;
-    try testing.expect(seen.contains(std.mem.trimRight(u8, dump.formatPair(&buf, s[0], s[1], .lock), "\n")));
+    try testing.expect(seen.contains(std.mem.trimEnd(u8, dump.formatPair(&buf, s[0], s[1], .lock), "\n")));
     for (0..Concurrent.threads) |t| {
         for (0..Concurrent.own) |i| {
             const p = Concurrent.pair(t, i);
-            try testing.expect(seen.contains(std.mem.trimRight(u8, dump.formatPair(&buf, p[0], p[1], .lock), "\n")));
+            try testing.expect(seen.contains(std.mem.trimEnd(u8, dump.formatPair(&buf, p[0], p[1], .lock), "\n")));
         }
     }
 }

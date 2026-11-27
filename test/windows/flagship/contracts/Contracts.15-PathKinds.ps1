@@ -32,7 +32,13 @@ $pathKindsMustBeEmpty = @(
     '.github/workflows/vouch-manage-by-discussion.yml', '.github/workflows/vouch-manage-by-issue.yml',
     '.github/workflows/vouch-sync-codeowners.yml',
     'pkg/highway/bridge.cpp', 'pkg/highway/main.zig', ':(glob)pkg/utfcpp/**',
-    'CLAUDE.md', ':(glob)images/Ghostty.icon/**', 'nix/test-src/test_libghostty_vt.c', 'src/build/GhosttyLib.zig'
+    'CLAUDE.md', ':(glob)images/Ghostty.icon/**', 'nix/test-src/test_libghostty_vt.c', 'src/build/GhosttyLib.zig',
+    # 1B (the v1.4.0 merge's delete list): its must-be-empty rows no pattern above covers, and the lead's
+    # deletes of 2026-11-26 (passthrough.glsl, GhosttyFrameData.zig, boo.zig).
+    'src/build/GhosttyI18n.zig', 'src/build/GhosttyXcodebuild.zig', 'src/build/MetallibStep.zig', 'src/build/gtk.zig',
+    'src/build/libsystem_override.sh',
+    '.github/workflows/clean-artifacts.yml', '.github/workflows/milestone.yml', '.github/workflows/publish-tag.yml',
+    'passthrough.glsl', 'src/build/GhosttyFrameData.zig', 'src/cli/boo.zig'
 )
 
 # Every tracked path any must-be-empty pathspec matches, in the repository at $Root.

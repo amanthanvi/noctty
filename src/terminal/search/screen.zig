@@ -128,7 +128,9 @@ pub const ScreenSearch = struct {
                 .history_feed => true,
 
                 // Not obvious but complete search states will prune
-                // stale history results on feed.
+                // stale history results on feed, and pick up pages
+                // prepended below the searched frontier since the last
+                // feed (incremental snapshot history restore).
                 .complete => true,
 
                 else => false,
@@ -432,6 +434,11 @@ pub const ScreenSearch = struct {
     ///
     /// Feed on a complete screen search will perform some cleanup of
     /// potentially stale history results (pruned) and reclaim some memory.
+    ///
+    /// If pages were prepended to the PageList since the search completed
+    /// (incremental snapshot history restore), the feed picks them up and
+    /// the search resumes, since "complete" only ever means caught up with
+    /// the PageList as of the last feed.
     pub fn feed(self: *ScreenSearch) Allocator.Error!void {
         // Resize/reflow invalidates every flattened result, not just search
         // state that needs another history feed.
@@ -465,9 +472,13 @@ pub const ScreenSearch = struct {
             // Feed goes back to searching history.
             .history_feed => self.state = .history,
 
-            // If we're complete then the feed call above should always
-            // return false and we can't reach this.
-            .complete => unreachable,
+            // A complete search had exhausted the PageList as of its last
+            // feed, but pages can still be prepended below that afterward
+            // (incremental snapshot history restore). The history searcher's
+            // tracked pin keeps its node identity through a prepend, so it
+            // just discovered those older pages and loaded them. Resume
+            // searching history.
+            .complete => self.state = .history,
         }
     }
 
@@ -1120,7 +1131,8 @@ pub const ScreenSearch = struct {
 
 test "simple search" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1164,10 +1176,11 @@ test "simple search" {
 
 test "simple search with history" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1203,12 +1216,72 @@ test "simple search with history" {
     }
 }
 
+test "history search reads reclaim-compressed pages without restoring them" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // A match at the top of each of the first two pages, and one in the
+    // active area once it starts on the third page, so the first two are
+    // complete history that compression takes (as page reclaim leaves them;
+    // in a test build its decommit zeroes the raw mapping).
+    s.nextSlice("Fizz\r\n");
+    const first = list.pages.first.?;
+    while (list.pages.last.? == first) s.nextSlice("\r\n");
+    s.nextSlice("Fizz\r\n");
+    const second = list.pages.last.?;
+    while (list.getTopLeft(.active).node.prev != second) s.nextSlice("\r\n");
+    s.nextSlice("Fizz");
+
+    _ = list.compress(.full);
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, first.storage());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, second.storage());
+    const stats = list.memoryStats();
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Fizz");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(1, search.active_results.items.len);
+
+    // Newest first: the active area's, then each compressed page's.
+    const matches = try search.matches(alloc);
+    defer alloc.free(matches);
+    try testing.expectEqual(3, matches.len);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = @intCast(list.total_rows - 1),
+    } }, list.pointFromPin(.screen, matches[0].untracked().start).?);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = first.rows(),
+    } }, list.pointFromPin(.screen, matches[1].untracked().start).?);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = 0,
+    } }, list.pointFromPin(.screen, matches[2].untracked().start).?);
+
+    // The search read both pages through decoded copies: they stay compressed.
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, first.storage());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, second.storage());
+    try testing.expectEqual(stats, list.memoryStats());
+}
+
 test "reload active with history change" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1291,7 +1364,8 @@ test "reload active with history change" {
 
 test "active change contents" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 5 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 5 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1331,7 +1405,8 @@ test "active change contents" {
 
 test "select next" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1390,10 +1465,11 @@ test "select next" {
 
 test "select after resize resets stale flattened results" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 3,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
 
@@ -1424,10 +1500,10 @@ test "select after resize resets stale flattened results" {
 
 test "reload after resize resets stale flattened results" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
 
@@ -1455,7 +1531,8 @@ test "reload after resize resets stale flattened results" {
 
 test "select in active changes contents completely" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 5 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 5 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1519,10 +1596,11 @@ test "select in active changes contents completely" {
 
 test "select into history" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1591,7 +1669,8 @@ test "select into history" {
 
 test "select prev" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1650,7 +1729,8 @@ test "select prev" {
 
 test "select prev then next" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1694,10 +1774,11 @@ test "select prev then next" {
 
 test "select prev with history" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1748,10 +1829,11 @@ test "select prev wraps when all matches are in history" {
     // has none, so active_len == 0), selecting prev from index 0 must wrap
     // to the last result without underflowing `active_len - 1`.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1779,10 +1861,10 @@ test "select prev wraps when all matches are in history" {
 
 test "select prev wraps when every match is in history" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1819,7 +1901,8 @@ test "select after all matches disappear drops the selection" {
     // reload/prune empties the results, the selection is dropped, so the next
     // select() hits the "no matches" guard instead of the wrap arithmetic.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var s = t.vtStream();
@@ -1846,10 +1929,11 @@ test "select after all matches disappear drops the selection" {
 
 test "select after partial history erase drops a pruned selection" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1878,10 +1962,11 @@ test "select after partial history erase drops a pruned selection" {
 
 test "select after history compaction ignores replaced results" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1912,10 +1997,11 @@ test "select after history compaction ignores replaced results" {
 
 test "select after partial history page erase ignores shifted results" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1945,10 +2031,11 @@ test "select after partial history page erase ignores shifted results" {
 
 test "reload defers pruning unselected history results" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -1979,10 +2066,11 @@ test "reload defers pruning unselected history results" {
 
 test "reload after partial history page erase drops shifted selection first" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2017,10 +2105,10 @@ test "reload after partial history page erase drops shifted selection first" {
 
 test "prune keeps an older selected history match when a newer page is replaced" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2054,7 +2142,7 @@ test "prune keeps an older selected history match when a newer page is replaced"
 
 test "LiveNodes agrees with PageList.nodeIsValid" {
     const alloc = testing.allocator;
-    var list: PageList = try .init(alloc, 10, 2, null);
+    var list: PageList = try .init(alloc, .{ .cols = 10, .rows = 2 });
     defer list.deinit();
     const first = list.pages.first.?;
     while (first.rows() < first.capacity().rows) _ = try list.grow();
@@ -2082,7 +2170,7 @@ test "LiveNodes agrees with PageList.nodeIsValid" {
 
 test "LiveNodes rejects a renewed layout on the same page" {
     const alloc = testing.allocator;
-    var list: PageList = try .init(alloc, 10, 2, null);
+    var list: PageList = try .init(alloc, .{ .cols = 10, .rows = 2 });
     defer list.deinit();
     const first = list.pages.first.?;
     while (first.rows() < first.capacity().rows) _ = try list.grow();
@@ -2106,10 +2194,10 @@ test "LiveNodes rejects a renewed layout on the same page" {
 
 test "prune keeps a history match across a page boundary" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2137,10 +2225,11 @@ test "prune keeps a history match across a page boundary" {
 
 test "select after history page split ignores moved results" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2174,10 +2263,10 @@ test "select after a split of the active top page drops a match wrapped into it"
     // trailing chunk there. A capacity split of that page (the cursor's,
     // in Screen.splitForCapacity) moves the end of the chunk out of it.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 2,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2213,10 +2302,11 @@ test "select after a split of the active top page drops a match wrapped into it"
 
 test "screen search no scrollback has no history" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = 0,
+        .max_scrollback_bytes = 0,
     });
     defer t.deinit(alloc);
 
@@ -2249,10 +2339,10 @@ test "reloadActive releases temporary history results when nothing new matches" 
     // The no-new-matches fast path breaks out successfully after reserving
     // the temporary results, so only `defer` can release them.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list = &t.screens.active.pages;
@@ -2284,10 +2374,11 @@ test "reloadActive partial history cleanup on appendSlice error" {
     // This test verifies that when reloadActive fails at appendSlice (after
     // the loop), all FlattenedHighlight items are properly cleaned up.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2331,10 +2422,11 @@ test "reloadActive partial history cleanup on loop append error" {
     // (after some items have been appended), all FlattenedHighlight items
     // are properly cleaned up.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2377,10 +2469,11 @@ test "select after clearing scrollback" {
     // Regression test for: https://github.com/ghostty-org/ghostty/issues/11957
     // After clearing scrollback (CSI 3J), selecting next/prev should not crash.
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2419,10 +2512,10 @@ test "select after clearing scrollback" {
 
 test "matchRows returns ascending unique screen rows" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 20,
         .rows = 4,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
 
@@ -2478,14 +2571,14 @@ test "matchRows gives the rows pointFromPin gives, across pages, pruning and cle
 
     // Room for about three pages, so more output prunes the oldest page.
     const page_size = page_size: {
-        var probe: Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+        var probe: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 4 });
         defer probe.deinit(alloc);
         break :page_size probe.screens.active.pages.page_size;
     };
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 20,
         .rows = 4,
-        .max_scrollback = 3 * page_size,
+        .max_scrollback_bytes = 3 * page_size,
     });
     defer t.deinit(alloc);
     const list: *PageList = &t.screens.active.pages;
@@ -2537,4 +2630,125 @@ test "matchRows gives the rows pointFromPin gives, across pages, pruning and cle
         try testing.expect(node_rows.screenRow(hl.startPin()) == null);
     }
     try testExpectPointFromPinRows(&search);
+}
+
+test "feed after complete discovers prepended history pages" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback_bytes = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // The screen begins with the tail of the needle so a restored page which
+    // soft-wraps into it can complete a match across the restore boundary.
+    s.nextSlice("st\r\nTest\r\n");
+    while (list.totalPages() < 2) s.nextSlice("\r\n");
+    for (0..list.rows) |_| s.nextSlice("\r\n");
+    s.nextSlice("Test");
+    const old_first = list.pages.first.?;
+
+    // Search to completion, then select the oldest match so we can verify
+    // that restored (older) results never move an existing selection.
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Test");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expect(search.state.isComplete());
+    try testing.expectEqual(1, search.active_results.items.len);
+    try testing.expectEqual(1, search.history_results.items.len);
+    try testing.expect(try search.select(.prev));
+    const selected_idx = search.selected.?.idx;
+    try testing.expectEqual(1, selected_idx);
+    const selected_before = search.selectedMatch().?.untracked();
+    try testing.expectEqual(old_first, selected_before.start.node);
+
+    // Restore the newest history page: a full match on its first row and a
+    // soft-wrapped last row ending in "Te" which joins the screen's "st".
+    {
+        var allocation = try list.allocatePage(.{ .cols = 10, .rows = 2 });
+        defer allocation.deinit();
+        const page = allocation.page();
+        page.size.rows = 2;
+        for ("Test", 0..) |c, x| page.getRowAndCell(x, 0).cell.* = .init(c);
+        for ("xxxxxxxxTe", 0..) |c, x| page.getRowAndCell(x, 1).cell.* = .init(c);
+        page.getRow(1).wrap = true;
+        old_first.page().getRow(0).wrap_continuation = true;
+        try allocation.finalize(.prepend, .{});
+    }
+    const newest = list.pages.first.?;
+
+    // The completed search is fed like any periodic refresh. It must pick
+    // the page up and go back to searching rather than staying complete.
+    try search.feed();
+    try testing.expect(!search.state.isComplete());
+    try search.searchAll();
+    try testing.expectEqual(1, search.active_results.items.len);
+    try testing.expectEqual(3, search.history_results.items.len);
+
+    // New results are older than everything cached, so they append in
+    // newest-to-oldest order: the boundary match first, then the row above.
+    {
+        const boundary = search.history_results.items[1].untracked();
+        try testing.expectEqual(newest, boundary.start.node);
+        try testing.expectEqual(old_first, boundary.end.node);
+        try testing.expectEqual(@as(size.CellCountInt, 1), boundary.start.y);
+        try testing.expectEqual(@as(size.CellCountInt, 8), boundary.start.x);
+        try testing.expectEqual(@as(size.CellCountInt, 0), boundary.end.y);
+        try testing.expectEqual(@as(size.CellCountInt, 1), boundary.end.x);
+        const str = try t.screens.active.selectionString(alloc, .{
+            .sel = .init(boundary.start, boundary.end, false),
+        });
+        defer alloc.free(str);
+        try testing.expectEqualStrings("Test", str);
+    }
+    {
+        const oldest = search.history_results.items[2].untracked();
+        try testing.expectEqual(newest, oldest.start.node);
+        try testing.expectEqual(@as(size.CellCountInt, 0), oldest.start.y);
+        try testing.expectEqual(@as(size.CellCountInt, 0), oldest.start.x);
+    }
+
+    // The selection kept both its index and its target.
+    try testing.expectEqual(selected_idx, search.selected.?.idx);
+    {
+        const selected_after = search.selectedMatch().?.untracked();
+        try testing.expect(selected_before.start.eql(selected_after.start));
+        try testing.expect(selected_before.end.eql(selected_after.end));
+    }
+
+    // Restore an even older page. Each incremental step is discovered from
+    // the frontier left behind by the previous one.
+    {
+        var allocation = try list.allocatePage(.{ .cols = 10, .rows = 2 });
+        defer allocation.deinit();
+        const page = allocation.page();
+        page.size.rows = 2;
+        for ("Test", 0..) |c, x| page.getRowAndCell(x, 0).cell.* = .init(c);
+        try allocation.finalize(.prepend, .{});
+    }
+    const oldest_node = list.pages.first.?;
+    try search.feed();
+    try search.searchAll();
+    try testing.expectEqual(4, search.history_results.items.len);
+    try testing.expectEqual(
+        oldest_node,
+        search.history_results.items[3].untracked().start.node,
+    );
+    try testing.expectEqual(selected_idx, search.selected.?.idx);
+    {
+        const selected_after = search.selectedMatch().?.untracked();
+        try testing.expect(selected_before.start.eql(selected_after.start));
+        try testing.expect(selected_before.end.eql(selected_after.end));
+    }
+
+    // With nothing new, a feed on the complete search stays complete.
+    try search.feed();
+    try testing.expect(search.state.isComplete());
+    try testing.expectEqual(5, search.matchesLen());
 }

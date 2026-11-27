@@ -26,6 +26,7 @@
 //! toast-activation channel; it reads no App state.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const windows = std.os.windows;
 const com = @import("win32_uia/com.zig");
 
@@ -34,7 +35,7 @@ const Allocator = std.mem.Allocator;
 const HRESULT = com.HRESULT;
 const GUID = com.GUID;
 const DWORD = windows.DWORD;
-const BOOL = windows.BOOL;
+const BOOL = win32_types.BOOL;
 
 /// The activator's CLSID. `dist/windows/noctty.iss` registers the same value
 /// (the test "installer toast activator CLSID matches the runtime" holds the
@@ -100,7 +101,16 @@ pub const Sink = struct {
     release: ?*const fn (ctx: *anyopaque) void = null,
 };
 
-var sink_mutex: std.Thread.Mutex = .{};
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+var sink_mutex: std.Io.Mutex = .init;
 var sink: ?Sink = null;
 var cookie: ?DWORD = null;
 
@@ -109,10 +119,10 @@ var cookie: ?DWORD = null;
 /// sink or none.
 pub fn bind(new: ?Sink) void {
     if (new) |s| if (s.retain) |retain| retain(s.ctx);
-    sink_mutex.lock();
+    sink_mutex.lockUncancelable(mutexIo());
     const old = sink;
     sink = new;
-    sink_mutex.unlock();
+    sink_mutex.unlock(mutexIo());
     if (old) |s| if (s.release) |release| release(s.ctx);
 }
 
@@ -245,8 +255,8 @@ fn activate(
 ) callconv(.winapi) HRESULT {
     var buf: [max_launch_bytes]u8 = undefined;
     const launch = launchUtf8(&buf, invoked_args);
-    sink_mutex.lock();
-    defer sink_mutex.unlock();
+    sink_mutex.lockUncancelable(mutexIo());
+    defer sink_mutex.unlock(mutexIo());
     if (sink) |s| s.deliver(s.ctx, launch);
     return com.S_OK;
 }
@@ -334,7 +344,7 @@ test "installer toast activator CLSID matches the runtime" {
     var server_line = false;
     var shortcuts: usize = 0;
     while (lines.next()) |raw| {
-        const line = std.mem.trimRight(u8, raw, "\r");
+        const line = std.mem.trimEnd(u8, raw, "\r");
         if (std.mem.indexOf(u8, line, class_key) != null) {
             try std.testing.expect(std.mem.startsWith(u8, line, "Root: HKA;"));
             try std.testing.expect(std.mem.indexOf(u8, line, "Flags: uninsdeletekey") != null);
@@ -410,7 +420,7 @@ test "toast activator Activate hands the launch string to the bound sink only" {
     const launch = std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=7&pid=12&action=focus");
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, launch, null, 0));
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, null, null, 0));
-    const long = [_:0]u16{'w'} ** (max_launch_bytes + 1);
+    const long = @as([max_launch_bytes + 1:0]u16, @splat('w'));
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, &long, null, 0));
     const unpaired = [_:0]u16{ 'w', 0xD800 };
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, &unpaired, null, 0));

@@ -5,6 +5,8 @@
 //! stage names and timestamps. Traces are inert without their environment flags.
 
 const std = @import("std");
+const win32_sys = @import("sys.zig");
+const global = @import("../../global.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
@@ -21,10 +23,11 @@ const BOOL = win32_types.BOOL;
 const GetTickCount64 = sys.GetTickCount64;
 const WglPixelFormatProvenance = pixel_format.WglPixelFormatProvenance;
 
+// The counter's one declaration is sys.zig's.
+const QueryPerformanceCounter = sys.QueryPerformanceCounter;
+const QueryPerformanceFrequency = sys.QueryPerformanceFrequency;
 // Benchmark-only Win32 entry points; deliberately not in sys.zig, which
 // carries the product surface.
-extern "kernel32" fn QueryPerformanceCounter(value: *i64) callconv(.winapi) BOOL;
-extern "kernel32" fn QueryPerformanceFrequency(value: *i64) callconv(.winapi) BOOL;
 extern "kernel32" fn K32GetProcessMemoryInfo(
     process: windows.HANDLE,
     counters: *PROCESS_MEMORY_COUNTERS_EX,
@@ -32,7 +35,15 @@ extern "kernel32" fn K32GetProcessMemoryInfo(
 ) callconv(.winapi) BOOL;
 
 var process_origin_tick_ms = std.atomic.Value(u64).init(0);
-var memory_stage_trace_write_mutex: std.Thread.Mutex = .{};
+var memory_stage_trace_write_mutex: std.Io.Mutex = .init;
+
+/// The `Io` of the trace mutex's futex waits and wakes: `lockUncancelable` and
+/// `unlock` reach only the OS futex whatever the `std.Io.Threaded` instance
+/// (`sync/state_mutex.zig`'s `innerIo`), so the renderer and IO threads lock
+/// it as they did on 0.15.
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
 pub const SettingsOpenStage = enum {
     f9_keydown,
@@ -91,7 +102,7 @@ pub const SettingsOpenTrace = struct {
     pub const max_records = 1024;
     pub const max_record_bytes = 128;
 
-    file: ?std.fs.File = null,
+    file: ?std.Io.File = null,
     records: u16 = 0,
 
     /// Read the opt-in once per App lifetime. An inherited environment must
@@ -102,7 +113,7 @@ pub const SettingsOpenTrace = struct {
 
     fn initEnv(alloc: Allocator, name: []const u8) SettingsOpenTrace {
         if (builtin.is_test) return .{};
-        const path = std.process.getEnvVarOwned(alloc, name) catch return .{};
+        const path = global.environ().getAlloc(alloc, name) catch return .{};
         defer alloc.free(path);
         return initPath(path) catch .{};
     }
@@ -115,7 +126,7 @@ pub const SettingsOpenTrace = struct {
         // Require a drive/share so the destination cannot depend on cwd.
         if (builtin.os.tag == .windows and std.fs.path.diskDesignatorWindows(path).len == 0)
             return error.RelativeTracePath;
-        return .{ .file = try std.fs.createFileAbsolute(path, .{ .exclusive = true, .truncate = false }) };
+        return .{ .file = try std.Io.Dir.createFileAbsolute(global.io(), path, .{ .exclusive = true, .truncate = false }) };
     }
 
     pub fn enabled(self: *const SettingsOpenTrace) bool {
@@ -123,7 +134,7 @@ pub const SettingsOpenTrace = struct {
     }
 
     pub fn deinit(self: *SettingsOpenTrace) void {
-        if (self.file) |file| file.close();
+        if (self.file) |file| file.close(global.io());
         self.file = null;
     }
 
@@ -160,7 +171,7 @@ pub const SettingsOpenTrace = struct {
             count += 1;
         }
         if (count == 0) return;
-        file.writeAll(buf[0..used]) catch {
+        file.writeStreamingAll(global.io(), buf[0..used]) catch {
             self.deinit();
             return;
         };
@@ -168,8 +179,8 @@ pub const SettingsOpenTrace = struct {
         if (self.records == max_records) self.deinit();
     }
 
-    fn writeRecord(self: *SettingsOpenTrace, file: std.fs.File, line: []const u8) void {
-        file.writeAll(line) catch {
+    fn writeRecord(self: *SettingsOpenTrace, file: std.Io.File, line: []const u8) void {
+        file.writeStreamingAll(global.io(), line) catch {
             self.deinit();
             return;
         };
@@ -279,13 +290,13 @@ test "Settings open trace refuses relative paths and preserves an existing file"
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "trace.jsonl" });
     defer alloc.free(path);
-    try tmp.dir.writeFile(.{ .sub_path = "trace.jsonl", .data = "preserve-me" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = "preserve-me" });
     try std.testing.expectError(error.PathAlreadyExists, SettingsOpenTrace.initPath(path));
-    const data = try tmp.dir.readFileAlloc(alloc, "trace.jsonl", 100);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", alloc, .limited(100));
     defer alloc.free(data);
     try std.testing.expectEqualStrings("preserve-me", data);
 }
@@ -294,7 +305,7 @@ test "Settings open trace caps output and closes its owned handle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "trace.jsonl" });
     defer alloc.free(path);
@@ -303,7 +314,7 @@ test "Settings open trace caps output and closes its owned handle" {
     for (0..SettingsOpenTrace.max_records + 10) |_| trace.note(.open_config_action);
     try std.testing.expectEqual(@as(u16, SettingsOpenTrace.max_records), trace.records);
     try std.testing.expect(!trace.enabled());
-    const data = try tmp.dir.readFileAlloc(alloc, "trace.jsonl", SettingsOpenTrace.max_records * SettingsOpenTrace.max_record_bytes);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", alloc, .limited(SettingsOpenTrace.max_records * SettingsOpenTrace.max_record_bytes));
     defer alloc.free(data);
     try std.testing.expectEqual(@as(usize, SettingsOpenTrace.max_records), std.mem.count(u8, data, "\n"));
     try std.testing.expectEqual(@as(usize, SettingsOpenTrace.max_records), std.mem.count(u8, data, "\"stage\":\"open_config_action\""));
@@ -340,7 +351,7 @@ test "Settings creation stamps are written once, in order, within the record cap
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "trace.jsonl" });
     defer alloc.free(path);
@@ -353,7 +364,7 @@ test "Settings creation stamps are written once, in order, within the record cap
     trace.noteCreation(&stamps);
     try std.testing.expectEqual(@as(usize, 0), stamps.len);
     try std.testing.expectEqual(@as(u16, 2), trace.records);
-    const data = try tmp.dir.readFileAlloc(alloc, "trace.jsonl", 4096);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", alloc, .limited(4096));
     defer alloc.free(data);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, data, "\n"));
     const begin = std.mem.indexOf(u8, data, "\"stage\":\"create_begin\"").?;
@@ -379,7 +390,7 @@ test "Settings creation stamps are written once, in order, within the record cap
 pub fn absolutizeTracePath(alloc: Allocator, owned: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(owned)) return owned;
     defer alloc.free(owned);
-    const cwd = try std.process.getCwdAlloc(alloc);
+    const cwd = try std.process.currentPathAlloc(global.io(), alloc);
     defer alloc.free(cwd);
     return try std.fs.path.join(alloc, &.{ cwd, owned });
 }
@@ -456,7 +467,7 @@ pub const MemoryStageTrace = struct {
     first_swap_recorded: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: Allocator) MemoryStageTrace {
-        const raw = std.process.getEnvVarOwned(
+        const raw = global.environ().getAlloc(
             alloc,
             "NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE",
         ) catch return .{};
@@ -503,8 +514,8 @@ pub const MemoryStageTrace = struct {
         const path = self.path orelse return false;
         const resolved_surface_id = self.surfaceId(surface_id);
 
-        memory_stage_trace_write_mutex.lock();
-        defer memory_stage_trace_write_mutex.unlock();
+        memory_stage_trace_write_mutex.lockUncancelable(mutexIo());
+        defer memory_stage_trace_write_mutex.unlock(mutexIo());
         const private_bytes = queryProcessPrivateBytes() orelse return false;
         const trace_sequence = self.trace_sequence.fetchAdd(1, .acq_rel) + 1;
         const surface_width_px = self.surface_width_px.load(.acquire);
@@ -515,18 +526,20 @@ pub const MemoryStageTrace = struct {
         const rows = self.rows.load(.acquire);
         const wgl_pixel_format = self.wglPixelFormat();
 
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch |err| {
+        const io = global.io();
+        const file = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = false }) catch |err| {
             log.warn("memory stage trace open failed path={s} err={}", .{ path, err });
             return false;
         };
-        defer file.close();
-        file.seekFromEnd(0) catch return false;
+        defer file.close(io);
 
         var buffer: [512]u8 = undefined;
         // This trace is JSONL. The positional writer starts at offset zero
-        // even after seekFromEnd and would overwrite every earlier surface
-        // identity record; streaming mode honors the append seek.
-        var writer = file.writerStreaming(&buffer);
+        // and would overwrite every earlier surface identity record; a
+        // streaming writer seeked to the end appends (0.15's seekFromEnd(0);
+        // Zig 0.17's File has no seek of its own).
+        var writer = file.writerStreaming(io, &buffer);
+        writer.seekTo(file.length(io) catch return false) catch return false;
         const stream = &writer.interface;
         stream.print("{f}\n", .{std.json.fmt(.{
             .stage = @tagName(stage),
@@ -596,7 +609,7 @@ pub const MemoryStageTrace = struct {
         self.wgl_stereo.store(value.stereo, .monotonic);
         self.wgl_accum_bits.store(value.accum_bits, .monotonic);
         self.wgl_aux_buffers.store(value.aux_buffers, .monotonic);
-        self.wgl_selection_source.store(@intFromEnum(value.selection_source), .monotonic);
+        self.wgl_selection_source.store(@backingInt(value.selection_source), .monotonic);
         self.wgl_srgb_capable.store(value.srgb_capable, .monotonic);
         self.wgl_multisample_query_supported.store(value.multisample_query_supported, .monotonic);
         self.wgl_sample_buffers.store(value.sample_buffers orelse 0, .monotonic);
@@ -618,7 +631,7 @@ pub const MemoryStageTrace = struct {
             .stereo = self.wgl_stereo.load(.monotonic),
             .accum_bits = self.wgl_accum_bits.load(.monotonic),
             .aux_buffers = self.wgl_aux_buffers.load(.monotonic),
-            .selection_source = @enumFromInt(self.wgl_selection_source.load(.monotonic)),
+            .selection_source = @fromBackingInt(@intCast(self.wgl_selection_source.load(.monotonic))),
             .srgb_capable = self.wgl_srgb_capable.load(.monotonic),
             .multisample_query_supported = self.wgl_multisample_query_supported.load(.monotonic),
             .sample_buffers = if (self.wgl_multisample_query_supported.load(.monotonic))
@@ -705,7 +718,7 @@ pub fn queryProcessPrivateBytes() ?u64 {
     var counters: PROCESS_MEMORY_COUNTERS_EX = undefined;
     counters.cb = @sizeOf(PROCESS_MEMORY_COUNTERS_EX);
     if (K32GetProcessMemoryInfo(
-        windows.kernel32.GetCurrentProcess(),
+        win32_sys.GetCurrentProcess(),
         &counters,
         counters.cb,
     ) == 0) return null;
@@ -729,8 +742,8 @@ test "win32 memory stage trace claims first swap after a written reader stage ex
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-reader.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-reader.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage-reader.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage-reader.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -760,8 +773,8 @@ test "win32 memory stage trace preserves every surface identity record" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -770,9 +783,10 @@ test "win32 memory stage trace preserves every surface identity record" {
     try std.testing.expect(trace.note(.terminal_initialized, 11, 22));
 
     const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "memory-stage.jsonl",
-        4096,
+        std.testing.allocator,
+        .limited(4096),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
@@ -789,8 +803,8 @@ test "win32 memory stage trace publishes core identity before worker stages" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-worker-id.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-worker-id.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage-worker-id.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage-worker-id.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -801,9 +815,10 @@ test "win32 memory stage trace publishes core identity before worker stages" {
     trace.noteRendererThreadSpawned(11, trace.surfaceId(null));
 
     const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "memory-stage-worker-id.jsonl",
-        4096,
+        std.testing.allocator,
+        .limited(4096),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"renderer_thread_spawned\"") != null);
@@ -815,8 +830,8 @@ test "win32 memory stage trace retains published identity through teardown" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-teardown-id.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-teardown-id.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage-teardown-id.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage-teardown-id.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -824,9 +839,10 @@ test "win32 memory stage trace retains published identity through teardown" {
     try std.testing.expect(trace.note(.destroy_begin, 11, null));
 
     const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "memory-stage-teardown-id.jsonl",
-        4096,
+        std.testing.allocator,
+        .limited(4096),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"destroy_begin\"") != null);

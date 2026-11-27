@@ -7,9 +7,10 @@ pub const Options = struct {
     corpus: []const []const u8,
 };
 
-/// Deterministic mutation campaign for toolchains whose continuous fuzzer can
-/// assert while shrinking a failing input to zero bytes. Inputs are always
-/// non-empty, iteration and allocation counts are fixed, and every even case
+/// Deterministic mutation campaign, first written for Zig 0.15.2, whose
+/// continuous fuzzer could assert while shrinking a failing input to zero
+/// bytes (0.17.1's skips an empty seed: docs/security-audit-paste-paths.md,
+/// Fuzzing). Inputs are always non-empty, iteration and allocation counts are fixed, and every even case
 /// mutates a valid or interesting corpus entry rather than starting from noise.
 pub fn run(
     context: anytype,
@@ -42,4 +43,14 @@ pub fn run(
 
         try callback(context, input[0..len]);
     }
+}
+
+/// The input of one `std.testing.fuzz` case as bytes, for a byte callback.
+/// Zig 0.17 hands a fuzz test a `Smith`; 0.15 handed it the input bytes.
+/// Outside fuzz mode the test runner sets `smith.in` to one corpus entry
+/// (then to "" for its smoke case), which is returned whole, as 0.15 passed
+/// it. In fuzz mode the fuzzer fills up to `buf.len` bytes.
+pub fn smithBytes(smith: *std.testing.Smith, buf: []u8) []const u8 {
+    if (smith.in) |in| return in;
+    return buf[0..smith.slice(buf)];
 }

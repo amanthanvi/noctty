@@ -70,7 +70,7 @@ pub fn isDriveAbsolute(path: []const u8) bool {
 /// variants.
 fn isReservedDeviceName(component: []const u8) bool {
     // The name ends at the extension or stream separator.
-    const end = std.mem.indexOfAny(u8, component, ".:") orelse component.len;
+    const end = std.mem.findAny(u8, component, ".:") orelse component.len;
     const stem = std.mem.trimEnd(u8, component[0..end], " ");
     if (stem.len < 3) return false;
 

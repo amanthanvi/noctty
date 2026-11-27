@@ -7,12 +7,13 @@
 //! renderer are outside this boundary.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const sys = @import("win32/sys.zig");
 
 const windows = std.os.windows;
 const GUID = windows.GUID;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const HMODULE = ?*anyopaque;
 
 const S_OK: HRESULT = 0;

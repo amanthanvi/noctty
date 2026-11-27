@@ -126,15 +126,15 @@ const queries = [_][]const u8{
 
 const max_ranked: usize = 256;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const args_raw = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args_raw);
+    const args_raw = try init.minimal.args.toSlice(alloc);
 
-    const args = try parseArgs(args_raw);
+    const args = try parseArgs(io, args_raw);
     const n = @max(args.entries, seed_entries.len);
 
     const item_storage = try alloc.alloc(Item, n);
@@ -171,12 +171,11 @@ pub fn main() !void {
         );
     }
 
-    var timer = try std.time.Timer.start();
     for (0..args.keystrokes) |i| {
         const q = queries[i % queries.len];
-        timer.reset();
+        const started: std.Io.Timestamp = .now(io, .awake);
         _ = catalog.rank(q, .{ .max_results = buf.len }, &buf);
-        samples[i] = timer.read();
+        samples[i] = @intCast(@max(0, started.untilNow(io, .awake).toNanoseconds()));
     }
 
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
@@ -187,7 +186,7 @@ pub fn main() !void {
     const mean_ns: u64 = @intFromFloat(stats.mean(samples).?);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     try stdout.print(
         \\bench:palette-match
@@ -224,7 +223,7 @@ pub fn main() !void {
     try stdout.flush();
 }
 
-fn parseArgs(raw: []const []const u8) !Args {
+fn parseArgs(io: std.Io, raw: []const []const u8) !Args {
     var out: Args = .{};
     for (raw[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--entries=")) {
@@ -234,7 +233,7 @@ fn parseArgs(raw: []const []const u8) !Args {
         } else if (std.mem.startsWith(u8, arg, "--budget-us=")) {
             out.budget_us = try std.fmt.parseInt(u64, arg["--budget-us=".len..], 10);
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printHelp();
+            try printHelp(io);
             std.process.exit(0);
         } else {
             std.log.warn("bench:palette-match: unknown arg '{s}' — ignoring", .{arg});
@@ -244,9 +243,9 @@ fn parseArgs(raw: []const []const u8) !Args {
     return out;
 }
 
-fn printHelp() !void {
+fn printHelp(io: std.Io) !void {
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     try stdout.writeAll(
         \\bench:palette-match — command palette fuzzy-match latency microbench
@@ -264,10 +263,10 @@ fn printHelp() !void {
 test "palette match rejects a zero keystroke count" {
     try std.testing.expectError(
         error.InvalidArgument,
-        parseArgs(&.{ "bench-palette-match", "--keystrokes=0" }),
+        parseArgs(std.testing.io, &.{ "bench-palette-match", "--keystrokes=0" }),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        (try parseArgs(&.{ "bench-palette-match", "--keystrokes=1" })).keystrokes,
+        (try parseArgs(std.testing.io, &.{ "bench-palette-match", "--keystrokes=1" })).keystrokes,
     );
 }

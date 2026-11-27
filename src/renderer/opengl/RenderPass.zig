@@ -231,7 +231,7 @@ test "RenderPass attachmentSize uses texture dimensions" {
                 .width = 640,
                 .height = 360,
                 .format = .rgba,
-                .target = .@"2D",
+                .target = .@"2d",
             },
         },
     };

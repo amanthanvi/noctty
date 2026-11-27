@@ -6,6 +6,7 @@
 //! `uiautomationcore` from widget code is a bug.
 
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const builtin = @import("builtin");
 const com = @import("com.zig");
 const constants = @import("constants.zig");
@@ -396,7 +397,7 @@ test "Notification maps sparse palette outcomes to SDK values" {
 }
 
 test "notification message conversion preserves long messages" {
-    const message = "a" ** 300;
+    const message = comptime win32_repeat.repeat("a", 300);
     const message_w = try allocNotificationBstr(std.testing.allocator, message);
     defer com.SysFreeString(message_w);
 

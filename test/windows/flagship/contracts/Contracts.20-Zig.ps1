@@ -43,13 +43,14 @@ function Get-UnreviewedRendererLocks {
 
     # The two reviewed draw-mutex sites protect renderer-owned state. Pin
     # their surrounding statements so unrelated calls cannot use this allowance.
-    if ([regex]::Matches($genericCode, '\bdraw_mutex:\s*std\.Thread\.Mutex\s*=\s*\.\{\s*\}\s*,').Count -ne 1) {
+    # Zig 0.17: a std.Io.Mutex, taken with the global Io (QR-32's spellings).
+    if ([regex]::Matches($genericCode, '\bdraw_mutex:\s*std\.Io\.Mutex\s*=\s*\.init\s*,').Count -ne 1) {
         throw 'Renderer lock contract cannot confirm the draw mutex declaration.'
     }
     $updateFrame = $scopes['generic.zig updateFrame']
     $reviewedSites = @(
-        'if\s*\(self\.images\.kittyRequiresUpdate\(state\.terminal\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.images\.kittyUpdate\('
-        'var output_progress:\s*\?renderer\.State\.OutputProgress\s*=\s*critical\.output_progress;\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.rebuildCells\('
+        'if\s*\(self\.images\.kittyRequiresUpdate\(\s*state\.terminal,\s*&self\.terminal_state,\s*\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lockUncancelable\(global\.io\(\)\);)\s*defer self\.draw_mutex\.unlock\(global\.io\(\)\);\s*self\.images\.kittyUpdate\('
+        'var output_progress:\s*\?renderer\.State\.OutputProgress\s*=\s*critical\.output_progress;\s*\{\s*(?<lock>self\.draw_mutex\.lockUncancelable\(global\.io\(\)\);)\s*defer self\.draw_mutex\.unlock\(global\.io\(\)\);\s*self\.rebuildCells\('
     )
     foreach ($site in $reviewedSites) {
         $siteMatches = [regex]::Matches($updateFrame, $site)
@@ -105,6 +106,163 @@ foreach ($control in $rendererLockControls) {
     }
 }
 Write-Host "Renderer lock contract: $($rendererLockControls.Count)/$($rendererLockControls.Count) mutations rejected"
+
+# PLAN section 7.4: every extern struct a fork file declares in its ABI types
+# file carries a size pin and an offset pin per field, and so does every extern
+# struct or union nested in one, which a test names through a `@FieldType`
+# alias (council S3/P4); a union's members all start at 0 (Zig has no
+# @offsetOf for a union), so each member's size is pinned instead. The floor
+# finds the declarations itself and reads each one's own field list, so a
+# struct, a nested member or a field added without its pins fails here.
+# Offsets pinned as integer literals must rise in declaration order, so
+# swapping two members' declarations fails here too, not only in the Zig
+# test.
+function Get-AbiBraceBody {
+    param([string]$Source, [int]$Open)
+
+    $depth = 1
+    foreach ($brace in [regex]::new('[{}]').Matches($Source, $Open)) {
+        if ($brace.Value -eq '{') { $depth++ } else { $depth-- }
+        if ($depth -eq 0) { return $Source.Substring($Open, $brace.Index - $Open) }
+    }
+    return $null
+}
+
+function Get-AbiPinProblems {
+    param([string]$Source)
+
+    $problems = [Collections.Generic.List[string]]::new()
+    # Ordinal, as Zig's names are (council Z4): a hashtable would fold nested fields `part` and `Part` together.
+    $aliases = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($alias in [regex]::Matches($Source, '(?m)^[ \t]*const ([A-Za-z_][A-Za-z0-9_]*) = @FieldType\(([A-Za-z_][A-Za-z0-9_]*), "([A-Za-z_][A-Za-z0-9_]*)"\);')) {
+        $aliases["$($alias.Groups[2].Value).$($alias.Groups[3].Value)"] = $alias.Groups[1].Value
+    }
+    $pending = [Collections.Generic.Queue[object]]::new()
+    # Private declarations too (council T4): a file-local extern struct crosses the ABI as much as a public one.
+    # And one with its type annotated, `const X: type = extern struct {` (council U3), or indented inside a
+    # namespace (council V2).
+    # Pins are read by a type's bare name, so two discovered types of one name would share them: an unpinned one
+    # would pass on its namesake's pins (council X1). That fails, whichever namespaces hold them.
+    $discovered = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+    $noteName = {
+        param([string]$Name)
+        if ($discovered.ContainsKey($Name)) {
+            $discovered[$Name]++
+            $problems.Add("two extern types are named $Name, and pins are read by bare name: rename one, or move it to its own file")
+        } else { $discovered[$Name] = 1 }
+    }
+    foreach ($declaration in [regex]::Matches($Source, '(?m)^[ \t]*(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*type)?\s*=\s*extern (struct|union) \{')) {
+        & $noteName $declaration.Groups[1].Value
+        $pending.Enqueue(@{ Name = $declaration.Groups[1].Value; Path = $declaration.Groups[1].Value; Kind = $declaration.Groups[2].Value; Open = $declaration.Index + $declaration.Length })
+    }
+    $top = $pending.Count
+    if ($top -eq 0) { $problems.Add('no extern struct is declared') }
+    $nested = 0
+    while ($pending.Count -gt 0) {
+        $type = $pending.Dequeue()
+        $body = Get-AbiBraceBody $Source $type.Open
+        if ($null -eq $body) { $problems.Add("$($type.Path) has no end"); continue }
+        $name = $type.Name
+        # Top-level fields only: a nested extern union or struct is one field,
+        # and is checked in turn under its alias.
+        $flat = $body
+        while ($flat -match '\{[^{}]*\}') { $flat = [regex]::Replace($flat, '\{[^{}]*\}', '') }
+        $fields = @([regex]::Matches($flat, '(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:') | ForEach-Object { $_.Groups[1].Value })
+        if ($fields.Count -eq 0) { $problems.Add("$($type.Path) has no fields"); continue }
+        foreach ($member in [regex]::Matches($body, '(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*extern (struct|union)\s*\{')) {
+            $before = $body.Substring(0, $member.Index)
+            if (([regex]::Matches($before, '\{').Count - [regex]::Matches($before, '\}').Count) -ne 0) { continue }
+            $field = $member.Groups[1].Value
+            $alias = $aliases["$name.$field"]
+            if ($null -eq $alias) { $problems.Add("$($type.Path).$field has no @FieldType alias in a test"); continue }
+            $nested++
+            & $noteName $alias
+            $pending.Enqueue(@{ Name = $alias; Path = "$($type.Path).$field"; Kind = $member.Groups[2].Value; Open = $type.Open + $member.Index + $member.Length })
+        }
+        if ($Source -cnotmatch "expectEqual\(@as\(usize, [^\n]*\), @sizeOf\($name\)\)") { $problems.Add("$($type.Path) has no size pin") }
+        if ($type.Kind -eq 'union') {
+            foreach ($field in $fields) {
+                $memberAlias = $aliases["$name.$field"]
+                $sized = ($Source -cmatch "expectEqual\(@as\(usize, [^\n]*\), @sizeOf\(@FieldType\($name, `"$field`"\)\)\)") -or
+                    ($null -ne $memberAlias -and $Source -cmatch "expectEqual\(@as\(usize, [^\n]*\), @sizeOf\($memberAlias\)\)")
+                if (-not $sized) { $problems.Add("$($type.Path).$field has no size pin") }
+            }
+            continue
+        }
+        $previous = $null
+        foreach ($field in $fields) {
+            if ($Source -cnotmatch "expectEqual\(@as\(usize, [^\n]*\), @offsetOf\($name, `"$field`"\)\)") {
+                $problems.Add("$($type.Path).$field has no offset pin")
+                continue
+            }
+            $literal = [regex]::Match($Source, "expectEqual\(@as\(usize, (\d+)\), @offsetOf\($name, `"$field`"\)\)")
+            if (-not $literal.Success) { continue }
+            $offset = [int]$literal.Groups[1].Value
+            if ($null -ne $previous -and $offset -le $previous.Offset) {
+                $problems.Add("$($type.Path).$field is pinned at $offset, not after $($previous.Field)'s $($previous.Offset) in declaration order")
+            }
+            $previous = @{ Field = $field; Offset = $offset }
+        }
+    }
+    # Any other `const` of a discovered type's name, a plain struct or an alias included, lends its pins the same
+    # way (council Z1).
+    foreach ($name in $discovered.Keys) {
+        $declared = [regex]::Matches($Source, '(?m)^[ \t]*(?:pub )?const ' + [regex]::Escape($name) + '\s*[:=]').Count
+        if ($declared -gt $discovered[$name]) {
+            $problems.Add("another const declaration is named $name, as an extern type is, and pins are read by bare name: rename one, or move it to its own file")
+        }
+    }
+    return [pscustomobject]@{ Problems = $problems.ToArray(); Top = $top; Nested = $nested }
+}
+
+$abiPinSource = (Get-Content -LiteralPath (Join-Path $repoRoot 'src/apprt/win32_types.zig') -Raw).Replace("`r`n", "`n")
+$abiPinResult = Get-AbiPinProblems $abiPinSource
+if ($abiPinResult.Problems.Count -ne 0) {
+    throw "Win32 ABI pin floor: $($abiPinResult.Problems -join '; ')."
+}
+$abiPinControls = @(
+    @{ Source = $abiPinSource.Replace('@sizeOf(OVERLAPPED)', '@sizeOf(FILETIME)'); Expect = 'OVERLAPPED has no size pin' }
+    @{ Source = $abiPinSource.Replace('@offsetOf(BY_HANDLE_FILE_INFORMATION, "nFileIndexLow")', '@offsetOf(FILETIME, "dwLowDateTime")'); Expect = 'BY_HANDLE_FILE_INFORMATION.nFileIndexLow has no offset pin' }
+    # A struct the floor finds by itself: renamed, its pins name nothing.
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', 'pub const FILETIME_ = extern struct {'); Expect = 'FILETIME_ has no size pin' }
+    # A private one with no pins (council T4).
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const PRIVATE_PROBE = extern struct {`n    value: u32,`n};`n`npub const FILETIME = extern struct {"); Expect = 'PRIVATE_PROBE has no size pin' }
+    # One indented inside a namespace, with no pins (council V2).
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const Namespace = struct {`n    const INDENTED_PROBE = extern struct {`n        value: u32,`n    };`n};`n`npub const FILETIME = extern struct {"); Expect = 'INDENTED_PROBE has no size pin' }
+    # Council Z1: a plain struct Record pinned by bare name, beside an unpinned extern Record.
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const NamespaceA = struct {`n    const Record = struct {`n        value: u32,`n    };`n};`nconst NamespaceB = struct {`n    const Record = extern struct {`n        value: u32,`n    };`n};`ntest `"records`" {`n    try testing.expectEqual(@as(usize, 4), @sizeOf(Record));`n    try testing.expectEqual(@as(usize, 0), @offsetOf(Record, `"value`"));`n}`n`npub const FILETIME = extern struct {"); Expect = 'another const declaration is named Record, as an extern type is, and pins are read by bare name: rename one, or move it to its own file' }
+    # Council X1: sibling namespaces that each declare a Record, sharing one set of bare-name pins.
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const NamespaceA = struct {`n    const Record = extern struct {`n        value: u32,`n    };`n};`nconst NamespaceB = struct {`n    const Record = extern struct {`n        value: u32,`n    };`n};`ntest `"records`" {`n    try testing.expectEqual(@as(usize, 4), @sizeOf(Record));`n    try testing.expectEqual(@as(usize, 0), @offsetOf(Record, `"value`"));`n}`n`npub const FILETIME = extern struct {"); Expect = 'two extern types are named Record, and pins are read by bare name: rename one, or move it to its own file' }
+    # One with its type annotated and no pins (council U3).
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const TYPED_PROBE: type = extern struct {`n    value: u32,`n};`n`npub const FILETIME = extern struct {"); Expect = 'TYPED_PROBE has no size pin' }
+    @{ Source = $abiPinSource.Replace("    try testing.expectEqual(@as(usize, 0), @offsetOf(OverlappedOffsets, `"Offset`"));`n", ''); Expect = 'OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset has no offset pin' }
+    @{ Source = $abiPinSource.Replace('const OverlappedOffsets = @FieldType(OverlappedUnion, "DUMMYSTRUCTNAME");', 'const OverlappedOffsets = @TypeOf(OverlappedUnion);'); Expect = 'OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME has no @FieldType alias in a test' }
+    # The seats' S3 mutation: Offset and OffsetHigh swapped.
+    @{ Source = $abiPinSource.Replace("            Offset: DWORD,`n            OffsetHigh: DWORD,`n", "            OffsetHigh: DWORD,`n            Offset: DWORD,`n"); Expect = "OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset is pinned at 0, not after OffsetHigh's 4 in declaration order" }
+    @{ Source = $abiPinSource.Replace("    flags: UINT,`n    showCmd: UINT,`n", "    showCmd: UINT,`n    flags: UINT,`n"); Expect = "WINDOWPLACEMENT.flags is pinned at 4, not after showCmd's 8 in declaration order" }
+    @{ Source = $abiPinSource.Replace('@sizeOf(@FieldType(OverlappedUnion, "Pointer"))', '@sizeOf(@FieldType(OverlappedUnion, "Pointers"))'); Expect = 'OVERLAPPED.DUMMYUNIONNAME.Pointer has no size pin' }
+    @{ Source = $abiPinSource.Replace('@sizeOf(OverlappedOffsets)', '@sizeOf(OverlappedUnion)'); Expect = 'OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME has no size pin' }
+)
+foreach ($control in $abiPinControls) {
+    if ([string]::Equals($control.Source, $abiPinSource, [StringComparison]::Ordinal)) {
+        throw "Win32 ABI pin floor control changed nothing: $($control.Expect)."
+    }
+    $problems = @((Get-AbiPinProblems $control.Source).Problems)
+    if ($problems -cnotcontains $control.Expect) {
+        throw "Win32 ABI pin floor did not reject: $($control.Expect) (got: $($problems -join '; '))."
+    }
+}
+# Council Z4: a fully pinned struct whose nested fields differ only in case passes (an ordinal alias lookup).
+$abiCaseProbe = "pub const CASE_PROBE = extern struct {`n    part: extern struct {`n        a: u32,`n    },`n    Part: extern struct {`n        b: u32,`n    },`n};`n`n" +
+    "test `"case probe`" {`n    const CaseLower = @FieldType(CASE_PROBE, `"part`");`n    const CaseUpper = @FieldType(CASE_PROBE, `"Part`");`n" +
+    "    try testing.expectEqual(@as(usize, 8), @sizeOf(CASE_PROBE));`n    try testing.expectEqual(@as(usize, 0), @offsetOf(CASE_PROBE, `"part`"));`n" +
+    "    try testing.expectEqual(@as(usize, 4), @offsetOf(CASE_PROBE, `"Part`"));`n    try testing.expectEqual(@as(usize, 4), @sizeOf(CaseLower));`n" +
+    "    try testing.expectEqual(@as(usize, 0), @offsetOf(CaseLower, `"a`"));`n    try testing.expectEqual(@as(usize, 4), @sizeOf(CaseUpper));`n" +
+    "    try testing.expectEqual(@as(usize, 0), @offsetOf(CaseUpper, `"b`"));`n}`n`n"
+$abiCaseProblems = @((Get-AbiPinProblems $abiPinSource.Replace('pub const FILETIME = extern struct {', $abiCaseProbe + 'pub const FILETIME = extern struct {')).Problems)
+if ($abiCaseProblems.Count -ne 0) { throw "Win32 ABI pin floor refused a fully pinned struct with fields part and Part: $($abiCaseProblems -join '; ')." }
+Write-Host "Win32 ABI pin floor: $($abiPinResult.Top) structs and $($abiPinResult.Nested) nested members pinned; $($abiPinControls.Count)/$($abiPinControls.Count) mutations rejected; 1 passing control"
+
 
 $win32ModuleImports = @(
     'const c = @import("win32/consts.zig");'
@@ -766,9 +924,12 @@ function Get-TestShardProblems {
     $sharded = $RunnerText.Remove($simple.Index, $simple.Length)
     $lookups = [regex]::Matches($sharded, 'builtin\.test_functions\[').Count
     $throughShard = [regex]::Matches($sharded, 'builtin\.test_functions\[shard\.testIndex\((?:i|index)\)\]').Count
-    # Test metadata, run_test, start_fuzzing and the terminal loop.
-    if ($lookups -ne 4 -or $throughShard -ne 4) {
-        $problems.Add("src/test_runner.zig must look up its 4 tests through shard.testIndex ($throughShard of $lookups do)")
+    # Fuzzing finds its tests by the names the build runner sends (Zig 0.17's
+    # start_fuzzing), so its 3 lookups index the whole table.
+    $byName = [regex]::Matches($sharded, 'builtin\.test_functions\[(?:i\.\*|fuzz_runner\.indexes\[i\])\]').Count
+    # Test metadata, run_test and the terminal loop.
+    if ($lookups -ne 6 -or $throughShard -ne 3 -or $byName -ne 3) {
+        $problems.Add("src/test_runner.zig must look up its 3 indexed tests through shard.testIndex and its 3 fuzzed tests by name ($throughShard and $byName of $lookups do)")
     }
     $lengths = [regex]::Matches($sharded, 'builtin\.test_functions\.len').Count
     $shardLengths = [regex]::Matches($sharded, 'shard\.len\(builtin\.test_functions\.len\)').Count
@@ -817,6 +978,7 @@ $testShardMutations = @(
     @{ Runner = $testRunnerText; Build = $buildZigText.Replace('        step.dependOn(&b.addRunArtifact(test_exe).step);', '        _ = b.addRunArtifact(test_exe);') }
     @{ Runner = $testRunnerText; Build = $buildZigText.Replace('        addTestRuns(b, test_step, test_exe, test_shards);', '        test_step.dependOn(&b.addRunArtifact(test_exe).step);') }
     @{ Runner = $testRunnerText.Replace('            shard = Shard.parse(arg["--shard=".len..]) orelse', '            _ = Shard.parse(arg["--shard=".len..]) orelse'); Build = $buildZigText }
+    @{ Runner = $testRunnerText.Replace('builtin.test_functions[i.*]', 'builtin.test_functions[shard.testIndex(i.*)]'); Build = $buildZigText }
 )
 foreach ($mutation in $testShardMutations) {
     if ($mutation.Runner -ceq $testRunnerText -and $mutation.Build -ceq $buildZigText) {

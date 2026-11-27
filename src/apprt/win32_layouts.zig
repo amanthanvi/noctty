@@ -6,6 +6,7 @@
 //! C12 jump-list work; this module deliberately contains no jump-list UI.
 
 const std = @import("std");
+const global = @import("../global.zig");
 const session_persistence = @import("win32_session_persistence.zig");
 const session_state = @import("win32_session_state.zig");
 
@@ -50,7 +51,7 @@ pub fn validateName(name: []const u8) NameError!void {
     };
 
     const extension_index = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
-    const device_stem = std.mem.trimRight(u8, name[0..extension_index], " .");
+    const device_stem = std.mem.trimEnd(u8, name[0..extension_index], " .");
     if (isReservedDeviceName(device_stem)) return error.ReservedDeviceName;
 }
 
@@ -108,14 +109,15 @@ pub fn listNamesAlloc(
     }
     if (limit == 0) return try names.toOwnedSlice(alloc);
 
-    var directory = std.fs.openDirAbsolute(absolute_directory, .{ .iterate = true }) catch |err| switch (err) {
+    const io = global.io();
+    var directory = std.Io.Dir.openDirAbsolute(io, absolute_directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return try names.toOwnedSlice(alloc),
         else => return err,
     };
-    defer directory.close();
+    defer directory.close(io);
 
     var iterator = directory.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         if (entry.kind != .file) continue;
         // Match only the exact extension `relativePathAlloc` writes, so every
         // enumerated name maps back to a launchable path even on a
@@ -170,7 +172,7 @@ pub fn launchArgvAlloc(
     try validateName(name);
     const argv = try alloc.alloc([:0]u8, 2);
     errdefer alloc.free(argv);
-    argv[0] = try alloc.dupeZ(u8, "+new-window");
+    argv[0] = try alloc.dupeSentinel(u8, "+new-window", 0);
     errdefer alloc.free(argv[0]);
     argv[1] = try std.fmt.allocPrintSentinel(alloc, "--launch-layout={s}", .{name}, 0);
     return argv;
@@ -279,7 +281,7 @@ test "named layout schema save load round-trip preserves approved pane fields" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const path = try std.fs.path.join(std.testing.allocator, &.{ root, "demo.json" });
     defer std.testing.allocator.free(path);
@@ -311,13 +313,13 @@ test "named layout schema save load round-trip preserves approved pane fields" {
 test "named layout directory enumeration is valid sorted and bounded" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "zeta.json", .data = "{}" });
-    try tmp.dir.writeFile(.{ .sub_path = "bad!.json", .data = "{}" });
-    try tmp.dir.writeFile(.{ .sub_path = "Alpha Layout.json", .data = "{}" });
-    try tmp.dir.writeFile(.{ .sub_path = "beta.JSON", .data = "{}" });
-    try tmp.dir.writeFile(.{ .sub_path = "ignored.txt", .data = "{}" });
-    try tmp.dir.makeDir("directory.json");
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "zeta.json", .data = "{}" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad!.json", .data = "{}" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Alpha Layout.json", .data = "{}" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "beta.JSON", .data = "{}" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ignored.txt", .data = "{}" });
+    try tmp.dir.createDir(std.testing.io, "directory.json", .default_dir);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
 
     // `beta.JSON`, `bad!.json`, `ignored.txt`, and the `directory.json`

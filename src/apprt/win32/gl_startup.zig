@@ -1,10 +1,12 @@
 //! Win32 OpenGL startup diagnostics.
 
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const builtin = @import("builtin");
 
 const build_config = @import("../../build_config.zig");
 const os_windows = @import("../../os/windows.zig");
+const windows_ext = @import("../../os/windows_ext.zig");
 const win32_types = @import("../win32_types.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
@@ -27,7 +29,7 @@ pub const StartupLoaderErrorDialogSuppression = struct {
         if (sys.SetThreadErrorMode(self.previous_mode, null) == 0) {
             log.warn(
                 "failed to restore startup loader thread error mode win32_error={d}",
-                .{@intFromEnum(windows.kernel32.GetLastError())},
+                .{@backingInt(std.os.windows.GetLastError())},
             );
         }
         self.active = false;
@@ -41,7 +43,7 @@ pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
     if (sys.SetThreadErrorMode(c.SEM_FAILCRITICALERRORS | c.SEM_NOOPENFILEERRORBOX, &previous_mode) == 0) {
         log.warn(
             "failed to suppress startup loader error dialogs win32_error={d}",
-            .{@intFromEnum(windows.kernel32.GetLastError())},
+            .{@backingInt(std.os.windows.GetLastError())},
         );
         return .{};
     }
@@ -55,7 +57,7 @@ pub fn setDefaultDllDirectories() ?windows.Win32Error {
     if (sys.SetDefaultDllDirectories(c.LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) != 0) {
         return null;
     }
-    return windows.kernel32.GetLastError();
+    return std.os.windows.GetLastError();
 }
 
 pub const OpenGLStartupStep = enum {
@@ -139,29 +141,37 @@ pub fn openGLUnavailable() bool {
     return opengl_unavailable.load(.acquire);
 }
 
-var opengl_startup_diagnostics_mutex: std.Thread.Mutex = .{};
+var opengl_startup_diagnostics_mutex: std.Io.Mutex = .init;
+
+/// The `Io` of the diagnostics mutex's futex waits and wakes:
+/// `lockUncancelable` and `unlock` reach only the OS futex whatever the
+/// `std.Io.Threaded` instance (`sync/state_mutex.zig`'s `innerIo`), and a
+/// startup failure can be reported before the global state exists.
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 var opengl_startup_diagnostics_active = false;
 var last_opengl_startup_failure: ?OpenGLStartupFailure = null;
 
 pub fn beginOpenGLStartupDiagnostics() void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     opengl_startup_diagnostics_active = true;
     last_opengl_startup_failure = null;
 }
 
 pub fn clearOpenGLStartupFailure() void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     opengl_startup_diagnostics_active = false;
     last_opengl_startup_failure = null;
 }
 
 fn recordOpenGLStartupFailure(failure: OpenGLStartupFailure) bool {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     if (!opengl_startup_diagnostics_active) return false;
     if (last_opengl_startup_failure) |previous| {
@@ -173,8 +183,8 @@ fn recordOpenGLStartupFailure(failure: OpenGLStartupFailure) bool {
 }
 
 fn openGLStartupDiagnosticsActive() bool {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     return opengl_startup_diagnostics_active;
 }
@@ -200,14 +210,14 @@ fn launchEndingOpenGLFailure() ?OpenGLStartupFailure {
 }
 
 fn currentOpenGLStartupFailure() ?OpenGLStartupFailure {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     return last_opengl_startup_failure;
 }
 
 pub fn recordOpenGLStartupWin32Failure(step: OpenGLStartupStep, win32_error: windows.Win32Error) void {
-    const code: DWORD = @intFromEnum(win32_error);
+    const code: DWORD = @backingInt(win32_error);
     if (!recordOpenGLStartupFailure(.{
         .step = step,
         .win32_error = code,
@@ -231,8 +241,8 @@ pub fn recordOpenGLStartupError(step: OpenGLStartupStep, err: anyerror) void {
 /// The Direct3D 11 beta, tried because OpenGL could not start, failed too.
 /// Kept on the OpenGL failure so the dialog can say both were tried.
 pub fn recordDirect3D11StartupError(err: anyerror) void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     if (!opengl_startup_diagnostics_active) return;
     if (last_opengl_startup_failure) |*failure| failure.d3d11_error_name = @errorName(err);
@@ -288,7 +298,7 @@ fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
             buf,
             err,
             failure,
-            os_windows.detectProcessArchitecture(),
+            windows_ext.detectProcessArchitecture(),
             .{ .d3d11 = build_config.d3d11 },
         ) catch
             "noctty could not initialize the Windows OpenGL renderer.";
@@ -342,7 +352,7 @@ const Remediation = enum {
     vendor_icd,
 
     fn forNativeMachine(native_machine: u16) Remediation {
-        return if (native_machine == os_windows.IMAGE_FILE_MACHINE_ARM64)
+        return if (native_machine == windows_ext.IMAGE_FILE_MACHINE_ARM64)
             .arm64
         else
             .vendor_icd;
@@ -355,10 +365,10 @@ const Remediation = enum {
 /// The fallback is safe in the direction that matters: an ARM64 binary only
 /// ever runs on ARM64 Windows, so it cannot mistake a Snapdragon for an x64
 /// desktop and hand back driver advice that names hardware it does not have.
-fn nativeMachineOrBuild(arch: ?os_windows.ProcessArchitecture) u16 {
-    const detected = arch orelse return os_windows.build_machine;
-    if (detected.native_machine == os_windows.IMAGE_FILE_MACHINE_UNKNOWN) {
-        return os_windows.build_machine;
+fn nativeMachineOrBuild(arch: ?windows_ext.ProcessArchitecture) u16 {
+    const detected = arch orelse return windows_ext.build_machine;
+    if (detected.native_machine == windows_ext.IMAGE_FILE_MACHINE_UNKNOWN) {
+        return windows_ext.build_machine;
     }
     return detected.native_machine;
 }
@@ -390,17 +400,17 @@ fn stepRemediationAdvice(remediation: Remediation) []const u8 {
 /// One line of architecture provenance for the dialog, so a bug report
 /// separates a native ARM64 build from an x64 build under emulation without
 /// the reporter having to know how to check.
-fn formatArchitectureLine(buf: []u8, arch: ?os_windows.ProcessArchitecture) []const u8 {
+fn formatArchitectureLine(buf: []u8, arch: ?windows_ext.ProcessArchitecture) []const u8 {
     var native_buf: [24]u8 = undefined;
     var process_buf: [24]u8 = undefined;
 
     if (arch) |detected| {
-        if (detected.native_machine != os_windows.IMAGE_FILE_MACHINE_UNKNOWN) {
-            const native = os_windows.machineArchitectureLabel(
+        if (detected.native_machine != windows_ext.IMAGE_FILE_MACHINE_UNKNOWN) {
+            const native = windows_ext.machineArchitectureLabel(
                 &native_buf,
                 detected.native_machine,
             );
-            const process = os_windows.machineArchitectureLabel(
+            const process = windows_ext.machineArchitectureLabel(
                 &process_buf,
                 detected.process_machine,
             );
@@ -417,7 +427,7 @@ fn formatArchitectureLine(buf: []u8, arch: ?os_windows.ProcessArchitecture) []co
     return std.fmt.bufPrint(
         buf,
         "{s} build; Windows did not report the process architecture",
-        .{os_windows.machineArchitectureLabel(&native_buf, os_windows.build_machine)},
+        .{windows_ext.machineArchitectureLabel(&native_buf, windows_ext.build_machine)},
     ) catch "not reported";
 }
 
@@ -425,7 +435,7 @@ fn formatOpenGLStartupFailureMessage(
     buf: []u8,
     err: anyerror,
     failure: OpenGLStartupFailure,
-    arch: ?os_windows.ProcessArchitecture,
+    arch: ?windows_ext.ProcessArchitecture,
     renderer_choice: RendererChoice,
 ) ![]const u8 {
     const zig_error_name = failure.zig_error_name orelse @errorName(err);
@@ -557,21 +567,21 @@ fn openglStartupFailureHint(failure: OpenGLStartupFailure, remediation: Remediat
 // fixtures do not change meaning with the architecture the suite is built for.
 
 /// A native x64 desktop, where the existing GPU-vendor advice is correct.
-const test_x64: os_windows.ProcessArchitecture = .{
-    .process_machine = os_windows.IMAGE_FILE_MACHINE_AMD64,
-    .native_machine = os_windows.IMAGE_FILE_MACHINE_AMD64,
+const test_x64: windows_ext.ProcessArchitecture = .{
+    .process_machine = windows_ext.IMAGE_FILE_MACHINE_AMD64,
+    .native_machine = windows_ext.IMAGE_FILE_MACHINE_AMD64,
 };
 
 /// A native ARM64 build on a Snapdragon PC, as in issue #255.
-const test_arm64: os_windows.ProcessArchitecture = .{
-    .process_machine = os_windows.IMAGE_FILE_MACHINE_ARM64,
-    .native_machine = os_windows.IMAGE_FILE_MACHINE_ARM64,
+const test_arm64: windows_ext.ProcessArchitecture = .{
+    .process_machine = windows_ext.IMAGE_FILE_MACHINE_ARM64,
+    .native_machine = windows_ext.IMAGE_FILE_MACHINE_ARM64,
 };
 
 /// An x64 build running under Windows on ARM emulation.
-const test_x64_on_arm64: os_windows.ProcessArchitecture = .{
-    .process_machine = os_windows.IMAGE_FILE_MACHINE_AMD64,
-    .native_machine = os_windows.IMAGE_FILE_MACHINE_ARM64,
+const test_x64_on_arm64: windows_ext.ProcessArchitecture = .{
+    .process_machine = windows_ext.IMAGE_FILE_MACHINE_AMD64,
+    .native_machine = windows_ext.IMAGE_FILE_MACHINE_ARM64,
 };
 
 /// A build without the beta Direct3D 11 renderer.
@@ -655,39 +665,39 @@ test "win32-opengl-startup-detected-version-message-uses-recorded-diagnostics" {
 test "win32-opengl-startup-remediation-follows-the-native-machine" {
     try std.testing.expectEqual(
         Remediation.arm64,
-        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_ARM64),
+        Remediation.forNativeMachine(windows_ext.IMAGE_FILE_MACHINE_ARM64),
     );
     try std.testing.expectEqual(
         Remediation.vendor_icd,
-        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_AMD64),
+        Remediation.forNativeMachine(windows_ext.IMAGE_FILE_MACHINE_AMD64),
     );
     try std.testing.expectEqual(
         Remediation.vendor_icd,
-        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_I386),
+        Remediation.forNativeMachine(windows_ext.IMAGE_FILE_MACHINE_I386),
     );
     // ARM32 is not Windows on ARM64 and has no Compatibility Pack.
     try std.testing.expectEqual(
         Remediation.vendor_icd,
-        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_ARMNT),
+        Remediation.forNativeMachine(windows_ext.IMAGE_FILE_MACHINE_ARMNT),
     );
 
     // An x64 build under emulation still needs the ARM advice: the machine,
     // not the process, decides which drivers can exist.
     try std.testing.expectEqual(
-        os_windows.IMAGE_FILE_MACHINE_ARM64,
+        windows_ext.IMAGE_FILE_MACHINE_ARM64,
         nativeMachineOrBuild(test_x64_on_arm64),
     );
     try std.testing.expectEqual(
-        os_windows.IMAGE_FILE_MACHINE_AMD64,
+        windows_ext.IMAGE_FILE_MACHINE_AMD64,
         nativeMachineOrBuild(test_x64),
     );
 
     // Anything Windows did not report falls back to the build target, so an
     // ARM64 build can never be handed x64 driver advice.
-    try std.testing.expectEqual(os_windows.build_machine, nativeMachineOrBuild(null));
-    try std.testing.expectEqual(os_windows.build_machine, nativeMachineOrBuild(.{
-        .process_machine = os_windows.build_machine,
-        .native_machine = os_windows.IMAGE_FILE_MACHINE_UNKNOWN,
+    try std.testing.expectEqual(windows_ext.build_machine, nativeMachineOrBuild(null));
+    try std.testing.expectEqual(windows_ext.build_machine, nativeMachineOrBuild(.{
+        .process_machine = windows_ext.build_machine,
+        .native_machine = windows_ext.IMAGE_FILE_MACHINE_UNKNOWN,
     }));
 }
 
@@ -713,7 +723,7 @@ test "win32-opengl-startup-architecture-line-separates-native-from-emulated" {
     // With no usable report, the build target is still stated, and a native
     // process is never described to the user as "unknown".
     var build_buf: [24]u8 = undefined;
-    const build_name = os_windows.machineArchitectureLabel(&build_buf, os_windows.build_machine);
+    const build_name = windows_ext.machineArchitectureLabel(&build_buf, windows_ext.build_machine);
 
     var unreported_buf: [96]u8 = undefined;
     const unreported = formatArchitectureLine(&unreported_buf, null);
@@ -724,8 +734,8 @@ test "win32-opengl-startup-architecture-line-separates-native-from-emulated" {
     // A separate buffer, so this compares two independently rendered strings
     // rather than one buffer against itself.
     try std.testing.expectEqualStrings(unreported, formatArchitectureLine(&buf, .{
-        .process_machine = os_windows.build_machine,
-        .native_machine = os_windows.IMAGE_FILE_MACHINE_UNKNOWN,
+        .process_machine = windows_ext.build_machine,
+        .native_machine = windows_ext.IMAGE_FILE_MACHINE_UNKNOWN,
     }));
 }
 
@@ -827,13 +837,13 @@ test "win32-opengl-startup-message-says-direct3d11-failed-too-in-builds-that-hav
         .{ .step = .version_check, .zig_error_name = "OpenGLOutdated", .d3d11_error_name = "Direct3D11Unavailable", .detected = .{
             .major = 1,
             .minor = 1,
-            .renderer = .init("r" ** OpenGLStartupString.capacity),
-            .vendor = .init("v" ** OpenGLStartupString.capacity),
+            .renderer = .init(comptime win32_repeat.repeat("r", OpenGLStartupString.capacity)),
+            .vendor = .init(comptime win32_repeat.repeat("v", OpenGLStartupString.capacity)),
         } },
         .{ .step = .load_opengl32, .win32_error = c.ERROR_MOD_NOT_FOUND, .zig_error_name = "Unexpected", .d3d11_error_name = "Direct3D11Unavailable" },
         .{ .step = .version_check, .zig_error_name = "OpenGLOutdated", .d3d11_error_name = "Direct3D11Unavailable" },
     };
-    for (failures) |failure| for ([_]os_windows.ProcessArchitecture{ test_x64, test_arm64 }) |arch| {
+    for (failures) |failure| for ([_]windows_ext.ProcessArchitecture{ test_x64, test_arm64 }) |arch| {
         var buf: [4096]u8 = undefined;
         const message = try formatOpenGLStartupFailureMessage(&buf, error.Unexpected, failure, arch, choice);
 
@@ -892,7 +902,7 @@ test "win32-opengl-startup-records-the-direct3d11-error-on-the-opengl-failure" {
 }
 
 test "win32-opengl-startup-failure-bounds-driver-strings" {
-    const value = "x" ** (OpenGLStartupString.capacity + 1);
+    const value = comptime win32_repeat.repeat("x", (OpenGLStartupString.capacity + 1));
     const captured = OpenGLStartupString.init(value);
 
     try std.testing.expectEqual(OpenGLStartupString.capacity, captured.value().len);

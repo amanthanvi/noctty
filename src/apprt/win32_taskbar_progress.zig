@@ -5,7 +5,7 @@ const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const gui_probe_trace = @import("../os/gui_probe_trace.zig");
 
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const GUID = windows.GUID;
 const BOOL = win32_types.BOOL;
 const DWORD = win32_types.DWORD;
@@ -67,7 +67,7 @@ const ITaskbarList3 = extern struct {
     }
 
     fn setProgressState(self: *ITaskbarList3, hwnd: HWND, flags: TBPFLAG) HRESULT {
-        return self.vtbl.SetProgressState(self.asRaw(), hwnd, @intFromEnum(flags));
+        return self.vtbl.SetProgressState(self.asRaw(), hwnd, @backingInt(flags));
     }
 
     fn setProgressValue(self: *ITaskbarList3, hwnd: HWND, completed: ULONGLONG, total: ULONGLONG) HRESULT {
@@ -279,7 +279,7 @@ test "taskbar progress clears visible state when value update fails" {
 
         fn setProgressState(raw: *anyopaque, _: HWND, flags: DWORD) callconv(.winapi) HRESULT {
             const self = fromRaw(raw);
-            self.calls[self.call_count] = .{ .state = @enumFromInt(flags) };
+            self.calls[self.call_count] = .{ .state = @fromBackingInt(@intCast(flags)) };
             self.call_count += 1;
             return 0;
         }

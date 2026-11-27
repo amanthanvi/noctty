@@ -4,6 +4,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const test_support = @import("automation_test_support.zig");
 
 /// Parsed options for the `+focus` command.
@@ -49,11 +50,11 @@ pub const Options = struct {
 
 /// Select exactly one `--surface-id` or `--window-id`; supports `--class` and 0..10000 ms `--timeout`.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var buf: [1024]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buf);
+    var writer = std.Io.File.stderr().writer(global.io(), &buf);
     const result = runArgs(alloc, &iter, &writer.interface);
 
     try writer.interface.flush();
@@ -142,7 +143,7 @@ fn focusAutomationTarget(
 
 /// Runs the focus parser against a shell-like argument string in tests.
 fn testRun(line: []const u8, hook: FocusFn) !u8 {
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, line);
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(std.testing.allocator, line);
     defer iter.deinit();
 
     var stderr = std.Io.Writer.Allocating.init(std.testing.allocator);

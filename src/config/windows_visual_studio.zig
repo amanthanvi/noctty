@@ -10,6 +10,7 @@
 //! `windows_shell.appendVisualStudioProfiles` makes the profiles.
 
 const std = @import("std");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
@@ -265,7 +266,7 @@ pub fn isPlainInstanceId(id: []const u8) bool {
 // ---------------------------------------------------------------------------
 // Setup Configuration (Setup.Configuration.h, Microsoft.VisualStudio.Setup.Configuration.Native).
 
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const GUID = windows.GUID;
 
 const S_OK: HRESULT = 0;

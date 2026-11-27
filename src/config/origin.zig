@@ -592,6 +592,12 @@ const compatibility = [_]Compatibility{
     .{ .name = "cursor-invert-fg-bg", .keys = &.{ .@"cursor-color", .@"cursor-text" }, .when = .truthy },
     .{ .name = "selection-invert-fg-bg", .keys = &.{ .@"selection-foreground", .@"selection-background" }, .when = .truthy },
     .{ .name = "bold-is-bright", .keys = &.{.@"bold-color"}, .when = .truthy },
+    // Ghostty 1.4's names. `scrollback-limit` is no field any more, so its
+    // handler takes every value. `copy-on-select` is still a field: its
+    // handler takes `true` and `false`, the field every other value, and
+    // either way the key it sets is `copy-on-select`.
+    .{ .name = "scrollback-limit", .keys = &.{.@"scrollback-limit-bytes"}, .when = .always },
+    .{ .name = "copy-on-select", .keys = &.{.@"copy-on-select"}, .when = .always },
 };
 
 /// Whether an `-e` with a command set `key` (`Config.applyECommand`): the
@@ -756,18 +762,19 @@ test "origin: the last line that parsed, an included file, the command line, com
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" ++
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" ++
         "font-size = 13\n" ++
         "font-size = abc\n" ++
         "config-file = included.conf\n" ++
         "scrollback-limit = 5\n" ++
         "bold-is-bright = true\n" ++
         "cursor-invert-fg-bg = false\n" ++
-        "gtk-tabs-location = hidden\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+        "gtk-tabs-location = hidden\n" ++
+        "copy-on-select = true\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
     defer alloc.free(included_path);
 
     var cfg = try Config.default(alloc);
@@ -781,7 +788,14 @@ test "origin: the last line that parsed, an included file, the command line, com
     // The included file is read after the file that names it, and wins.
     try std.testing.expectEqual(@as(f32, 15), cfg.@"font-size");
     try expectFile(of(&cfg, .@"font-size", null), included_path, 2, .included);
-    try expectFile(of(&cfg, .@"scrollback-limit", null), path, 5, .config);
+    // `scrollback-limit` is the compatibility name of `scrollback-limit-bytes`
+    // since Ghostty 1.4.
+    try std.testing.expectEqual(@as(usize, 5), cfg.@"scrollback-limit-bytes".value);
+    try expectFile(of(&cfg, .@"scrollback-limit-bytes", null), path, 5, .config);
+    // `copy-on-select = true` is the field's own name with a value only its
+    // compatibility handler takes (Ghostty 1.4's values).
+    try std.testing.expect(cfg.@"copy-on-select" != .none);
+    try expectFile(of(&cfg, .@"copy-on-select", null), path, 9, .config);
     try expectFile(of(&cfg, .@"config-file", null), path, 4, .config);
     // Compatibility names set the keys their handlers set, and only those.
     try expectFile(of(&cfg, .@"bold-color", null), path, 6, .config);
@@ -801,8 +815,8 @@ test "origin: a line that did not parse is not where the value came from" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 13\nfont-size = abc\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 13\nfont-size = abc\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -816,13 +830,13 @@ test "origin: a theme's lines, and the config's own lines over them" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\nforeground = #202020\n" });
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\nforeground = #202020\n" });
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const text = try std.fmt.allocPrint(alloc, "theme = {s}\nforeground = #303030\n", .{theme_path});
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
 
     var cfg = try Config.default(alloc);
@@ -851,18 +865,18 @@ test "origin: -e sets the keys it implies, and its command's words set nothing" 
     try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .@"font-size", null));
     try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"initial-command", null));
     try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"quit-after-last-window-closed", null));
-    try std.testing.expect(of(&cfg, .@"scrollback-limit", null) == .default);
+    try std.testing.expect(of(&cfg, .@"scrollback-limit-bytes", null) == .default);
 }
 
 test "origin: a command-line value finalize restores over an included file is the command line's" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "command = pwsh.exe\ninitial-command = pwsh.exe\ndefault-profile = pwsh\nfont-size = 15\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "config-file = x.conf\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "command = pwsh.exe\ninitial-command = pwsh.exe\ndefault-profile = pwsh\nfont-size = 15\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "config-file = x.conf\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
     defer alloc.free(included_path);
 
     var cfg = try Config.default(alloc);
@@ -893,11 +907,11 @@ test "origin: a line finalize reports a problem at still set the key" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "\ndefault-profile = pwsh\nprofile-order = no profile at all\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "command = cmd.exe\nconfig-file = x.conf\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "\ndefault-profile = pwsh\nprofile-order = no profile at all\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "command = cmd.exe\nconfig-file = x.conf\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
     defer alloc.free(included_path);
 
     var cfg = try Config.default(alloc);
@@ -922,8 +936,8 @@ test "origin: rejected -e does not change origins" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "quit-after-last-window-closed = false\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "quit-after-last-window-closed = false\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
 
     var cfg = try Config.default(alloc);
@@ -957,8 +971,8 @@ test "origin: ofFiles counts only lines of files" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 13\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
 
     // A step with no place after a file's line: the file's line stays the
@@ -984,8 +998,8 @@ test "origin: ofFiles counts only lines of files" {
 
 /// Load `path` (holding `text`), the command line `args`, and the files
 /// `config-file` names, and finalize, as the app does.
-fn loadWithArgs(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, text: []const u8, args: []const []const u8) !Config {
-    try dir.writeFile(.{ .sub_path = "config", .data = text });
+fn loadWithArgs(alloc: std.mem.Allocator, dir: std.Io.Dir, path: []const u8, text: []const u8, args: []const []const u8) !Config {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
     var cfg = try Config.default(alloc);
     errdefer cfg.deinit();
     try cfg.loadFile(alloc, path);
@@ -1019,14 +1033,14 @@ test "origin: -e wins over an included file with or without a theme, and is name
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "quit-after-last-window-closed = false\ninitial-command = pwsh.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "quit-after-last-window-closed = false\ninitial-command = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
     defer alloc.free(included_path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const themed = try std.fmt.allocPrint(alloc, "config-file = x.conf\ntheme = {s}\n", .{theme_path});
     defer alloc.free(themed);
@@ -1071,12 +1085,12 @@ test "origin: a refused -e leaves an accepted --initial-command= the origin, wit
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "initial-command = pwsh.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "initial-command = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const themed = try std.fmt.allocPrint(alloc, "config-file = x.conf\ntheme = {s}\n", .{theme_path});
     defer alloc.free(themed);
@@ -1093,11 +1107,11 @@ test "origin: -e's shell-integration is -e's unless it is none, with or without 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const themed = try std.fmt.allocPrint(alloc, "config-file = x.conf\ntheme = {s}\n", .{theme_path});
     defer alloc.free(themed);
@@ -1109,8 +1123,8 @@ test "origin: -e's shell-integration is -e's unless it is none, with or without 
         // `-e` leaves `none`, and the include's line stands.
         .{ .include = "shell-integration = none\n", .want = .none, .by_e = false },
     }) |case| {
-        try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = case.include });
-        const x_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = case.include });
+        const x_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
         defer alloc.free(x_path);
         for ([_][]const u8{ "config-file = x.conf\n", themed }) |text| {
             errdefer std.debug.print("origin: -e shell-integration case {s}", .{case.include});
@@ -1129,9 +1143,9 @@ test "origin: after a light/dark flip, -e's values and their origin still agree"
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "quit-after-last-window-closed = false\ninitial-command = pwsh.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "quit-after-last-window-closed = false\ninitial-command = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
 
     var cfg = try loadWithArgs(alloc, tmp.dir, path, "config-file = x.conf\n", &.{ "-e", "cmd.exe" });
@@ -1212,11 +1226,11 @@ test "origin: single-instance and its alias gtk-single-instance name the step fi
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const theme_line = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{theme_path});
     defer alloc.free(theme_line);
@@ -1280,14 +1294,14 @@ test "origin: an --elevated-profile-env= the loader took is env's origin over ev
     defer tmp.cleanup();
     // The included file is read after the command line; its
     // `elevated-profile-env` line is refused, as any file's.
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "env = MODE=include\nelevated-profile-env = MODE=file\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "env = MODE=include\nelevated-profile-env = MODE=file\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
     defer alloc.free(included_path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const plain = "env = MODE=config\nconfig-file = x.conf\n";
     const themed = try std.fmt.allocPrint(alloc, plain ++ "theme = {s}\n", .{theme_path});
@@ -1335,8 +1349,8 @@ test "origin: a refused argument with no place still counts as set" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 13\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -1365,12 +1379,12 @@ test "origin: an Index answers as the free functions do" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "font-size = 15\nscrollback-limit = lots\ndefault-profile = pwsh\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\nforeground = nope\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "font-size = 15\nscrollback-limit = lots\ndefault-profile = pwsh\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\nforeground = nope\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
@@ -1414,8 +1428,8 @@ test "origin: a lookup compares the config-file names once, not once for each st
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     for (0..n) |_| try out.writer.writeAll("config-file = ?missing.conf\nfont-size = 13\n");
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = out.written() });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = out.written() });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -1454,7 +1468,7 @@ test "origin: a profile field's origin is the last step that wrote it, by id and
     defer tmp.cleanup();
     // The included file is read after the config file: it removes the profile
     // (its fields go dormant, unchanged) and takes back every label.
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = py:\nprofile-name =\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "profile-command = py:\nprofile-name =\n" });
     const text =
         \\profile-command = py: cmd.exe
         \\profile-name = py: Python
@@ -1468,10 +1482,10 @@ test "origin: a profile field's origin is the last step that wrote it, by id and
         \\config-file = x.conf
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
     defer alloc.free(included_path);
     var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{"--profile-env=py: CLI=1"});
     defer cfg.deinit();
@@ -1508,11 +1522,11 @@ test "origin: whether another layer gives a profile field a value, without the l
     defer tmp.cleanup();
     // The included file is read after the config file, and the command line
     // between the two.
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = py: b.exe\nprofile-command = other: o.exe\nprofile-command = other:\nprofile-env = py: L=1\nprofile-env = py: K=\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "profile-command = py: b.exe\nprofile-command = other: o.exe\nprofile-command = other:\nprofile-env = py: L=1\nprofile-env = py: K=\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "x.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.conf", alloc);
     defer alloc.free(included_path);
     const text = "profile-command = py: a.exe\nprofile-env = py: K=1\nprofile-env = py: J=1\nprofile-command = other: t.exe\nconfig-file = x.conf\n";
     var cfg = try loadWithArgs(alloc, tmp.dir, path, text, &.{"--profile-name=py: From the command line"});

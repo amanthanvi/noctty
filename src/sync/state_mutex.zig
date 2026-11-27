@@ -1,7 +1,19 @@
 //! `StateMutex`, the renderer-state mutex with the runtime thread-role layer
-//! (PLAN.md §2.7). It has `std.Thread.Mutex`'s methods (`lock`, `tryLock`,
-//! `unlock`), 0.17's `lockUncancelable`, a demand acquire (`demand`, which the
-//! renderer reaches through `State.lockDemand`) and `assertHeld`. With the
+//! (PLAN.md §2.7). It has `std.Io.Mutex`'s `lockUncancelable`, `tryLock` and
+//! `unlock` without their `Io` (the wrapper supplies its own: `innerIo`), the
+//! fork's older `lock`, a demand acquire (`demand`, which the renderer reaches
+//! through `State.lockDemand`) and `assertHeld`.
+//!
+//! The call sites' one spelling (1B.6, carry-over B6 and A7) is upstream's:
+//! `lockUncancelable()` and `unlock()`. Upstream writes
+//! `lockUncancelable(global.io())` and `unlock(global.io())` on the plain
+//! mutex, so a fork line differs from upstream's by the argument alone, which
+//! a forward merge drops mechanically. `lock` stays for the wrapper's own
+//! tests of PN1 and PN3 (acceptance tests 1 and 6), and a build that is not a
+//! test refuses it at compile time. The thread gate reads both names as one
+//! (`thread_gate15.py` `signature_of`), so the spelling moves no table row.
+//!
+//! With the
 //! layer on it keeps its owner, records each (acquiring function, role) pair
 //! and panics on the policies below; with it off it is the same struct around
 //! the plain mutex, every method an inline forward, with no owner, no roles
@@ -9,8 +21,8 @@
 //!
 //! The panics, wherever the layer is on:
 //! - PN1: `lock`, `lockUncancelable` or `demand` by the thread that holds it,
-//!   checked before the inner lock, so this text wins over Zig's own
-//!   "Deadlock detected".
+//!   checked before the inner lock, which would wait for itself: 0.17.1's
+//!   `std.Io.Mutex` has no re-entry check in any mode.
 //! - PN2: `assertHeld` or `unlock` on a thread that does not hold it.
 //! - PN3: a plain `lock` or `lockUncancelable` from `.renderer` (`demand`
 //!   and `tryLock` are allowed).
@@ -26,6 +38,7 @@
 //! the acquiring function. `@src()` would name this file.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const thread_role = @import("thread_role.zig");
 
 const Layer = thread_role.Layer;
@@ -64,7 +77,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
         /// No thread holds it. No Windows thread has ID 0.
         const no_owner: ThreadId = 0;
 
-        inner: std.Thread.Mutex = .{},
+        inner: std.Io.Mutex = .init,
 
         /// The holding thread's ID, or `no_owner`. Only the holder stores its
         /// own ID, and only while it holds the inner mutex, so a thread that
@@ -72,17 +85,20 @@ pub fn StateMutexOf(comptime form: Layer) type {
         /// other threads' stores.
         owner: Owner = if (on) .init(no_owner) else {},
 
+        /// The fork's older name for `lockUncancelable`, for the wrapper's own
+        /// tests only: call sites spell `lockUncancelable()` (B6).
         pub inline fn lock(self: *Self) void {
-            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock }) else self.inner.lock();
+            if (comptime !builtin.is_test) @compileError("StateMutex: call sites spell lockUncancelable(), not lock() (1B.6, B6)");
+            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock }) else self.inner.lockUncancelable(innerIo());
         }
 
         pub inline fn lockUncancelable(self: *Self) void {
-            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock_uncancelable }) else self.inner.lock();
+            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock_uncancelable }) else self.inner.lockUncancelable(innerIo());
         }
 
         /// The demand acquire: the renderer's way in (PN3 exempts it).
         pub inline fn demand(self: *Self) void {
-            if (on) @call(.never_tail, acquire, .{ self, Acquire.demand }) else self.inner.lock();
+            if (on) @call(.never_tail, acquire, .{ self, Acquire.demand }) else self.inner.lockUncancelable(innerIo());
         }
 
         /// False when another thread holds it, or when the caller does; the
@@ -100,7 +116,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
                 }
                 self.owner.store(no_owner, .monotonic);
             }
-            self.inner.unlock();
+            self.inner.unlock(innerIo());
         }
 
         /// PN2: for a function documented "requires the mutex held". A no-op
@@ -119,7 +135,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
             if (self.owner.load(.monotonic) == me) panicReentry(kind, role);
             if (role == .none) panicNoRole(kind);
             if (role == .renderer and kind != .demand) panicRendererPlain(kind);
-            self.inner.lock();
+            self.inner.lockUncancelable(innerIo());
             self.owner.store(me, .monotonic);
         }
 
@@ -135,6 +151,25 @@ pub fn StateMutexOf(comptime form: Layer) type {
             return true;
         }
     };
+}
+
+/// The `Io` of the inner mutex's waits and wakes, settled in 1B.6 (B6).
+/// Zig 0.17's `std.Io.Mutex` takes one for its futex; `lockUncancelable` and
+/// `unlock` reach only `futexWaitUncancelable` and `futexWake`, which
+/// `std.Io.Threaded` runs on the process-wide futex whatever the instance,
+/// branching only on `builtin.single_threaded` (0.17.1
+/// `lib/std/Io/Threaded.zig` `futexWaitUncancelable`, `futexWake`; the lead's
+/// QR-16). So the wrapper keeps its `Io`-free API, with no cancelation point,
+/// and works on every thread that takes it: the UI, renderer,
+/// termio, reader and search threads, which no `Io` started, and an `Io`
+/// task's thread, inline or a pool worker (decision 19). The owner and the
+/// role are the OS thread's, which holds for `Io.Threaded`, whose tasks never
+/// leave the thread they start on; an `Io` that moved a task between threads
+/// would break both. `std.Io.Mutex` checks no owner in any mode on 0.17.1
+/// (its `unlock` asserts only that the mutex is locked), so PN1 and PN2 are
+/// the only re-entry and wrong-thread checks there are.
+inline fn innerIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 /// The recorder's seam: each acquisition's site (the address its acquiring
@@ -296,7 +331,7 @@ test "another thread's tryLock fails while the holder holds it" {
 
 test "the off form is the plain mutex with the same API" {
     const Plain = StateMutexOf(.off);
-    try testing.expectEqual(@sizeOf(std.Thread.Mutex), @sizeOf(Plain));
+    try testing.expectEqual(@sizeOf(std.Io.Mutex), @sizeOf(Plain));
     try testing.expectEqual(void, @FieldType(Plain, "owner"));
 
     var m: Plain = .{};
@@ -360,8 +395,8 @@ test "isolated: an unlock by a thread that does not hold the mutex panics with P
     const isolated = @import("isolated.zig");
     const Other = struct {
         /// A thread of another role that unlocks the mutex the test thread
-        /// holds. Only Zig's Debug mutex checks that itself, so in
-        /// ReleaseSafe the layer's check is the only one.
+        /// holds. Zig 0.17.1's `std.Io.Mutex` checks no owner in any mode,
+        /// so the layer's check is the only one.
         fn unlockFromOtherThread(m: *StateMutex) void {
             const scope = thread_role.enter(.termio);
             defer scope.exit();

@@ -29,6 +29,7 @@ const discovery = font.discovery;
 const configpkg = @import("../config/Config.zig");
 const Config = configpkg;
 const thread_role = @import("../sync/thread_role.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.font_shared_grid_set);
 
@@ -45,7 +46,7 @@ font_lib: Library,
 font_discover: ?Discover = null,
 
 /// Lock to protect multi-threaded access to the map.
-lock: std.Thread.Mutex = .{},
+lock: std.Io.Mutex = .init,
 
 /// Windows font metadata discovery can overlap runtime/window setup. The
 /// worker only scans; it does not take `lock`, so a grid that needs no
@@ -108,8 +109,8 @@ pub fn startDiscoveryPrefetch(self: *SharedGridSet) void {
     if (self.discovery_prefetch_thread != null) return;
 
     const disco = disco: {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(global.io());
+        defer self.lock.unlock(global.io());
         break :disco (self.discover() catch return) orelse return;
     };
 
@@ -118,7 +119,7 @@ pub fn startDiscoveryPrefetch(self: *SharedGridSet) void {
         discoveryPrefetchMain,
         .{disco},
     ) catch return;
-    thread.setName("font-prefetch") catch {};
+    thread.setName(global.io(), "font-prefetch") catch {};
     self.discovery_prefetch_thread = thread;
 }
 
@@ -134,8 +135,8 @@ fn discoveryPrefetchMain(disco: *Discover) void {
 
 /// Returns the number of cached grids.
 pub fn count(self: *SharedGridSet) usize {
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
     return self.map.count();
 }
 
@@ -155,8 +156,8 @@ pub fn ref(
     var key = try Key.init(self.alloc, config, font_size);
     errdefer key.deinit();
 
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
 
     const gop = try self.map.getOrPut(self.alloc, key);
     if (gop.found_existing) {
@@ -216,8 +217,8 @@ pub fn ref(
 /// matched. Other configured or built-in families provide fallbacks. Names are
 /// borrowed from the set and stay valid while `key` is referenced.
 pub fn missingFamilies(self: *SharedGridSet, key: Key) []const [:0]const u8 {
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
     const entry = self.map.get(key) orelse return &.{};
     return entry.missing.reportable();
 }
@@ -230,8 +231,8 @@ pub fn configuredMissingFamilies(
     alloc: Allocator,
     config: *const Config,
 ) !MissingFamilies {
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
 
     var missing: MissingFamilies = .{};
     errdefer missing.deinit(alloc);
@@ -286,7 +287,7 @@ pub const MissingFamilies = struct {
         for (self.names.items) |seen| {
             if (std.ascii.eqlIgnoreCase(seen, family)) return;
         }
-        const owned = try alloc.dupeZ(u8, family);
+        const owned = try alloc.dupeSentinel(u8, family, 0);
         errdefer alloc.free(owned);
         try self.names.append(alloc, owned);
     }
@@ -346,15 +347,15 @@ fn collection(
         // A buffer we use to store the font names for logging.
         var name_buf: [256]u8 = undefined;
 
-        inline for (@typeInfo(Style).@"enum".fields) |field| {
-            const style = @field(Style, field.name);
+        inline for (@typeInfo(Style).@"enum".field_names) |field| {
+            const style = @field(Style, field);
             for (key.descriptorsForStyle(style)) |desc| {
                 {
                     var disco_it = try disco.discover(self.alloc, desc);
                     defer disco_it.deinit();
                     if (try disco_it.next()) |face| {
                         log.info("font {s}: {s}", .{
-                            field.name,
+                            field,
                             try face.name(&name_buf),
                         });
 
@@ -385,7 +386,7 @@ fn collection(
                     defer disco_it.deinit();
                     if (try disco_it.next()) |face| {
                         log.info("font {s}: {s}", .{
-                            field.name,
+                            field,
                             try face.name(&name_buf),
                         });
 
@@ -401,7 +402,7 @@ fn collection(
                 }
 
                 log.warn("font {s} face not found: {s}", .{
-                    field.name,
+                    field,
                     desc.family.?,
                 });
                 if (!try familyExists(disco, self.alloc, desc.family.?)) {
@@ -500,6 +501,24 @@ fn collection(
     // specifying a font-family for emoji.
     if (comptime builtin.target.os.tag.isDarwin() and Discover != void) apple_emoji: {
         const disco = try self.discover() orelse break :apple_emoji;
+
+        // Fast path: we know the exact name of the font we want so we
+        // can look it up directly, which is sometimes significantly faster than
+        // full discovery (e.g. CoreText).
+        if (@hasDecl(Discover, "discoverExactFamily")) {
+            if (try disco.discoverExactFamily(
+                "Apple Color Emoji",
+            )) |face| {
+                _ = try c.addDeferred(self.alloc, face, .{
+                    .style = .regular,
+                    .fallback = true,
+                    // No size adjustment for emojis.
+                    .size_adjustment = .none,
+                });
+                break :apple_emoji;
+            }
+        }
+
         var disco_it = try disco.discover(self.alloc, .{
             .family = "Apple Color Emoji",
         });
@@ -553,8 +572,8 @@ fn collection(
 /// Decrement the ref count for the given key. If the ref count is zero,
 /// the grid will be deinitialized and removed from the map.j:w
 pub fn deref(self: *SharedGridSet, key: Key) void {
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
 
     const entry = self.map.getEntry(key) orelse return;
     assert(entry.value_ptr.ref >= 1);
@@ -712,8 +731,8 @@ pub const Key = struct {
 
     /// These are the offsets into the descriptors array for
     /// each style. For example, bold is from
-    /// offsets[@intFromEnum(.bold) - 1] to
-    /// offsets[@intFromEnum(.bold)].
+    /// offsets[@backingInt(.bold) - 1] to
+    /// offsets[@backingInt(.bold)].
     style_offsets: StyleOffsets = @splat(0),
 
     /// The codepoint map configuration.
@@ -737,10 +756,10 @@ pub const Key = struct {
     comptime {
         // We assume this throughout this structure. If this changes
         // we may need to change this structure.
-        assert(@intFromEnum(Style.regular) == 0);
-        assert(@intFromEnum(Style.bold) == 1);
-        assert(@intFromEnum(Style.italic) == 2);
-        assert(@intFromEnum(Style.bold_italic) == 3);
+        assert(@backingInt(Style.regular) == 0);
+        assert(@backingInt(Style.bold) == 1);
+        assert(@backingInt(Style.italic) == 2);
+        assert(@backingInt(Style.bold_italic) == 3);
     }
 
     pub fn init(
@@ -871,7 +890,7 @@ pub const Key = struct {
         self: Key,
         style: Style,
     ) []const discovery.Descriptor {
-        const idx = @intFromEnum(style);
+        const idx = @backingInt(style);
         const start: usize = if (idx == 0) 0 else self.style_offsets[idx - 1];
         const end = self.style_offsets[idx];
         return self.descriptors[start..end];
@@ -889,8 +908,8 @@ pub const Key = struct {
         autoHash(hasher, self.metric_modifiers.count());
         autoHash(hasher, self.freetype_load_flags);
         if (self.metric_modifiers.count() > 0) {
-            inline for (@typeInfo(Metrics.Key).@"enum".fields) |field| {
-                const key = @field(Metrics.Key, field.name);
+            inline for (@typeInfo(Metrics.Key).@"enum".field_names) |field| {
+                const key = @field(Metrics.Key, field);
                 if (self.metric_modifiers.get(key)) |value| {
                     autoHash(hasher, key);
                     value.hash(hasher);
@@ -1105,8 +1124,8 @@ fn testRenderTinySample(alloc: Allocator, grid: *SharedGrid) !void {
         for (presentations) |p| {
             const idx = try grid.getIndex(alloc, cp, .regular, p) orelse continue;
             const glyph_index = if (idx.special() != null) cp else glyph_index: {
-                grid.lock.lockShared();
-                defer grid.lock.unlockShared();
+                grid.lock.lockSharedUncancelable(std.testing.io);
+                defer grid.lock.unlockShared(std.testing.io);
                 const face = try grid.resolver.collection.getFace(idx);
                 break :glyph_index face.glyphIndex(cp) orelse continue;
             };
@@ -1131,7 +1150,7 @@ fn testRenderTinySample(alloc: Allocator, grid: *SharedGrid) !void {
 
     for (std.enums.values(font.sprite.Sprite)) |sprite| {
         errdefer std.debug.print("sprite {s}\n", .{@tagName(sprite)});
-        const render = try grid.renderGlyph(alloc, font.sprite_index, @intFromEnum(sprite), .{
+        const render = try grid.renderGlyph(alloc, font.sprite_index, @backingInt(sprite), .{
             .grid_metrics = grid.metrics,
             .cell_width = 1,
         });
@@ -1179,13 +1198,13 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
         var tmp = testing.tmpDir(.{});
         defer tmp.cleanup();
         for ([_][]const u8{ "a.ttf", "b.ttf", "c.ttf", "d.ttf" }) |name| {
-            try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "" });
         }
-        const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+        const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
         defer testing.allocator.free(dir);
 
         const Hold = struct {
-            entered: std.Thread.ResetEvent = .{},
+            entered: std.Io.Event = .unset,
             calls: std.atomic.Value(usize) = .init(0),
 
             // A slow first open: it lasts until the scan is stopped, or
@@ -1195,10 +1214,12 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
             fn call(ctx: *anyopaque, disco: *Discover, _: [:0]const u8) void {
                 const self: *@This() = @ptrCast(@alignCast(ctx));
                 if (self.calls.fetchAdd(1, .monotonic) != 0) return;
-                self.entered.set();
-                var timer = std.time.Timer.start() catch return;
-                while (!disco.scanStopped() and timer.read() < 5 * std.time.ns_per_s) {
-                    std.Thread.sleep(std.time.ns_per_ms);
+                self.entered.set(std.testing.io);
+                const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+                while (!disco.scanStopped() and
+                    started.untilNow(std.testing.io, .awake).toNanoseconds() < 5 * std.time.ns_per_s)
+                {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return;
                 }
             }
         };
@@ -1209,14 +1230,14 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
         defer if (set_live) set.deinit();
         const disco = (try set.discover()).?;
         if (disco.system_dir) |old| disco.alloc.free(old);
-        disco.system_dir = try disco.alloc.dupeZ(u8, dir);
+        disco.system_dir = try disco.alloc.dupeSentinel(u8, dir, 0);
         if (disco.user_dir) |old| disco.alloc.free(old);
         disco.user_dir = null;
         disco.test_scan_hook = .{ .ctx = &hold, .call = Hold.call };
 
         set.startDiscoveryPrefetch();
         try testing.expect(set.discoveryPrefetchStarted());
-        try hold.entered.timedWait(5 * std.time.ns_per_s);
+        try hold.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
 
         set_live = false;
         set.deinit();

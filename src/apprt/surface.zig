@@ -11,6 +11,15 @@ const semantic_output = @import("../terminal/semantic_output.zig");
 const Config = @import("../config.zig").Config;
 const MessageData = @import("../datastruct/main.zig").MessageData;
 
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 /// Fixed-memory semantic terminal-output handoff from the PTY thread to the UI
 /// thread. Producers never block: lock contention and capacity exhaustion
 /// become one ordered omission barrier. While that barrier is pending, newer
@@ -43,10 +52,10 @@ pub const TerminalOutputTransport = struct {
 
     interest_state: std.atomic.Value(u64) = .init(0),
     omission_pending: std.atomic.Value(u64) = .init(0),
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     chunks: [max_chunks][chunk_bytes]u8 = undefined,
-    lengths: [max_chunks]usize = [_]usize{0} ** max_chunks,
-    resets_before: [max_chunks]bool = [_]bool{false} ** max_chunks,
+    lengths: [max_chunks]usize = @splat(0),
+    resets_before: [max_chunks]bool = @splat(false),
     trailing_reset: bool = false,
     head: usize = 0,
     count: usize = 0,
@@ -55,8 +64,8 @@ pub const TerminalOutputTransport = struct {
         const state = self.interest_state.load(.acquire);
         if ((state & 1 != 0) == interested) return;
         if (!interested) self.interest_state.store(state +% 1, .release);
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         self.head = 0;
         self.count = 0;
         self.trailing_reset = false;
@@ -118,7 +127,7 @@ pub const TerminalOutputTransport = struct {
             if (!self.markOmissionForEpoch(epoch)) return .stale;
             return .contended;
         }
-        defer self.mutex.unlock();
+        defer self.mutex.unlock(mutexIo());
 
         if (self.interest_state.load(.acquire) != epoch) return .stale;
         if (self.omissionPendingForEpoch(epoch)) return .rejecting;
@@ -241,12 +250,12 @@ pub const TerminalOutputTransport = struct {
         const epoch = self.captureEpoch() orelse return;
 
         var chunks: [max_chunks][chunk_bytes]u8 = undefined;
-        var lengths: [max_chunks]usize = [_]usize{0} ** max_chunks;
-        var resets_before: [max_chunks]bool = [_]bool{false} ** max_chunks;
+        var lengths: [max_chunks]usize = @splat(0);
+        var resets_before: [max_chunks]bool = @splat(false);
         var count: usize = 0;
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         if (self.interest_state.load(.acquire) != epoch) {
-            self.mutex.unlock();
+            self.mutex.unlock(mutexIo());
             return;
         }
         while (self.count != 0) {
@@ -271,7 +280,7 @@ pub const TerminalOutputTransport = struct {
             .acq_rel,
             .acquire,
         ) == null;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
 
         for (0..count) |index| {
             if (resets_before[index]) callback(ctx, .reset);
@@ -315,6 +324,47 @@ pub const Message = union(enum) {
     pub const SearchViewportMatches = renderer.Message.SearchMatches;
     pub const SearchSelectedMatch = renderer.Message.SearchSelectedMatch;
 
+    /// A fixed-size desktop notification payload sent to the app thread.
+    pub const DesktopNotification = struct {
+        /// Desktop notification title.
+        title: [63:0]u8,
+
+        /// Desktop notification body.
+        body: [255:0]u8,
+
+        pub fn init(title: []const u8, body: []const u8) DesktopNotification {
+            var result: DesktopNotification = undefined;
+            copyUtf8Z(result.title.len, &result.title, title);
+            copyUtf8Z(result.body.len, &result.body, body);
+            return result;
+        }
+
+        /// UTF-8 continuation bytes occupy the range 0x80 through 0xBF.
+        fn isUtf8ContinuationByte(byte: u8) bool {
+            return switch (byte) {
+                0x80...0xBF => true,
+                else => false,
+            };
+        }
+
+        /// Copy as much of `src` as fits, backing up from a UTF-8 continuation
+        /// byte so valid input is never truncated in the middle of a codepoint.
+        fn copyUtf8Z(
+            comptime capacity: usize,
+            dst: *[capacity:0]u8,
+            src: []const u8,
+        ) void {
+            var len = @min(src.len, capacity);
+            while (len > 0 and
+                len < src.len and
+                isUtf8ContinuationByte(src[len])) : (len -= 1)
+            {}
+
+            @memcpy(dst[0..len], src[0..len]);
+            dst[len] = 0;
+        }
+    };
+
     /// Set the title of the surface.
     /// TODO: we should change this to a "WriteReq" style structure in
     /// the termio message so that we can more efficiently send strings
@@ -327,11 +377,25 @@ pub const Message = union(enum) {
     /// Report the window title back to the terminal
     report_title: ReportTitleStyle,
 
+    /// Resize the window to the given grid size, as requested by the
+    /// running program (CSI 8 t).
+    resize_window: terminal.StreamAction.ResizeWindow,
+
     /// Set the mouse shape.
     set_mouse_shape: terminal.MouseShape,
 
     /// Read the clipboard and write to the pty.
     clipboard_read: apprt.Clipboard,
+
+    /// A Kitty clipboard protocol (OSC 5522) read request. The receiver
+    /// takes ownership of the request state and must eventually destroy
+    /// it.
+    kitty_clipboard_read: *apprt.ClipboardRequest.KittyRead,
+
+    /// A committed Kitty clipboard protocol (OSC 5522) write
+    /// transaction. The receiver takes ownership of the request state
+    /// and must eventually destroy it.
+    kitty_clipboard_write: *apprt.ClipboardRequest.KittyWrite,
 
     /// Write the clipboard contents.
     clipboard_write: struct {
@@ -354,13 +418,7 @@ pub const Message = union(enum) {
     child_exited: ChildExited,
 
     /// Show a desktop notification.
-    desktop_notification: struct {
-        /// Desktop notification title.
-        title: [63:0]u8,
-
-        /// Desktop notification body.
-        body: [255:0]u8,
-    },
+    desktop_notification: DesktopNotification,
 
     /// Health status change for the renderer.
     renderer_health: renderer.Health,
@@ -426,8 +484,13 @@ pub const Message = union(enum) {
     /// Force-clear search state for the current search generation.
     search_clear: SearchClear,
 
+    /// Renderer pushed a new frame, redraw this surface.
+    redraw,
+
     pub fn deinit(self: *Message) void {
         switch (self.*) {
+            .kitty_clipboard_read => |req| req.destroy(),
+            .kitty_clipboard_write => |req| req.destroy(),
             .clipboard_write => |v| v.req.deinit(),
             .pwd_change => |v| v.deinit(),
             .search_viewport_matches => |*v| v.deinit(),
@@ -761,11 +824,11 @@ test "terminal output transport lock contention returns immediately" {
 
     var transport: TerminalOutputTransport = .{};
     transport.setInterested(true);
-    transport.mutex.lock();
+    transport.mutex.lockUncancelable(mutexIo());
     var parsing_continued = false;
     const result = transport.push("cannot wait");
     parsing_continued = true;
-    transport.mutex.unlock();
+    transport.mutex.unlock(mutexIo());
     try std.testing.expectEqual(TerminalOutputTransport.PushResult.contended, result);
     try std.testing.expect(parsing_continued);
     try std.testing.expectEqual(
@@ -805,9 +868,9 @@ test "terminal output transport reentrant callbacks preserve epochs and contenti
                     self.events.appendSlice(std.testing.allocator, "<omitted>|") catch unreachable;
                     if (self.reenter) {
                         self.pushed_from_omission = self.transport.push("during-omission|");
-                        self.transport.mutex.lock();
+                        self.transport.mutex.lockUncancelable(mutexIo());
                         self.contended_after_clear = self.transport.push("dropped-after-clear");
-                        self.transport.mutex.unlock();
+                        self.transport.mutex.unlock(mutexIo());
                         self.reenter = false;
                     }
                 },
@@ -821,9 +884,9 @@ test "terminal output transport reentrant callbacks preserve epochs and contenti
         TerminalOutputTransport.PushResult.enqueued,
         transport.push("old|"),
     );
-    transport.mutex.lock();
+    transport.mutex.lockUncancelable(mutexIo());
     const initial_contention = transport.push("initially-dropped");
-    transport.mutex.unlock();
+    transport.mutex.unlock(mutexIo());
     try std.testing.expectEqual(
         TerminalOutputTransport.PushResult.contended,
         initial_contention,
@@ -1037,4 +1100,79 @@ pub fn newConfig(
     }
 
     return copy;
+}
+
+test "DesktopNotification init" {
+    const notification = Message.DesktopNotification.init("Title", "Body");
+
+    try std.testing.expectEqualStrings("Title", std.mem.sliceTo(&notification.title, 0));
+    try std.testing.expectEqualStrings("Body", std.mem.sliceTo(&notification.body, 0));
+}
+
+test "copyUtf8Z handles len at the final byte of every UTF-8 sequence length" {
+    const DesktopNotification = Message.DesktopNotification;
+
+    var dst_1_byte: [1:0]u8 = undefined;
+    const src_ending_in_1_byte_codepoint = "ab";
+    try std.testing.expect(!DesktopNotification.isUtf8ContinuationByte(
+        src_ending_in_1_byte_codepoint[dst_1_byte.len],
+    ));
+    DesktopNotification.copyUtf8Z(
+        dst_1_byte.len,
+        &dst_1_byte,
+        src_ending_in_1_byte_codepoint,
+    );
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_1_byte, 0));
+
+    var dst_2_bytes: [2:0]u8 = undefined;
+    const src_ending_in_2_byte_codepoint = "aЯ";
+    try std.testing.expect(DesktopNotification.isUtf8ContinuationByte(
+        src_ending_in_2_byte_codepoint[dst_2_bytes.len],
+    ));
+    DesktopNotification.copyUtf8Z(
+        dst_2_bytes.len,
+        &dst_2_bytes,
+        src_ending_in_2_byte_codepoint,
+    );
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_2_bytes, 0));
+
+    var dst_3_bytes: [3:0]u8 = undefined;
+    const src_ending_in_3_byte_codepoint = "a€";
+    try std.testing.expect(DesktopNotification.isUtf8ContinuationByte(
+        src_ending_in_3_byte_codepoint[dst_3_bytes.len],
+    ));
+    DesktopNotification.copyUtf8Z(
+        dst_3_bytes.len,
+        &dst_3_bytes,
+        src_ending_in_3_byte_codepoint,
+    );
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_3_bytes, 0));
+
+    var dst_4_bytes: [4:0]u8 = undefined;
+    const src_ending_in_4_byte_codepoint = "a😀";
+    try std.testing.expect(DesktopNotification.isUtf8ContinuationByte(
+        src_ending_in_4_byte_codepoint[dst_4_bytes.len],
+    ));
+    DesktopNotification.copyUtf8Z(
+        dst_4_bytes.len,
+        &dst_4_bytes,
+        src_ending_in_4_byte_codepoint,
+    );
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_4_bytes, 0));
+}
+
+test "copyUtf8Z keeps a complete codepoint at the truncation boundary" {
+    var dst: [5:0]u8 = undefined;
+
+    Message.DesktopNotification.copyUtf8Z(dst.len, &dst, "abcЯz");
+
+    try std.testing.expectEqualStrings("abcЯ", std.mem.sliceTo(&dst, 0));
+}
+
+test "copyUtf8Z preserves UTF-8 that fits" {
+    var dst: [5:0]u8 = undefined;
+
+    Message.DesktopNotification.copyUtf8Z(dst.len, &dst, "abcЯ");
+
+    try std.testing.expectEqualStrings("abcЯ", std.mem.sliceTo(&dst, 0));
 }

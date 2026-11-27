@@ -15,6 +15,7 @@
 //! work.
 
 const std = @import("std");
+const win32_repeat = @import("win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 
 pub const current_schema_version: u32 = 1;
@@ -250,8 +251,8 @@ pub fn mergeRecords(
                 }
             }
             const phase_order = std.math.order(
-                @intFromEnum(next.phase),
-                @intFromEnum(current.phase),
+                @backingInt(next.phase),
+                @backingInt(current.phase),
             );
             if (phase_order == .gt) {
                 current.phase = next.phase;
@@ -821,7 +822,7 @@ test "win32 recovery attempt version round trips and stays bounded" {
 
     // A longer value from some other build is cut, never rejected, and never
     // in the middle of a UTF-8 sequence.
-    const long = "v" ++ "\u{e9}" ** BuildVersion.capacity;
+    const long = "v" ++ comptime win32_repeat.repeat("\u{e9}", BuildVersion.capacity);
     const bounded = BuildVersion.init(long);
     try std.testing.expect(bounded.len < BuildVersion.capacity);
     try std.testing.expect(std.unicode.utf8ValidateSlice(bounded.slice()));

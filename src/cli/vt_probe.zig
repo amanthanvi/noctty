@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const actionpkg = @import("action.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const ghostty_terminfo = @import("../terminfo/ghostty.zig").ghostty;
 
 pub const category = enum {
@@ -156,13 +157,13 @@ pub fn run(alloc: Allocator) !u8 {
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(options, alloc, &opts, &iter);
     }
 
     var buffer: [2048]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&buffer);
+    var stdout_writer = std.Io.File.stdout().writer(global.io(), &buffer);
     try writePlain(&stdout_writer.interface, probeReport());
     try stdout_writer.interface.flush();
 

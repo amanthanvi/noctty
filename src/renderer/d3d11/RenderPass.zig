@@ -49,7 +49,7 @@ pub fn step(self: *Self, s: Step) !void {
     const bg = if (s.buffers.len > 1) s.buffers[1] else null;
     const gray = textureHandle(s.textures, 0);
     const color = textureHandle(s.textures, 1);
-    try api.check(api.noctty_d3d11_draw(target.handle, @intFromEnum(s.pipeline.kind), s.uniforms, text, bg, gray, color, @intCast(s.draw.vertex_count), @intCast(s.draw.instance_count)));
+    try api.check(api.noctty_d3d11_draw(target.handle, @backingInt(s.pipeline.kind), s.uniforms, text, bg, gray, color, @intCast(s.draw.vertex_count), @intCast(s.draw.instance_count)));
     self.step_number += 1;
 }
 pub fn complete(_: *const Self) void {}

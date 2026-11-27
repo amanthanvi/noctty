@@ -220,7 +220,7 @@ See [docs/windows.md](docs/windows.md#crash-reports-and-diagnostics) for more.
 
 You need:
 
-- Zig 0.15.2 or a later 0.15.x release
+- Zig 0.17.1 or a later 0.17.x release
 - Visual Studio 2022 with the MSVC toolchain on `PATH`
 - Git for Windows
 

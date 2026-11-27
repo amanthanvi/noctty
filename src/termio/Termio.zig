@@ -9,21 +9,24 @@ const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
 const posix = std.posix;
 const termio = @import("../termio.zig");
 const StreamHandler = @import("stream_handler.zig").StreamHandler;
 const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
-const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
+const xev = global.xev;
 const renderer = @import("../renderer.zig");
 const thread_role = @import("../sync/thread_role.zig");
 const apprt = @import("../apprt.zig");
 const internal_os = @import("../os/main.zig");
 const windows = internal_os.windows;
+const windows_ext = internal_os.windows_ext;
 const configpkg = @import("../config.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const BenchmarkEndMarker = @import("bench_marker.zig").BenchmarkEndMarker;
+const compat_file = @import("../lib/compat/file.zig");
 
 const log = std.log.scoped(.io_exec);
 
@@ -38,7 +41,7 @@ var output_trace_file_claimed = std.atomic.Value(bool).init(false);
 
 const OutputTrace = struct {
     path: ?[]const u8 = null,
-    start_time: ?std.time.Instant = null,
+    start_time: ?std.Io.Timestamp = null,
     process_output_count: u64 = 0,
     process_output_bytes: u64 = 0,
     renderer_wake_count: u64 = 0,
@@ -89,7 +92,7 @@ const OutputTrace = struct {
             return .{};
         return .{
             .path = trace_path,
-            .start_time = std.time.Instant.now() catch null,
+            .start_time = .now(global.io(), .awake),
         };
     }
 
@@ -109,8 +112,7 @@ const OutputTrace = struct {
 
     fn elapsedMs(self: *const OutputTrace) u64 {
         const start_time = self.start_time orelse return 0;
-        const now = std.time.Instant.now() catch return 0;
-        return @intCast(@divFloor(now.since(start_time), std.time.ns_per_ms));
+        return @intCast(@max(0, start_time.untilNow(global.io(), .awake).toMilliseconds()));
     }
 
     fn noteProcessOutput(
@@ -186,14 +188,15 @@ const OutputTrace = struct {
 
     fn writeSnapshot(self: *const OutputTrace) void {
         const trace_path = self.path orelse return;
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+        const io = global.io();
+        const file = std.Io.Dir.createFileAbsolute(io, trace_path, .{ .truncate = true }) catch |err| {
             log.warn("termio output trace create failed path={s} err={}", .{ trace_path, err });
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
         var buffer: [1024]u8 = undefined;
-        var writer = file.writer(&buffer);
+        var writer = file.writer(io, &buffer);
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = self.elapsedMs(),
@@ -288,10 +291,10 @@ test "termio output trace aggregates Windows PTY hot-path timings in memory" {
 /// Whether any handle to `path` is still open, measured by asking for the
 /// file with no sharing at all: that fails while another handle exists.
 fn fileHeldOpen(alloc: Allocator, path: []const u8) !bool {
-    const k32 = windows.kernel32;
+    const k32 = windows_ext.kernel32;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const h = k32.CreateFileW(
+    const h = windows.exp.kernel32.CreateFileW(
         path_w.ptr,
         windows.GENERIC_READ,
         0,
@@ -303,7 +306,7 @@ fn fileHeldOpen(alloc: Allocator, path: []const u8) !bool {
     if (h == windows.INVALID_HANDLE_VALUE) {
         return k32.GetLastError() == .SHARING_VIOLATION;
     }
-    _ = windows.CloseHandle(h);
+    _ = windows_ext.CloseHandle(h);
     return false;
 }
 
@@ -313,8 +316,8 @@ test "termio input files are closed after prepareInput fails part way" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "first.txt", .data = "one" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "first.txt", .data = "one" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const first = try std.fs.path.join(alloc, &.{ dir, "first.txt" });
     defer alloc.free(first);
@@ -327,13 +330,13 @@ test "termio input files are closed after prepareInput fails part way" {
     };
     defer state.destroy();
     const arena_alloc = state.arena.allocator();
-    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeZ(u8, first) });
-    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeZ(u8, missing) });
+    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeSentinel(u8, first, 0) });
+    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeSentinel(u8, missing, 0) });
 
     // Positive control: the probe sees a handle that is open.
     {
-        const held = try std.fs.openFileAbsolute(first, .{});
-        defer held.close();
+        const held = try std.Io.Dir.openFileAbsolute(std.testing.io, first, .{});
+        defer held.close(std.testing.io);
         try testing.expect(try fileHeldOpen(alloc, first));
     }
 
@@ -347,8 +350,8 @@ test "termio input files are closed and read buffers freed once queued" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "in.txt", .data = "echo hi\r" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in.txt", .data = "echo hi\r" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "in.txt" });
     defer alloc.free(path);
@@ -359,7 +362,7 @@ test "termio input files are closed and read buffers freed once queued" {
     };
     defer state.destroy();
     const arena_alloc = state.arena.allocator();
-    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeZ(u8, path) });
+    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeSentinel(u8, path, 0) });
     const inputs = try state.prepareInput();
     try testing.expect(try fileHeldOpen(alloc, path));
 
@@ -381,11 +384,11 @@ test "termio input files are closed and read buffers freed once queued" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
     var io: Termio = undefined;
     io.alloc = alloc;
     io.backend = .{ .exec = undefined };
@@ -460,7 +463,7 @@ stopping: std.atomic.Value(bool) = .init(false),
 
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
-last_cursor_reset: ?std.time.Instant = null,
+last_cursor_reset: ?std.Io.Timestamp = null,
 
 /// Optional PTY/output trace for debugging render wake cadence.
 output_trace: OutputTrace = .{},
@@ -519,21 +522,20 @@ const ThreadEnterState = struct {
     ) (Allocator.Error || error{InputNotFound})![]const Input {
         const alloc = self.arena.allocator();
 
-        var input = try alloc.alloc(
-            Input,
+        var inputs: std.ArrayList(Input) = try .initCapacity(
+            alloc,
             self.input.list.items.len,
         );
-        // The arena frees memory but never closes a handle, so a failure
-        // part way through must close the files already opened.
-        var opened: usize = 0;
-        errdefer closeInputs(input[0..opened]);
-        for (self.input.list.items, 0..) |item, i| {
-            input[i] = switch (item) {
-                .raw => |v| .{ .string = try alloc.dupe(u8, v) },
+        errdefer for (inputs.items) |item| item.deinit();
+
+        for (self.input.list.items) |item| {
+            inputs.appendAssumeCapacity(switch (item) {
+                .raw => |v| .{ .string = v },
                 .path => |path| file: {
-                    const f = std.fs.cwd().openFile(
+                    const f = std.Io.Dir.cwd().openFile(
+                        global.io(),
                         path,
-                        .{},
+                        .{ .allow_directory = false },
                     ) catch |err| {
                         log.warn("failed to open input file={s} err={}", .{
                             path,
@@ -544,30 +546,47 @@ const ThreadEnterState = struct {
 
                     break :file .{ .file = f };
                 },
-            };
-            opened = i + 1;
+            });
         }
 
-        return input;
+        return inputs.items;
     }
 
     /// Close the files `prepareInput` opened.
     fn closeInputs(inputs: []const Input) void {
-        for (inputs) |input| switch (input) {
-            .string => {},
-            .file => |f| f.close(),
-        };
+        for (inputs) |input| input.deinit();
     }
 
     const Input = union(enum) {
         string: []const u8,
-        file: std.fs.File,
+        file: std.Io.File,
+
+        fn deinit(self: Input) void {
+            switch (self) {
+                .string => {},
+                .file => |f| f.close(global.io()),
+            }
+        }
     };
 };
 
 /// The configuration for this IO that is derived from the main
 /// configuration. This must be exported so that we don't need to
 /// pass around Config pointers which makes memory management a pain.
+/// Convert the vt-xt-checksum-extension config, whose values are named for
+/// what they turn on, to the XTCHECKSUM bits, which turn things off.
+fn xtChecksumFlags(
+    ext: configpkg.Config.XtChecksumExtension,
+) terminalpkg.xt_checksum.Flags {
+    return .{
+        .positive = !ext.negate,
+        .no_attributes = !ext.attributes,
+        .no_trim = !ext.trim,
+        .undrawn = ext.undrawn,
+        .full = ext.full,
+    };
+}
+
 pub const DerivedConfig = struct {
     arena: ArenaAllocator,
 
@@ -580,7 +599,10 @@ pub const DerivedConfig = struct {
     background: configpkg.Config.Color,
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
     clipboard_write: configpkg.ClipboardAccess,
+    clipboard_write_limit: usize,
     enquiry_response: []const u8,
+    xt_checksum_report: bool,
+    xt_checksum_extension: terminalpkg.xt_checksum.Flags,
     conditional_state: configpkg.ConditionalState,
 
     pub fn init(
@@ -617,7 +639,10 @@ pub const DerivedConfig = struct {
             .background = config.background,
             .osc_color_report_format = config.@"osc-color-report-format",
             .clipboard_write = config.@"clipboard-write",
+            .clipboard_write_limit = config.@"clipboard-write-limit-bytes".value,
             .enquiry_response = try alloc.dupe(u8, config.@"enquiry-response"),
+            .xt_checksum_report = config.@"vt-xt-checksum-report",
+            .xt_checksum_extension = xtChecksumFlags(config.@"vt-xt-checksum-extension"),
             // Config.changeConditionalState intentionally skips replay when no
             // config field uses the changed condition. The terminal still
             // needs the live state for color-scheme reports in that case.
@@ -657,15 +682,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     };
 
     // Create our terminal
-    var term = try terminalpkg.Terminal.init(alloc, opts: {
+    var term = try terminalpkg.Terminal.init(global.io(), alloc, opts: {
         const grid_size = opts.size.grid();
         break :opts .{
             .cols = grid_size.columns,
             .rows = grid_size.rows,
-            .max_scrollback = opts.full_config.@"scrollback-limit",
+            .max_scrollback_bytes = opts.full_config.@"scrollback-limit-bytes".optional(),
+            .max_scrollback_lines = opts.full_config.@"scrollback-limit-lines".optional(),
             .default_modes = default_modes,
             .default_cursor_style = opts.config.cursor_style,
             .default_cursor_blink = opts.config.cursor_blink,
+            .default_xt_checksum = opts.config.xt_checksum_extension,
             .colors = .{
                 .background = .init(opts.config.background.toTerminalRGB()),
                 .foreground = .init(opts.config.foreground.toTerminalRGB()),
@@ -674,13 +701,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
                     const rgb = color.toTerminalRGB() orelse break :cursor .unset;
                     break :cursor .init(rgb);
                 },
-                .palette = .init(opts.config.palette),
+                .palette = .default,
             },
             .kitty_image_storage_limit = opts.config.image_storage_limit,
-            .kitty_image_loading_limits = .all,
+            .kitty_image_loading_limits = .allWithTempDir(global.tmpDirPath()),
         };
     });
     errdefer term.deinit(alloc);
+
+    // The default palette may be an allocator-owned copy, so it is set
+    // once the terminal owns its memory and can release it on deinit.
+    try term.colors.palette.changeDefault(alloc, opts.config.palette);
 
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
@@ -704,7 +735,9 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .terminal = &self.terminal,
         .osc_color_report_format = opts.config.osc_color_report_format,
         .clipboard_write = opts.config.clipboard_write,
+        .clipboard_write_limit = opts.config.clipboard_write_limit,
         .enquiry_response = opts.config.enquiry_response,
+        .xt_checksum_report = opts.config.xt_checksum_report,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
@@ -724,7 +757,10 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .size = opts.size,
         .backend = backend,
         .mailbox = opts.mailbox,
-        .terminal_stream = .initAlloc(alloc, handler),
+        .terminal_stream = .init(.{
+            .allocator = alloc,
+            .handler = handler,
+        }),
         .output_trace = OutputTrace.init(alloc),
         .benchmark_end_marker = BenchmarkEndMarker.init(alloc),
         .thread_enter_state = thread_enter_state,
@@ -764,7 +800,9 @@ pub fn threadEnter(
         try v.prepareInput()
     else
         null;
-    defer if (inputs) |v| ThreadEnterState.closeInputs(v);
+    defer if (inputs) |items| {
+        for (items) |input| input.deinit();
+    };
 
     data.* = .{
         .alloc = self.alloc,
@@ -796,15 +834,17 @@ fn queueInputs(
             return error.InputFailed;
         },
         .file => |f| {
-            const bytes = f.readToEndAlloc(
+            const contents = compat_file.readToEndAlloc(
+                f,
                 self.alloc,
                 10 * 1024 * 1024, // 10 MiB max
             ) catch |err| {
                 log.warn("failed to read input file err={}", .{err});
                 return error.InputFailed;
             };
-            defer self.alloc.free(bytes);
-            self.queueWrite(data, bytes, false) catch |err| {
+            defer self.alloc.free(contents);
+
+            self.queueWrite(data, contents, false) catch |err| {
                 log.warn("failed to queue input file err={}", .{err});
                 return error.InputFailed;
             };
@@ -855,7 +895,7 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     // The remainder of this function is modifying terminal state or
     // the read thread data, all of which requires holding the renderer
     // state lock.
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     defer self.renderer_state.mutex.unlock();
 
     // Deinit our old config. We do this in the lock because the
@@ -878,8 +918,16 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     //   - command, working-directory: we never restart the underlying
     //   process so we don't care or need to know about these.
 
-    // Update the default palette.
-    self.terminal.colors.palette.changeDefault(config.palette);
+    // Update the default palette. A config change must not fail here, so
+    // if we can't allocate the copy of the configured palette we fall back
+    // to the built-in default, which never allocates.
+    self.terminal.colors.palette.changeDefault(
+        self.alloc,
+        config.palette,
+    ) catch |err| {
+        log.warn("error changing default palette, using built-in default err={}", .{err});
+        self.terminal.colors.palette.resetDefault(self.alloc);
+    };
     self.terminal.flags.dirty.palette = true;
 
     // Update all our other colors
@@ -890,20 +938,17 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
         break :cursor color.toTerminalRGB() orelse break :cursor null;
     };
 
+    // Set the image limits
+    self.terminal.setKittyGraphicsSizeLimit(self.alloc, config.image_storage_limit);
+    self.terminal.setKittyGraphicsLoadingLimits(.allWithTempDir(global.tmpDirPath()));
+
     // The config could have changed any of our colors so update mode 2031.
     // This is written directly rather than queued as a color_scheme_report
     // message because we're on the io thread, the only reader of our
     // mailbox: if the mailbox were full, queueing would wait forever.
-    // (Fork: upstream writes it last; here it comes before the image limits,
-    // whose `try` would otherwise skip it. Pinned by "issue149 config change
-    // writes exactly one color scheme report".)
     self.colorSchemeReportLocked(td, false) catch |err| {
         log.warn("error sending color scheme report err={}", .{err});
     };
-
-    // Set the image limits
-    try self.terminal.setKittyGraphicsSizeLimit(self.alloc, config.image_storage_limit);
-    self.terminal.setKittyGraphicsLoadingLimits(.all);
 }
 
 /// Replace the live derived config. Split out so the ordering contract with
@@ -924,8 +969,13 @@ pub fn resize(
 
     // Enter the critical area that we want to keep small
     {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
+
+        // Resizing the pty can immediately wake the shell with SIGWINCH.
+        // Hold the same lock used by processOutput before notifying it, so
+        // its redraw cannot be parsed against the old terminal dimensions.
+        try self.backend.resize(grid_size, size.terminal());
 
         // Resizing the pty can make the shell, or the pseudo console's host,
         // redraw at once. Hold the same lock used by processOutput before
@@ -988,7 +1038,7 @@ pub fn resizeBeforeThreadStart(
     try self.backend.resize(grid_size, size.terminal());
 
     {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
 
         // Upstream's resize also sets the pixel size from the cell size and
@@ -1016,7 +1066,7 @@ pub fn resizeBeforeThreadStart(
 
 /// Make a size report.
 pub fn sizeReport(self: *Termio, td: *ThreadData, style: termio.Message.SizeReport) !void {
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     defer self.renderer_state.mutex.unlock();
     try self.sizeReportLocked(td, style);
 }
@@ -1046,7 +1096,7 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
 /// Reset the synchronized output mode. This is usually called by timer
 /// expiration from the termio thread.
 pub fn resetSynchronizedOutput(self: *Termio) void {
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     defer self.renderer_state.mutex.unlock();
     self.terminal.modes.set(.synchronized_output, false);
     self.renderer_wakeup.notify() catch {};
@@ -1055,7 +1105,7 @@ pub fn resetSynchronizedOutput(self: *Termio) void {
 /// Clear the screen.
 pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
     const cleared = clear: {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
         break :clear clearTerminalScreen(&self.terminal, history);
     };
@@ -1109,6 +1159,7 @@ fn clearTerminalScreen(t: *terminalpkg.Terminal, history: bool) ScreenClear {
         // Keep the screen clear consistent by dropping Kitty graphics
         // state alongside the text clear.
         t.screens.active.kitty_images.delete(
+            t.io(),
             t.screens.active.alloc,
             t,
             .{ .all = true },
@@ -1134,7 +1185,7 @@ pub fn scrollViewport(
     self: *Termio,
     scroll: terminalpkg.Terminal.ScrollViewport,
 ) void {
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     defer self.renderer_state.mutex.unlock();
     self.terminal.scrollViewport(scroll);
 }
@@ -1142,7 +1193,7 @@ pub fn scrollViewport(
 /// Jump the viewport to the prompt.
 pub fn jumpToPrompt(self: *Termio, delta: isize) !void {
     {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
         self.terminal.screens.active.scroll(.{ .delta_prompt = delta });
     }
@@ -1170,7 +1221,7 @@ pub fn ptyClear(self: *Termio, keep_cursor_row: bool) void {
         .exec => |*exec| exec.ptyClear(keep_cursor_row),
     };
     if (cleared) {
-        self.renderer_state.mutex.lock();
+        self.renderer_state.mutex.lockUncancelable();
         defer self.renderer_state.mutex.unlock();
         self.pty_clear_generation +%= 1;
     }
@@ -1178,7 +1229,7 @@ pub fn ptyClear(self: *Termio, keep_cursor_row: bool) void {
 
 /// Called when focus is gained or lost (when focus events are enabled)
 pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     const focus_event = self.renderer_state.terminal.modes.get(.focus_event);
     self.renderer_state.mutex.unlock();
 
@@ -1203,13 +1254,13 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 pub fn processOutput(self: *Termio, buf: []const u8) void {
     const semantic_output_epoch = self.terminal_output_transport.captureEpoch();
     const trace_lock = self.output_trace.enabled();
-    const lock_started = if (trace_lock) std.time.Instant.now() catch null else null;
-    var lock_acquired: ?std.time.Instant = null;
+    const lock_started: ?std.Io.Timestamp = if (trace_lock) .now(global.io(), .awake) else null;
+    var lock_acquired: ?std.Io.Timestamp = null;
     const decision = render: {
         // We are modifying terminal state from here on out and we need
         // the lock to grab our read data.
-        self.renderer_state.mutex.lock();
-        if (trace_lock) lock_acquired = std.time.Instant.now() catch null;
+        self.renderer_state.mutex.lockUncancelable();
+        if (trace_lock) lock_acquired = .now(global.io(), .awake);
         defer self.renderer_state.mutex.unlock();
         // Typing at a prompt often echoes only a cursor move (Left is a BS
         // or CUB), which marks nothing dirty but must still be drawn.
@@ -1254,13 +1305,13 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         };
     };
     if (trace_lock) {
-        const lock_released = std.time.Instant.now() catch null;
-        const wait_ns = if (lock_started != null and lock_acquired != null)
-            lock_acquired.?.since(lock_started.?)
+        const lock_released: std.Io.Timestamp = .now(global.io(), .awake);
+        const wait_ns: u64 = if (lock_started != null and lock_acquired != null)
+            @intCast(@max(0, lock_started.?.durationTo(lock_acquired.?).toNanoseconds()))
         else
             0;
-        const hold_ns = if (lock_acquired != null and lock_released != null)
-            lock_released.?.since(lock_acquired.?)
+        const hold_ns: u64 = if (lock_acquired) |acquired|
+            @intCast(@max(0, acquired.durationTo(lock_released).toNanoseconds()))
         else
             0;
         self.output_trace.noteProcessOutputLock(wait_ns, hold_ns);
@@ -1328,20 +1379,19 @@ fn processOutputLocked(self: *Termio, buf: []const u8) struct {
     // HEAVY read load, we don't want to send a ton of these so we
     // use a timer under the covers
     if (buf.len > 0) {
-        if (std.time.Instant.now()) |now| cursor_reset: {
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        cursor_reset: {
             if (self.last_cursor_reset) |last| {
-                if (now.since(last) <= (500 * std.time.ns_per_ms)) {
+                if (last.durationTo(now).toMilliseconds() <= 500) {
                     break :cursor_reset;
                 }
             }
 
             self.last_cursor_reset = now;
-            _ = self.renderer_mailbox.push(.{
+            _ = self.renderer_mailbox.push(global.io(), .{
                 .reset_cursor_blink = {},
             }, .{ .instant = {} });
             queued_renderer_message = true;
-        } else |err| {
-            log.warn("failed to get current time err={}", .{err});
         }
     }
 
@@ -1400,9 +1450,22 @@ pub fn shouldWakeRendererAfterOutput(
     return false;
 }
 
+/// Record a Kitty clipboard protocol session grant so future requests
+/// carrying the password skip the permission prompt.
+pub fn kittyClipboardGrant(
+    self: *Termio,
+    pw: []const u8,
+    dir: terminalpkg.kitty.clipboard.Grants.Direction,
+) error{OutOfMemory}!void {
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
+
+    try self.terminal_stream.handler.kittyClipboardGrant(pw, dir);
+}
+
 /// Sends a DSR response for the current color scheme to the pty.
 pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable();
     defer self.renderer_state.mutex.unlock();
 
     try self.colorSchemeReportLocked(td, force);
@@ -1424,6 +1487,30 @@ fn colorSchemeReportBytes(theme: configpkg.ConditionalState.Theme) []const u8 {
         .light => "\x1B[?997;2n",
         .dark => "\x1B[?997;1n",
     };
+}
+
+/// Sends a visibility report to the pty. Unforced reports are only sent while
+/// DEC mode 2033 is enabled.
+pub fn visibilityReport(
+    self: *Termio,
+    td: *ThreadData,
+    visible: bool,
+    force: bool,
+) !void {
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
+
+    if (!force and !self.renderer_state.terminal.modes.get(.report_visibility)) {
+        return;
+    }
+
+    var buf: [terminalpkg.device_status.max_visibility_report_encode_size]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try terminalpkg.device_status.encodeVisibilityReport(
+        &writer,
+        if (visible) .potentially_visible else .not_visible,
+    );
+    try self.queueWrite(td, writer.buffered(), false);
 }
 
 /// ThreadData is the data created and stored in the termio thread
@@ -1468,7 +1555,7 @@ test "clear screen at a prompt above blank rows leaves no scrollback" {
     const alloc = testing.allocator;
 
     for ([_]bool{ true, false }) |history| {
-        var t = try terminalpkg.Terminal.init(alloc, .{ .cols = 10, .rows = 15 });
+        var t = try terminalpkg.Terminal.init(std.testing.io, alloc, .{ .cols = 10, .rows = 15 });
         defer t.deinit(alloc);
 
         // Command output, then a prompt in the middle of the screen with
@@ -1501,7 +1588,7 @@ test "clear screen at a prompt above blank rows leaves no scrollback" {
 test "shared terminal dirty helper tracks visible terminal dirtiness" {
     const testing = std.testing;
 
-    var t = try terminalpkg.Terminal.init(testing.allocator, .{
+    var t = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 8,
         .rows = 4,
     });
@@ -1519,8 +1606,12 @@ test "shared terminal dirty helper tracks visible terminal dirtiness" {
     try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 
     t.flags.dirty = .{};
-    t.screens.active.kitty_images.dirty = true;
-    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
+    // The Kitty image storage's counter is never cleared, so a change
+    // shows against the snapshot of the last frame update (`needsFrame`).
+    const drawn: terminal_render_dirty.Undirtied = .init(&t);
+    try testing.expect(!terminal_render_dirty.needsFrame(&t, drawn));
+    t.screens.active.kitty_images.markDirty();
+    try testing.expect(terminal_render_dirty.needsFrame(&t, drawn));
 }
 
 test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pending render work" {
@@ -1589,17 +1680,20 @@ test "issue149 explicit config colors reach derived config and terminal colors" 
     try testing.expectEqual(config.palette.value[5], derived.palette[5]);
     try testing.expectEqual(conditional_state, derived.conditional_state);
 
-    var terminal = try terminalpkg.Terminal.init(testing.allocator, .{
+    var terminal = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
         .colors = .{
             .background = .init(derived.background.toTerminalRGB()),
             .foreground = .init(derived.foreground.toTerminalRGB()),
             .cursor = .unset,
-            .palette = .init(derived.palette),
+            .palette = .default,
         },
     });
     defer terminal.deinit(testing.allocator);
+    // As `Termio.init` sets it: the default palette may be an
+    // allocator-owned copy, so it is set once the terminal owns its memory.
+    try terminal.colors.palette.changeDefault(testing.allocator, derived.palette);
     try testing.expectEqual(config.background.toTerminalRGB(), terminal.colors.background.get().?);
     try testing.expectEqual(config.foreground.toTerminalRGB(), terminal.colors.foreground.get().?);
     try testing.expectEqual(config.palette.value[5], terminal.colors.palette.current[5]);
@@ -1684,7 +1778,7 @@ test "issue149 config change writes exactly one color scheme report" {
     io.backend = .{ .exec = undefined };
     io.config = try DerivedConfig.init(alloc, &config, .{ .theme = .light });
     defer io.config.deinit();
-    io.terminal = try terminalpkg.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+    io.terminal = try terminalpkg.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 24 });
     defer io.terminal.deinit(alloc);
 
     var renderer_mutex: renderer.StateMutex = .{};
@@ -1700,21 +1794,26 @@ test "issue149 config change writes exactly one color scheme report" {
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);
     defer app_queue.destroy(alloc);
-    io.terminal_stream = StreamHandler.Stream.initAlloc(alloc, .{
-        .alloc = alloc,
-        .size = undefined,
-        .terminal = &io.terminal,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = .{
-            .surface = undefined,
-            .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
+    io.terminal_stream = StreamHandler.Stream.init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .size = undefined,
+            .terminal = &io.terminal,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = .{
+                .surface = undefined,
+                .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
+            },
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
         },
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .@"16-bit",
-        .clipboard_write = .allow,
     });
     defer io.terminal_stream.deinit();
 
@@ -1735,11 +1834,11 @@ test "issue149 config change writes exactly one color scheme report" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
 
     var written: std.ArrayList(u8) = .empty;
     defer written.deinit(alloc);

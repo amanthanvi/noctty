@@ -1,9 +1,12 @@
 //! Open a local configuration document using the user's text editor association.
 const std = @import("std");
+const global = @import("../global.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const os_path = @import("path.zig");
 const os_windows = @import("windows.zig");
+const windows_ext = @import("windows_ext.zig");
 const local_path = @import("local_path.zig");
 
 pub const failure_message = "Could not open the config file in a text editor. Check that the file is accessible and a text editor is installed, then try again.";
@@ -38,23 +41,23 @@ comptime {
     }
 }
 
-extern "shell32" fn ShellExecuteExW(info: *ShellExecuteInfo) callconv(.winapi) windows.BOOL;
-extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, flags: u32) callconv(.winapi) windows.HRESULT;
+extern "shell32" fn ShellExecuteExW(info: *ShellExecuteInfo) callconv(.winapi) win32_types.BOOL;
+extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, flags: u32) callconv(.winapi) win32_types.HRESULT;
 extern "ole32" fn CoUninitialize() callconv(.winapi) void;
 
 pub fn open(alloc: std.mem.Allocator, path: []const u8) !void {
     return openWith(alloc, path, queryAssociation, execute);
 }
 
-fn queryAssociation(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
-    return os_windows.AssocQueryStringW(flags, str, assoc, extra, out, len);
+fn queryAssociation(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
+    return windows_ext.AssocQueryStringW(flags, str, assoc, extra, out, len);
 }
 
 fn execute(info: *ShellExecuteInfo) !bool {
     // Shell extensions may require COM. The CLI has no app runtime to set it
     // up, while the app may already have an apartment on this thread.
     const hr = CoInitializeEx(null, 0x2 | 0x4); // STA, disable OLE1 DDE
-    const changed_mode: windows.HRESULT = @bitCast(@as(u32, 0x80010106));
+    const changed_mode: win32_types.HRESULT = @bitCast(@as(u32, 0x80010106));
     if (hr < 0 and hr != changed_mode) return error.EditorComInitializationFailed;
     defer if (hr >= 0) CoUninitialize();
     return ShellExecuteExW(info) != 0;
@@ -76,7 +79,7 @@ fn openWith(alloc: std.mem.Allocator, path: []const u8, comptime query_associati
         .missing, .refused => return error.OpenConfigRejected,
     };
     defer found.deinit(alloc);
-    if ((try found.file.stat()).kind != .file) return error.OpenConfigRejected;
+    if ((try found.file.stat(global.io())).kind != .file) return error.OpenConfigRejected;
 
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, found.path);
     defer alloc.free(path_w);
@@ -110,7 +113,7 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
         var calls: usize = 0;
         var expected: []const u8 = "";
         var queries: usize = 0;
-        fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
+        fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
             queries += 1;
             try std.testing.expectEqual(@as(u32, 0), flags);
             try std.testing.expectEqual(@as(u32, 20), str); // ASSOCSTR_PROGID
@@ -145,8 +148,8 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
     Fake.queries = 0;
     Fake.fail = false;
     for ([_][]const u8{ "config.ghostty", "config" }) |name| {
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = "font-size = 12\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "font-size = 12\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
         Fake.expected = path;
         try openWith(alloc, path, Fake.query, Fake.executeFake);
@@ -161,7 +164,7 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
 test "SET text editor safety gates reject unsafe targets before shell dispatch" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const Fake = struct {
-        fn unexpectedQuery(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, _: ?[*]u16, _: *u32) !windows.HRESULT {
+        fn unexpectedQuery(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, _: ?[*]u16, _: *u32) !win32_types.HRESULT {
             return error.UnexpectedAssociationQuery;
         }
         fn unexpected(_: *ShellExecuteInfo) !bool {
@@ -176,7 +179,7 @@ test "SET text editor safety gates reject unsafe targets before shell dispatch" 
     }) |path| try std.testing.expectError(error.OpenConfigRejected, openWith(std.testing.allocator, path, Fake.unexpectedQuery, Fake.unexpected));
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expectError(error.OpenConfigRejected, openWith(std.testing.allocator, path, Fake.unexpectedQuery, Fake.unexpected));
 }
@@ -186,7 +189,7 @@ test "SET text editor query failure and invalid bounded ProgID never dispatch th
     const Fake = struct {
         const Mode = enum { failure, partial_success, oversized, zero_length, empty, unterminated, embedded_null, short_count };
         var mode: Mode = .failure;
-        fn query(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
+        fn query(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
             switch (mode) {
                 .failure => return @bitCast(@as(u32, 0x80070483)),
                 .partial_success => return 1,
@@ -214,8 +217,8 @@ test "SET text editor query failure and invalid bounded ProgID never dispatch th
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", std.testing.allocator);
     defer std.testing.allocator.free(path);
     for (std.enums.values(Fake.Mode)) |mode| {
         Fake.mode = mode;

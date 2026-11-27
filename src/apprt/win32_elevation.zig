@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("win32/sys.zig");
+const win32_types = @import("win32_types.zig");
 const configpkg = @import("../config.zig");
 
 const Allocator = std.mem.Allocator;
@@ -81,15 +83,25 @@ const ElevationCache = union(enum) {
 };
 
 var elevation_cache: ElevationCache = .unknown;
-var elevation_cache_mutex: std.Thread.Mutex = .{};
+
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+var elevation_cache_mutex: std.Io.Mutex = .init;
 
 /// Return whether the current process token is elevated.
 ///
 /// A successful result or query failure is cached for the process lifetime so
 /// callers on static CLI paths do not repeatedly open and inspect the token.
 pub fn isProcessElevated() !bool {
-    elevation_cache_mutex.lock();
-    defer elevation_cache_mutex.unlock();
+    elevation_cache_mutex.lockUncancelable(mutexIo());
+    defer elevation_cache_mutex.unlock(mutexIo());
 
     switch (elevation_cache) {
         .unknown => {},
@@ -130,10 +142,10 @@ pub fn processTokenElevationType() !TokenElevationType {
         @sizeOf(windows.DWORD),
         &returned_size,
     ) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     if (returned_size < @sizeOf(windows.DWORD)) return error.Unexpected;
-    return std.meta.intToEnum(TokenElevationType, raw_type) catch error.Unexpected;
+    return std.enums.fromInt(TokenElevationType, raw_type) orelse error.Unexpected;
 }
 
 /// Whether UAC elevates this process as the same account, which then reads
@@ -176,7 +188,7 @@ pub fn excludesSessionState(
 fn openProcessToken(process: windows.HANDLE) !windows.HANDLE {
     var token: ?windows.HANDLE = null;
     if (OpenProcessToken(process, token_query, &token) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     return token orelse error.Unexpected;
 }
@@ -191,7 +203,7 @@ fn tokenIsElevated(token: windows.HANDLE) !bool {
         @sizeOf(TokenElevation),
         &returned_size,
     ) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     if (returned_size < @sizeOf(TokenElevation)) return error.Unexpected;
     return elevation.token_is_elevated != 0;
@@ -210,7 +222,7 @@ fn allocTokenUser(
         &required_size,
     ) != 0) return error.Unexpected;
 
-    const size_error = windows.kernel32.GetLastError();
+    const size_error = std.os.windows.GetLastError();
     if (size_error != .INSUFFICIENT_BUFFER) return windows.unexpectedError(size_error);
     if (required_size < @sizeOf(TokenUser)) return error.Unexpected;
 
@@ -223,7 +235,7 @@ fn allocTokenUser(
         @ptrCast(bytes.ptr),
         @intCast(bytes.len),
         &returned_size,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
     if (returned_size < @sizeOf(TokenUser) or returned_size > bytes.len) {
         return error.Unexpected;
     }
@@ -243,7 +255,7 @@ fn allocCurrentUserSidString(alloc: Allocator) ![]u8 {
 
     var sid_string_w: ?[*:0]u16 = null;
     if (ConvertSidToStringSidW(tokenUser(user_bytes).user.sid, &sid_string_w) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     const sid_w = sid_string_w orelse return error.Unexpected;
     defer _ = LocalFree(@ptrCast(sid_w));
@@ -275,7 +287,7 @@ pub fn initElevatedPipeSecurity(alloc: Allocator) !IpcPipeSecurity {
         sddl_revision_1,
         &descriptor,
         null,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
 
     const owned_descriptor = descriptor orelse return error.Unexpected;
     return adoptPipeSecurityDescriptor(owned_descriptor);
@@ -291,7 +303,7 @@ pub fn adoptPipeSecurityDescriptor(descriptor: *anyopaque) IpcPipeSecurity {
         .attributes = .{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
             .lpSecurityDescriptor = descriptor,
-            .bInheritHandle = windows.FALSE,
+            .bInheritHandle = .FALSE,
         },
     };
 }
@@ -323,15 +335,15 @@ pub fn inspectPipeServerIdentity(
 ) !PipeServerIdentity {
     var server_process_id: windows.DWORD = 0;
     if (GetNamedPipeServerProcessId(pipe, &server_process_id) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     if (server_process_id == 0) return error.Unexpected;
 
     const server_process = OpenProcess(
         process_query_limited_information,
-        windows.FALSE,
+        win32_types.FALSE,
         server_process_id,
-    ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) orelse return windows.unexpectedError(std.os.windows.GetLastError());
     defer _ = windows.CloseHandle(server_process);
 
     const current_token = try openProcessToken(windows.GetCurrentProcess());
@@ -374,7 +386,7 @@ fn allocProcessImagePath(alloc: Allocator, process: windows.HANDLE) !?[]u16 {
 
     var len: windows.DWORD = @intCast(buf.len);
     if (QueryFullProcessImageNameW(process, 0, buf.ptr, &len) == 0) {
-        log.warn("failed to read process image path err={}", .{windows.kernel32.GetLastError()});
+        log.warn("failed to read process image path err={}", .{std.os.windows.GetLastError()});
         alloc.free(buf);
         return null;
     }
@@ -635,8 +647,8 @@ pub const LaunchResult = enum {
 /// path through `--working-directory` in buildRelaunchParameters.
 pub fn elevatedHostDirectory(alloc: Allocator) ![]const u8 {
     var buf: [windows.MAX_PATH:0]u16 = undefined;
-    const len = windows.kernel32.GetSystemDirectoryW(&buf, buf.len);
-    if (len == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    const len = win32_sys.GetSystemDirectoryW(&buf, buf.len);
+    if (len == 0) return windows.unexpectedError(std.os.windows.GetLastError());
     if (len >= buf.len) return error.NameTooLong;
     return std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..len]);
 }
@@ -649,7 +661,7 @@ pub fn launchElevated(
     cwd: ?[]const u8,
 ) !LaunchResult {
     var exe_buffer: [windows.PATH_MAX_WIDE + 1]u16 = undefined;
-    const exe = try windows.GetModuleFileNameW(
+    const exe = try win32_sys.getModuleFileNameW(
         null,
         &exe_buffer,
         @intCast(exe_buffer.len),
@@ -664,12 +676,12 @@ pub fn launchElevated(
 }
 
 const RealShellApi = struct {
-    fn shellExecute(_: @This(), info: *ShellExecuteInfoW) windows.BOOL {
+    fn shellExecute(_: @This(), info: *ShellExecuteInfoW) win32_types.BOOL {
         return ShellExecuteExW(info);
     }
 
     fn lastError(_: @This()) windows.Win32Error {
-        return windows.kernel32.GetLastError();
+        return std.os.windows.GetLastError();
     }
 };
 
@@ -712,7 +724,7 @@ fn launchElevatedWithShellApi(
     log.warn(
         "ShellExecuteExW runas failed win32_error={d} hInstApp=0x{x}",
         .{
-            @intFromEnum(err),
+            @backingInt(err),
             if (info.instance) |instance| @intFromPtr(instance) else 0,
         },
     );
@@ -723,7 +735,7 @@ extern "advapi32" fn OpenProcessToken(
     process: windows.HANDLE,
     desired_access: windows.DWORD,
     token: *?windows.HANDLE,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "advapi32" fn GetTokenInformation(
     token: windows.HANDLE,
@@ -731,33 +743,33 @@ extern "advapi32" fn GetTokenInformation(
     information: ?*anyopaque,
     information_size: windows.DWORD,
     return_size: *windows.DWORD,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "advapi32" fn ConvertSidToStringSidW(
     sid: *anyopaque,
     string_sid: *?[*:0]u16,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     string_security_descriptor: windows.LPCWSTR,
     string_sd_revision: windows.DWORD,
     security_descriptor: *?*anyopaque,
     security_descriptor_size: ?*windows.ULONG,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "advapi32" fn EqualSid(
     sid1: *anyopaque,
     sid2: *anyopaque,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn GetNamedPipeServerProcessId(
     pipe: windows.HANDLE,
     server_process_id: *windows.DWORD,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn OpenProcess(
     desired_access: windows.DWORD,
-    inherit_handle: windows.BOOL,
+    inherit_handle: win32_types.BOOL,
     process_id: windows.DWORD,
 ) callconv(.winapi) ?windows.HANDLE;
 
@@ -766,7 +778,7 @@ extern "kernel32" fn QueryFullProcessImageNameW(
     flags: windows.DWORD,
     exe_name: [*]u16,
     size: *windows.DWORD,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn LocalFree(
     memory: ?*anyopaque,
@@ -774,7 +786,7 @@ extern "kernel32" fn LocalFree(
 
 extern "shell32" fn ShellExecuteExW(
     info: *ShellExecuteInfoW,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 test "elevation launch boundary maps accepted UAC to launched" {
     const testing = std.testing;
@@ -786,7 +798,7 @@ test "elevation launch boundary maps accepted UAC to launched" {
         saw_parameters: bool = false,
         saw_cwd: bool = false,
 
-        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) windows.BOOL {
+        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) win32_types.BOOL {
             self.called = true;
             self.saw_runas = std.mem.eql(
                 u16,
@@ -808,7 +820,7 @@ test "elevation launch boundary maps accepted UAC to launched" {
                 std.mem.span(info.directory.?),
                 std.unicode.utf8ToUtf16LeStringLiteral("C:\\work"),
             );
-            return windows.TRUE;
+            return win32_types.TRUE;
         }
 
         fn lastError(_: *@This()) windows.Win32Error {
@@ -835,8 +847,8 @@ test "elevation launch boundary maps accepted UAC to launched" {
 
 test "elevation launch boundary maps UAC cancellation without an error" {
     const FakeShellApi = struct {
-        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) windows.BOOL {
-            return windows.FALSE;
+        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) win32_types.BOOL {
+            return win32_types.FALSE;
         }
 
         fn lastError(_: *@This()) windows.Win32Error {
@@ -859,8 +871,8 @@ test "elevation launch boundary maps UAC cancellation without an error" {
 
 test "elevation launch boundary maps non-cancellation Win32 failures to an error" {
     const FakeShellApi = struct {
-        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) windows.BOOL {
-            return windows.FALSE;
+        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) win32_types.BOOL {
+            return win32_types.FALSE;
         }
 
         fn lastError(_: *@This()) windows.Win32Error {
@@ -886,7 +898,7 @@ test "PKG48 elevated host starts in the system directory" {
     const host = try elevatedHostDirectory(testing.allocator);
     defer testing.allocator.free(host);
     var buf: [windows.MAX_PATH:0]u16 = undefined;
-    const len = windows.kernel32.GetSystemDirectoryW(&buf, buf.len);
+    const len = win32_sys.GetSystemDirectoryW(&buf, buf.len);
     try testing.expect(len > 0 and len < buf.len);
     const expected = try std.unicode.utf16LeToUtf8Alloc(testing.allocator, buf[0..len]);
     defer testing.allocator.free(expected);
@@ -900,14 +912,14 @@ test "elevation launch boundary omits lpDirectory when there is no host cwd" {
         saw_null_directory: bool = false,
         saw_parameters: bool = false,
 
-        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) windows.BOOL {
+        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) win32_types.BOOL {
             self.saw_null_directory = info.directory == null;
             self.saw_parameters = std.mem.eql(
                 u16,
                 std.mem.span(info.parameters.?),
                 std.unicode.utf8ToUtf16LeStringLiteral("--working-directory=/home/user"),
             );
-            return windows.TRUE;
+            return win32_types.TRUE;
         }
 
         fn lastError(_: *@This()) windows.Win32Error {
@@ -1106,8 +1118,8 @@ test "elevation relaunch parameters pass on --visual-studio-profiles with a vs: 
     // its command line.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "visual-studio-profiles = none\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "visual-studio-profiles = none\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
     const args = try alloc.alloc([]const u8, child_argv.len - 1);
@@ -1204,10 +1216,10 @@ test "elevated profile env wins over env in forwarded and included config files"
     // A forwarded --config-file that includes another file; both set `env`.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "outer.ghostty", .data = "env = MODE=outer\nconfig-file = inner.ghostty\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outer.ghostty", .data = "env = MODE=outer\nconfig-file = inner.ghostty\n" });
     // A file cannot use the relaunch argument to win either.
-    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\nelevated-profile-env = MODE=file\n" });
-    const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\nelevated-profile-env = MODE=file\n" });
+    const outer = try tmp.dir.realPathFileAlloc(std.testing.io, "outer.ghostty", alloc);
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
     const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
     const env = [_]configpkg.windows_shell.EnvEntry{
@@ -1256,11 +1268,11 @@ test "an elevated window names a file-defined profile, which the elevated proces
     const line = "cmd.exe /k \"\"C:\\Tools Dir\\init.cmd\" \"y&z\"\"";
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "outer.ghostty", .data = "profile-command = py: " ++ line ++ "\n" ++
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outer.ghostty", .data = "profile-command = py: " ++ line ++ "\n" ++
         "profile-env = py: TOKEN=s3cret-value\n" ++
         "config-file = inner.ghostty\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "command = vim.exe\ninitial-command = other.exe\n" });
-    const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "inner.ghostty", .data = "command = vim.exe\ninitial-command = other.exe\n" });
+    const outer = try tmp.dir.realPathFileAlloc(std.testing.io, "outer.ghostty", alloc);
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
     const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
 

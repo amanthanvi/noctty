@@ -16,7 +16,7 @@ zig-pkg/
 build-cmake/
 CMakeCache.txt
 CMakeFiles/
-/build.zig.zon.bak
+build.zig.zon.bak
 /result*
 /.nixos-test-history
 /.sandbox/
@@ -61,3 +61,4 @@ vgcore.*
 # Local flagship verification evidence.
 /test/windows/flagship/artifacts/
 /dist/artifacts/
+/sprite_face_test*

@@ -69,7 +69,7 @@ Assert-WorkflowContract `
     -Description 'source builds stage the bundled ConPTY unless the builder opts out'
 Assert-WorkflowContract `
     -Path $conptyBuildStep `
-    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?if \(installedMatches\(arena, bin, &staged\)\) return;.*?env\.remove\("PSModulePath"\);.*?\.env_map = &env,.*?b\.pathFromRoot\(stage_script\).*?0 => \{\s*if \(installedMatches\(arena, bin, &staged\)\) return;\s*return step\.fail\(.*?exit_not_downloaded => \{.*?break :reason "the package could not be fetched";.*?return step\.fail\(.*?bin\.deleteFile\(file\.name\)' `
+    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?run\.has_side_effects = true;.*?run\.addFileArg\(b\.path\(stage_script\)\);.*?run\.addDirectoryArg\(b\.graph\.path\(\.install_bin, ""\)\);.*?b\.getInstallStep\(\)\.dependOn\(&run\.step\);.*?if \(installedMatches\(io, arena, bin, &staged\)\) return;.*?_ = env\.swapRemove\("PSModulePath"\);.*?\.environ_map = &env,.*?"-File",\s*script,.*?0 => \{\s*if \(installedMatches\(io, arena, bin, &staged\)\) return;\s*fail\(.*?exit_not_downloaded => \{.*?break :reason "the package could not be fetched";.*?fail\(.*?bin\.deleteFile\(io, file\.name\)' `
     -Description 'source builds restage only through the release helper with a clean PSModulePath, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
 Assert-WorkflowContract `
     -Path $conptyStageScript `
@@ -164,12 +164,12 @@ $releaseCommonScript = Join-Path $repoRoot 'scripts\common.ps1'
 $publishedReleaseVerifierScript = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 Assert-WorkflowContract `
     -Path $releaseCommonScript `
-    -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll" `
+    -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/noctty-terminal-handoff-proxy\.dll" `
     -Description 'the shared signed-runtime payload list covers every PE noctty ships and signs'
-# noctty/ghostty-vt.dll in that list is the placeholder, not libghostty-vt
-# (src/build/GhosttyVtStub.zig). It is signed in the same staging loop as the
-# other runtime PEs, then checked to be the placeholder; the old portable
-# updaters require a pinned-publisher signature on every payload DLL.
+# Each PE in that list is signed in the one runtime staging loop: the portable
+# updaters require a pinned-publisher signature on every noctty-built payload
+# DLL. (Until v1.4.100 this check also held the staging of the portable ZIP's
+# ghostty-vt.dll placeholder and the check that it was the placeholder.)
 # Read through PowerShell's parser, not as text: a line comment, a block
 # comment or a here-string around a required call leaves no command there, so
 # it fails the contract as a deleted call does, and so does a signing filter
@@ -178,7 +178,7 @@ Assert-WorkflowContract `
 # parses proves nothing, so every control must still parse and must fail the
 # contract. (Deliberately dead code, such as `if ($false)`, is for review to
 # catch.)
-function Get-PlaceholderStagingProblems {
+function Get-RuntimeStagingProblems {
     param([Parameter(Mandatory)] [string] $ScriptText)
 
     $tokens = $null
@@ -190,17 +190,6 @@ function Get-PlaceholderStagingProblems {
         return , $problems
     }
     $isCommand = { param($node) $node -is [System.Management.Automation.Language.CommandAst] }
-
-    $listsStub = @($ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$runtimeFiles'
-    }, $true) | Where-Object {
-        @($_.Right.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -eq 'ghostty-vt-stub\ghostty-vt.dll'
-        }, $true)).Count -gt 0
-    })
-    if ($listsStub.Count -eq 0) { $problems.Add('$runtimeFiles does not list ghostty-vt-stub\ghostty-vt.dll') }
 
     $stagingLoop = @($ast.FindAll({
         param($node)
@@ -215,7 +204,7 @@ function Get-PlaceholderStagingProblems {
         return , $problems
     }
     # The loop signs by extension; an `if` around the signing call must
-    # still take a .dll, or the placeholder ships unsigned.
+    # still take a .dll, or a noctty-built DLL ships unsigned.
     $signCall = @($stagingLoop.Body.FindAll($isCommand, $true) | Where-Object { $_.GetCommandName() -eq 'Invoke-SignFile' }) | Select-Object -First 1
     for ($node = $signCall.Parent; $null -ne $node -and $node -ne $stagingLoop; $node = $node.Parent) {
         if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) { continue }
@@ -228,31 +217,17 @@ function Get-PlaceholderStagingProblems {
             if (-not $takesDll) { $problems.Add('the staging loop signs only behind a condition that does not take ".dll"') }
         }
     }
-
-    $commands = @($ast.FindAll($isCommand, $true))
-    $zipPhase = $commands | Where-Object { $_.GetCommandName() -eq 'Write-Host' -and $_.Extent.Text -match 'Packaging phase: create portable zip' } | Select-Object -First 1
-    if ($null -eq $zipPhase) {
-        $problems.Add('the portable zip phase is missing')
-        return , $problems
-    }
-    $stubCheck = $commands | Where-Object {
-        $_.GetCommandName() -eq 'Assert-GhosttyVtStub' -and
-        $_.Extent.Text -match 'Join-Path \$portableRoot "ghostty-vt\.dll"' -and
-        $_.Extent.StartOffset -gt $stagingLoop.Extent.EndOffset -and
-        $_.Extent.StartOffset -lt $zipPhase.Extent.StartOffset
-    } | Select-Object -First 1
-    if ($null -eq $stubCheck) { $problems.Add('the staged ghostty-vt.dll is not checked to be the placeholder (Assert-GhosttyVtStub) before the portable zip is made') }
     return , $problems
 }
 
 $windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
-$stagingProblems = Get-PlaceholderStagingProblems -ScriptText $windowsPackagerText
+$stagingProblems = Get-RuntimeStagingProblems -ScriptText $windowsPackagerText
 if ($stagingProblems.Count -gt 0) {
-    throw "Workflow contract missing: the ghostty-vt.dll placeholder is staged, signed and verified with the other runtime PEs, and checked to be the placeholder before the portable zip is made: $($stagingProblems -join '; ') ($windowsPackager)"
+    throw "Workflow contract missing: every runtime PE is staged, signed and verified in one loop whose signing takes .dll files: $($stagingProblems -join '; ') ($windowsPackager)"
 }
 $runtimeLoopStart = $windowsPackagerText.IndexOf('foreach ($runtimeFile in $runtimeFiles) {')
 if ($runtimeLoopStart -lt 0) { throw "Contract control: the runtime staging loop is missing ($windowsPackager)" }
-function Assert-PlaceholderControlFails {
+function Assert-StagingControlFails {
     param([Parameter(Mandatory)] [string] $ScriptText, [Parameter(Mandatory)] [string] $What)
 
     # Checked with the parser itself, not by the wording of the contract's
@@ -263,20 +238,17 @@ function Assert-PlaceholderControlFails {
     if (@($controlParseErrors).Count -gt 0) {
         throw "Contract control is invalid: with $What the packager no longer parses, so the contract would fail for that reason alone ($($controlParseErrors[0].Message))"
     }
-    $controlProblems = Get-PlaceholderStagingProblems -ScriptText $ScriptText
+    $controlProblems = Get-RuntimeStagingProblems -ScriptText $ScriptText
     if ($controlProblems.Count -eq 0) {
-        throw "Contract control failed: the placeholder staging contract still passes with $What"
+        throw "Contract control failed: the runtime staging contract still passes with $What"
     }
 }
 
 foreach ($requiredCall in @(
-    '"ghostty-vt-stub\ghostty-vt.dll",',
     'Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath',
-    'Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig',
-    'Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")'
+    'Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig'
 )) {
-    $searchFrom = if ($requiredCall.StartsWith('"')) { 0 } else { $runtimeLoopStart }
-    $callIndex = $windowsPackagerText.IndexOf($requiredCall, $searchFrom)
+    $callIndex = $windowsPackagerText.IndexOf($requiredCall, $runtimeLoopStart)
     if ($callIndex -lt 0) { throw "Contract control: '$requiredCall' is missing from $windowsPackager" }
     if ($windowsPackagerText.IndexOf($requiredCall, $callIndex + $requiredCall.Length) -ge 0) { throw "Contract control: '$requiredCall' occurs more than once in $windowsPackager; anchor each control on a line that occurs once" }
     # A control must disable the whole line: an anchor that stops short leaves
@@ -295,12 +267,12 @@ foreach ($requiredCall in @(
         @{ How = 'inside a here-string'; Text = $before + "@'`n" + $requiredCall + "`n'@" + $after },
         @{ How = 'deleted'; Text = $before + $after }
     )) {
-        Assert-PlaceholderControlFails -ScriptText $disabled.Text -What "'$requiredCall' $($disabled.How)"
+        Assert-StagingControlFails -ScriptText $disabled.Text -What "'$requiredCall' $($disabled.How)"
     }
 }
 $signFilter = '@(".com", ".exe", ".dll") -contains'
 if ($windowsPackagerText.IndexOf($signFilter, $runtimeLoopStart) -lt 0) { throw "Contract control: the staging loop's signing filter '$signFilter' is missing from $windowsPackager" }
-Assert-PlaceholderControlFails -ScriptText $windowsPackagerText.Replace($signFilter, '@(".com", ".exe") -contains') -What '".dll" dropped from the signing filter'
+Assert-StagingControlFails -ScriptText $windowsPackagerText.Replace($signFilter, '@(".com", ".exe") -contains') -What '".dll" dropped from the signing filter'
 foreach ($payloadConsumer in @(
     $releaseArtifactVerifier,
     $publishedReleaseVerifierScript,
@@ -312,7 +284,7 @@ foreach ($payloadConsumer in @(
         -Description "release gate $(Split-Path -Leaf $payloadConsumer) derives its payload set from the shared signed-runtime list"
     Assert-WorkflowContractAbsent `
         -Path $payloadConsumer `
-        -Pattern "'noctty/ghostty-vt\.dll'" `
+        -Pattern "'noctty/noctty-terminal-handoff-proxy\.dll'" `
         -Description "release gate $(Split-Path -Leaf $payloadConsumer) does not hardcode a parallel payload list"
 }
 Assert-WorkflowContract `

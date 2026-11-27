@@ -15,14 +15,19 @@
 //! the user's own entries, flags and order stay as they are, and no Windows
 //! path is exported (`TERMINFO` never is).
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
 const windows = std.os.windows;
 const windows_shell = @import("../config.zig").windows_shell;
 const os_path = @import("../os/path.zig");
 const os_windows = @import("../os/windows.zig");
+const windows_ext = @import("../os/windows_ext.zig");
 const Command = @import("../Command.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.wsl_env);
 
@@ -128,11 +133,11 @@ pub fn cmdAutoRunAbsent() bool {
     return cmdAutoRunAbsentWithQuery(struct {
         fn query(root: windows.HKEY, view: windows.DWORD) windows.LSTATUS {
             var bytes: windows.DWORD = 0;
-            return windows.advapi32.RegGetValueW(
+            return win32_sys.RegGetValueW(
                 root,
                 std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Command Processor"),
                 std.unicode.utf8ToUtf16LeStringLiteral("AutoRun"),
-                windows.advapi32.RRF.RT_ANY | windows.advapi32.RRF.NOEXPAND | view,
+                win32_types.RRF.RT_ANY | win32_types.RRF.NOEXPAND | view,
                 null,
                 null,
                 &bytes,
@@ -143,8 +148,8 @@ pub fn cmdAutoRunAbsent() bool {
 
 fn cmdAutoRunAbsentWithQuery(query: anytype) bool {
     for ([_]windows.HKEY{ windows.HKEY_CURRENT_USER, windows.HKEY_LOCAL_MACHINE }) |root| {
-        for ([_]windows.DWORD{ windows.advapi32.RRF.SUBKEY_WOW6432KEY, windows.advapi32.RRF.SUBKEY_WOW6464KEY }) |view| {
-            if (query(root, view) != @intFromEnum(windows.Win32Error.FILE_NOT_FOUND)) return false;
+        for ([_]windows.DWORD{ win32_types.RRF.SUBKEY_WOW6432KEY, win32_types.RRF.SUBKEY_WOW6464KEY }) |view| {
+            if (query(root, view) != @backingInt(windows.Win32Error.FILE_NOT_FOUND)) return false;
         }
     }
     return true;
@@ -162,7 +167,7 @@ fn splitWords(alloc: Allocator, line: []const u8) Allocator.Error![]const [:0]co
             quoted = !quoted;
             in_word = true;
         } else if (!quoted and std.ascii.isWhitespace(c)) {
-            if (in_word) try out.append(alloc, try alloc.dupeZ(u8, word.items));
+            if (in_word) try out.append(alloc, try alloc.dupeSentinel(u8, word.items, 0));
             word.clearRetainingCapacity();
             in_word = false;
         } else {
@@ -170,7 +175,7 @@ fn splitWords(alloc: Allocator, line: []const u8) Allocator.Error![]const [:0]co
             in_word = true;
         }
     }
-    if (in_word) try out.append(alloc, try alloc.dupeZ(u8, word.items));
+    if (in_word) try out.append(alloc, try alloc.dupeSentinel(u8, word.items, 0));
     return out.toOwnedSlice(alloc);
 }
 
@@ -188,7 +193,7 @@ fn listed(wslenv: []const u8, name: []const u8) bool {
 /// Add each of `names` that `env` holds and `WSLENV` does not list yet to
 /// `WSLENV` as `NAME/u`, after the entries already there.
 pub fn forward(env: *EnvMap, names: []const []const u8) !void {
-    const alloc = env.hash_map.allocator;
+    const alloc = env.allocator;
     const existing = env.get("WSLENV") orelse "";
 
     var merged: std.ArrayList(u8) = .empty;
@@ -293,12 +298,12 @@ fn readDefaultDistribution() ?DefaultDistribution {
     if (comptime builtin.os.tag != .windows) return null;
     return defaultDistributionWithQuery(struct {
         fn query(buf: *[39]u16, bytes: *windows.DWORD) windows.LSTATUS {
-            return windows.advapi32.RegGetValueW(
+            return win32_sys.RegGetValueW(
                 windows.HKEY_CURRENT_USER,
                 std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"),
                 std.unicode.utf8ToUtf16LeStringLiteral("DefaultDistribution"),
-                windows.advapi32.RRF.RT_REG_SZ | windows.advapi32.RRF.NOEXPAND |
-                    windows.advapi32.RRF.SUBKEY_WOW6464KEY,
+                win32_types.RRF.RT_REG_SZ | win32_types.RRF.NOEXPAND |
+                    win32_types.RRF.SUBKEY_WOW6464KEY,
                 null,
                 @ptrCast(buf),
                 bytes,
@@ -310,7 +315,7 @@ fn readDefaultDistribution() ?DefaultDistribution {
 fn defaultDistributionWithQuery(query: anytype) ?DefaultDistribution {
     var buf: [39]u16 = @splat(0);
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-    if (query(&buf, &bytes) != @intFromEnum(windows.Win32Error.SUCCESS) or
+    if (query(&buf, &bytes) != @backingInt(windows.Win32Error.SUCCESS) or
         bytes != @sizeOf(@TypeOf(buf)) or buf[38] != 0) return null;
     // WSL stores a braced GUID. Validate before using it as an identity,
     // including rejecting embedded NULs and truncated registry strings.
@@ -336,12 +341,12 @@ fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
     subkey[subkey.len] = 0;
     return distributionNameWithQuery(alloc, &subkey, struct {
         fn query(key: [*:0]const u16, buf: *[257]u16, bytes: *windows.DWORD) windows.LSTATUS {
-            return windows.advapi32.RegGetValueW(
+            return win32_sys.RegGetValueW(
                 windows.HKEY_CURRENT_USER,
                 key,
                 std.unicode.utf8ToUtf16LeStringLiteral("DistributionName"),
-                windows.advapi32.RRF.RT_REG_SZ | windows.advapi32.RRF.NOEXPAND |
-                    windows.advapi32.RRF.SUBKEY_WOW6464KEY,
+                win32_types.RRF.RT_REG_SZ | win32_types.RRF.NOEXPAND |
+                    win32_types.RRF.SUBKEY_WOW6464KEY,
                 null,
                 @ptrCast(buf),
                 bytes,
@@ -353,7 +358,7 @@ fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
 fn distributionNameWithQuery(alloc: Allocator, key: [*:0]const u16, query: anytype) ?[]u8 {
     var buf: [257]u16 = @splat(0);
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-    if (query(key, &buf, &bytes) != @intFromEnum(windows.Win32Error.SUCCESS) or
+    if (query(key, &buf, &bytes) != @backingInt(windows.Win32Error.SUCCESS) or
         bytes < 4 or bytes > @sizeOf(@TypeOf(buf)) or bytes % 2 != 0) return null;
     const len = bytes / 2 - 1;
     if (buf[len] != 0) return null;
@@ -377,8 +382,8 @@ fn validDistributionName(name: []const u8) bool {
 /// executable lookup; GetDriveType reads the local drive table.
 fn isLocalAbsolute(path: []const u8) bool {
     if (os_path.isNetworkOrDevicePath(path) or !windows_shell.isDriveAbsolutePath(path)) return false;
-    return switch (os_windows.driveTypeForLetter(path[0])) {
-        os_windows.DRIVE_FIXED, os_windows.DRIVE_REMOVABLE, os_windows.DRIVE_RAMDISK => true,
+    return switch (windows_ext.driveTypeForLetter(path[0])) {
+        windows_ext.DRIVE_FIXED, windows_ext.DRIVE_REMOVABLE, windows_ext.DRIVE_RAMDISK => true,
         else => false,
     };
 }
@@ -391,14 +396,17 @@ fn localPathState(path: []const u8) LocalPath {
     if (comptime builtin.os.tag != .windows) return .unsafe;
     if (!isLocalAbsolute(path)) return .unsafe;
     var handle: windows.HANDLE = undefined;
-    const status = windows_shell.ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle) orelse
+    // The access mask as 0.15's DWORD `ACCESS_MASK`, cast to whichever form
+    // `ntOpenDontReparse` takes (0.17's packed `ACCESS_MASK` or a DWORD).
+    const access: windows.DWORD = win32_types.FILE_READ_ATTRIBUTES;
+    const status = windows_shell.ntOpenDontReparse(path, @bitCast(access), 0, &handle) orelse
         return .unsafe;
     switch (status) {
         .SUCCESS => {},
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return .missing,
         else => return .unsafe,
     }
-    std.posix.close(handle);
+    windows.CloseHandle(handle);
     return .safe;
 }
 
@@ -493,8 +501,8 @@ const Answer = enum { pending, yes, no };
 const ProbeEntry = struct { answer: Answer, generation: u64 };
 var probe_cache: std.AutoHashMapUnmanaged(u64, ProbeEntry) = .empty;
 var probe_generation: u64 = 0;
-var probe_mutex: std.Thread.Mutex = .{};
-var probe_done: std.Thread.Condition = .{};
+var probe_mutex: std.Io.Mutex = .init;
+var probe_done: std.Io.Condition = .init;
 
 /// Whether the distribution that `argv` (a `wsl.exe` launch) starts has a
 /// terminfo entry for `term`, asked of the distribution itself with
@@ -514,7 +522,7 @@ fn distroHasTerminfo(
 
     const probe = (probeArgv(alloc, argv, term) catch return false) orelse return false;
     defer alloc.free(probe);
-    const inherited_cwd = if (launch_cwd == null) std.process.getCwdAlloc(alloc) catch return false else null;
+    const inherited_cwd = if (launch_cwd == null) std.process.currentPathAlloc(global.io(), alloc) catch return false else null;
     defer if (inherited_cwd) |cwd| alloc.free(cwd);
     const cwd = launch_cwd orelse inherited_cwd.?;
     const exe = (localExecutable(alloc, env, probe[0], cwd) catch return false) orelse return false;
@@ -559,12 +567,12 @@ fn cachedProbeWithHost(
     }
     const key = probeKey(alloc, env, pinned orelse probe, cwd, default_distro) catch return false;
 
-    probe_mutex.lock();
+    probe_mutex.lockUncancelable(global.io());
     var waited_generation: ?u64 = null;
     while (true) {
         const known = probe_cache.get(key) orelse {
             if (waited_generation != null) {
-                probe_mutex.unlock();
+                probe_mutex.unlock(global.io());
                 return false;
             }
             break;
@@ -573,13 +581,13 @@ fn cachedProbeWithHost(
         // Existing waiters share only their original attempt's outcome.
         if (waited_generation) |generation| {
             if (known.generation != generation) {
-                probe_mutex.unlock();
+                probe_mutex.unlock(global.io());
                 return false;
             }
         }
         switch (known.answer) {
             .yes, .no => {
-                probe_mutex.unlock();
+                probe_mutex.unlock(global.io());
                 if (!defaultStillMatches(alloc, default_distro, name, Host)) return false;
                 return known.answer == .yes;
             },
@@ -587,16 +595,16 @@ fn cachedProbeWithHost(
             .pending => {
                 if (waited_generation == null and @hasDecl(Host, "beforeWait")) Host.beforeWait();
                 waited_generation = known.generation;
-                probe_done.wait(&probe_mutex);
+                probe_done.waitUncancelable(global.io(), &probe_mutex);
             },
         }
     }
     probe_generation +%= 1;
     probe_cache.put(std.heap.page_allocator, key, .{ .answer = .pending, .generation = probe_generation }) catch {
-        probe_mutex.unlock();
+        probe_mutex.unlock(global.io());
         return false;
     };
-    probe_mutex.unlock();
+    probe_mutex.unlock(global.io());
 
     const answer = if (defaultStillMatches(alloc, default_distro, name, Host)) result: {
         const probed = Host.run(alloc, env, pinned orelse probe, cwd);
@@ -606,14 +614,14 @@ fn cachedProbeWithHost(
         break :result if (defaultStillMatches(alloc, default_distro, name, Host)) probed else null;
     } else null;
 
-    probe_mutex.lock();
-    defer probe_mutex.unlock();
+    probe_mutex.lockUncancelable(global.io());
+    defer probe_mutex.unlock(global.io());
     if (answer) |yes| {
         probe_cache.getPtr(key).?.answer = if (yes) .yes else .no;
     } else {
         _ = probe_cache.remove(key);
     }
-    probe_done.broadcast();
+    probe_done.broadcast(global.io());
     return answer orelse false;
 }
 
@@ -642,29 +650,29 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
     defer arena.deinit();
     const temp = arena.allocator();
     const args = temp.alloc([:0]const u8, probe.len) catch return null;
-    for (probe, args) |arg, *dest| dest.* = temp.dupeZ(u8, arg) catch return null;
+    for (probe, args) |arg, *dest| dest.* = temp.dupeSentinel(u8, arg, 0) catch return null;
     var sa: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
-        .bInheritHandle = windows.TRUE,
+        .bInheritHandle = .TRUE,
         .lpSecurityDescriptor = null,
     };
-    const nul = windows.OpenFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
-        .access_mask = windows.GENERIC_READ | windows.GENERIC_WRITE | windows.SYNCHRONIZE,
-        .share_access = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
-        .creation = windows.OPEN_EXISTING,
+    const nul = win32_sys.openFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
+        .access_mask = win32_types.GENERIC_READ | win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
+        .share_access = win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
+        .creation = win32_types.OPEN_EXISTING,
         .sa = &sa,
     }) catch return null;
-    defer std.posix.close(nul);
+    defer windows.CloseHandle(nul);
     // Command uses an exact lpApplicationName for the absolute path. Unlike
     // std.Child, it never tries wsl.exe.cmd through the parent's PATHEXT.
     var child: Command = .{
         .path = args[0],
         .args = args,
         .env = env,
-        .cwd = cwd,
-        .stdin = .{ .handle = nul },
-        .stdout = .{ .handle = nul },
-        .stderr = .{ .handle = nul },
+        .cwd = temp.dupeSentinel(u8, cwd, 0) catch return null,
+        .stdin = .{ .handle = nul, .flags = .{ .nonblocking = false } },
+        .stdout = .{ .handle = nul, .flags = .{ .nonblocking = false } },
+        .stderr = .{ .handle = nul, .flags = .{ .nonblocking = false } },
         .windows_create_no_window = true,
         .os_pre_exec = null,
         .rt_pre_exec = null,
@@ -677,11 +685,11 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
         return null;
     };
 
-    defer std.posix.close(child.pid.?);
-    windows.WaitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
+    defer windows.CloseHandle(child.pid.?);
+    win32_sys.waitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
         log.warn("terminfo probe did not finish err={}", .{err});
-        _ = windows.kernel32.TerminateProcess(child.pid.?, 1);
-        windows.WaitForSingleObjectEx(child.pid.?, 5000, false) catch {};
+        _ = win32_sys.TerminateProcess(child.pid.?, 1);
+        win32_sys.waitForSingleObjectEx(child.pid.?, 5000, false) catch {};
         return probeExitAnswer(null);
     };
     const result = child.wait(true) catch return null;
@@ -875,7 +883,7 @@ test "automatic TERM refuses unresolved direct executables" {
         "wsl.exe",                    ".\\wsl.exe",           "C:wsl.exe", "\\wsl.exe",
         "\\\\server\\share\\wsl.exe", "\\\\.\\pipe\\wsl.exe",
     }) |exe| try std.testing.expect(!canProbeDirect(exe));
-    const cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
     defer std.testing.allocator.free(cwd);
     const exe = try std.fs.path.join(std.testing.allocator, &.{ cwd, "wsl.exe" });
     defer std.testing.allocator.free(exe);
@@ -908,7 +916,7 @@ test "CMD AutoRun must be absent in both hives and registry views" {
         fn query(_: windows.HKEY, _: windows.DWORD) windows.LSTATUS {
             defer calls += 1;
             if (bad_call == calls) return status;
-            return @intFromEnum(windows.Win32Error.FILE_NOT_FOUND);
+            return @backingInt(windows.Win32Error.FILE_NOT_FOUND);
         }
     };
     Queries.calls = 0;
@@ -916,7 +924,7 @@ test "CMD AutoRun must be absent in both hives and registry views" {
     try std.testing.expect(cmdAutoRunAbsentWithQuery(Queries.query));
     try std.testing.expectEqual(@as(usize, 4), Queries.calls);
     for (0..4) |bad| {
-        for ([_]windows.LSTATUS{ 0, @intFromEnum(windows.Win32Error.ACCESS_DENIED) }) |status| {
+        for ([_]windows.LSTATUS{ 0, @backingInt(windows.Win32Error.ACCESS_DENIED) }) |status| {
             Queries.calls = 0;
             Queries.bad_call = bad;
             Queries.status = status;
@@ -1166,7 +1174,7 @@ test "WSLCACHE registry query rejects errors and malformed default IDs" {
     Query.status = 0;
     try std.testing.expectEqual(Query.id[0..38].*, defaultDistributionWithQuery(Query.query));
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
-        Query.status = @intFromEnum(err);
+        Query.status = @intCast(@backingInt(err));
         try std.testing.expectEqual(null, defaultDistributionWithQuery(Query.query));
     }
     Query.status = 0;
@@ -1207,7 +1215,7 @@ test "WSLCACHE registry name query validates strings without starting WSL" {
     defer alloc.free(actual);
     try std.testing.expectEqualStrings("Ubuntu-24.04_amd64", actual);
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
-        Query.status = @intFromEnum(err);
+        Query.status = @intCast(@backingInt(err));
         try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
     }
     Query.status = 0;
@@ -1261,7 +1269,7 @@ test "WSLCACHE invalid names use the unpinned uncached probe" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
     const probe = &[_][]const u8{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" };
-    for ([_][]const u8{ "", "Ubuntu Space", "Ubuntu-é", "a/b", "a\\b", "a\"b", "a" ** 257 }) |name| {
+    for ([_][]const u8{ "", "Ubuntu Space", "Ubuntu-é", "a/b", "a\\b", "a\"b", comptime win32_repeat.repeat("a", 257) }) |name| {
         Host.name = name;
         const before = Host.calls;
         try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\invalid", Host));
@@ -1270,7 +1278,7 @@ test "WSLCACHE invalid names use the unpinned uncached probe" {
         try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
     }
     try std.testing.expect(!Host.bad_argv);
-    try std.testing.expect(validDistributionName("a" ** 256));
+    try std.testing.expect(validDistributionName(comptime win32_repeat.repeat("a", 256)));
     try std.testing.expect(validDistributionName("A0._-z"));
 }
 
@@ -1288,8 +1296,8 @@ test "WSLCACHE successive unanswered attempts on one key get different generatio
         fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
             // The caller owns the table's only entry and has left it pending.
             // Read the generation it was given, as a waiter would.
-            probe_mutex.lock();
-            defer probe_mutex.unlock();
+            probe_mutex.lockUncancelable(std.testing.io);
+            defer probe_mutex.unlock(std.testing.io);
             var entries = probe_cache.valueIterator();
             const entry = entries.next() orelse return null;
             if (entry.answer == .pending) pending_seen += 1;
@@ -1325,8 +1333,8 @@ test "WSLCACHE successive unanswered attempts on one key get different generatio
 
 test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces it" {
     const Host = struct {
-        var mutex: std.Thread.Mutex = .{};
-        var changed: std.Thread.Condition = .{};
+        var mutex: std.Io.Mutex = .init;
+        var changed: std.Io.Condition = .init;
         var entered = false;
         var release = false;
         var waiting: usize = 0;
@@ -1338,39 +1346,39 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         fn distributionName(alloc: Allocator, _: DefaultDistribution) ?[]u8 {
             return alloc.dupe(u8, "Ubuntu") catch null;
         }
-        fn beforeWait() void {
-            mutex.lock();
-            defer mutex.unlock();
+        pub fn beforeWait() void {
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             waiting += 1;
-            changed.broadcast();
+            changed.broadcast(std.testing.io);
         }
         fn waitFor(count: usize) !void {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             while (!(if (count == 0) entered else waiting >= count))
-                try changed.timedWait(&mutex, 30 * std.time.ns_per_s);
+                try changed.waitTimeout(std.testing.io, &mutex, .{ .duration = .{ .raw = .fromNanoseconds(30 * std.time.ns_per_s), .clock = .awake } });
         }
         fn waitForFinished(count: usize) !void {
-            mutex.lock();
-            defer mutex.unlock();
-            while (finished < count) try changed.timedWait(&mutex, 30 * std.time.ns_per_s);
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
+            while (finished < count) try changed.waitTimeout(std.testing.io, &mutex, .{ .duration = .{ .raw = .fromNanoseconds(30 * std.time.ns_per_s), .clock = .awake } });
         }
         fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             calls += 1;
             if (calls > 1) return true;
             entered = true;
-            changed.broadcast();
-            while (!release) changed.wait(&mutex);
+            changed.broadcast(std.testing.io);
+            while (!release) changed.waitUncancelable(std.testing.io, &mutex);
             return null; // Stubbed timeout; never starts WSL.
         }
         fn launch(alloc: Allocator, env: *const EnvMap, answer: *bool) void {
             answer.* = cachedProbeWithHost(alloc, env, &.{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" }, "C:\\waiters", @This());
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             finished += 1;
-            changed.broadcast();
+            changed.broadcast(std.testing.io);
         }
     };
     defer {
@@ -1403,10 +1411,10 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         var waiters: [4]std.Thread = undefined;
         var spawned: usize = 0;
         defer {
-            Host.mutex.lock();
+            Host.mutex.lockUncancelable(std.testing.io);
             Host.release = true;
-            Host.changed.broadcast();
-            Host.mutex.unlock();
+            Host.changed.broadcast(std.testing.io);
+            Host.mutex.unlock(std.testing.io);
             for (waiters[0..spawned]) |waiter| waiter.join();
         }
         try Host.waitFor(0);
@@ -1421,19 +1429,19 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
             // owner until all waiters finish so another pending generation alone
             // must release them; no scheduler timing or WSL process is involved.
             {
-                probe_mutex.lock();
-                defer probe_mutex.unlock();
+                probe_mutex.lockUncancelable(std.testing.io);
+                defer probe_mutex.unlock(std.testing.io);
                 var entries = probe_cache.valueIterator();
                 const entry = entries.next() orelse return error.TestUnexpectedResult;
                 entry.generation +%= 1;
-                probe_done.broadcast();
+                probe_done.broadcast(std.testing.io);
             }
             try Host.waitForFinished(waiters.len);
         }
-        Host.mutex.lock();
+        Host.mutex.lockUncancelable(std.testing.io);
         Host.release = true;
-        Host.changed.broadcast();
-        Host.mutex.unlock();
+        Host.changed.broadcast(std.testing.io);
+        Host.mutex.unlock(std.testing.io);
         for (waiters) |waiter| waiter.join();
         spawned = 0;
         owner.join();
@@ -1455,9 +1463,9 @@ test "WSLCACHE runProbe treats exit minus one as unanswered" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
-    var env = try std.process.getEnvMap(alloc);
+    var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
     const root = env.get("SystemRoot") orelse return error.TestUnexpectedResult;
     const cmd = try std.fs.path.join(alloc, &.{ root, "System32", "cmd.exe" });
@@ -1599,17 +1607,17 @@ test "WSL guarded paths map DOS roots without an unchecked fallback" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
-    const path = try tmp.dir.realpathAlloc(alloc, "safe.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "safe.txt", .data = "safe" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "safe.txt", alloc);
     defer alloc.free(path);
-    os_windows.TestHooks.direct_volume_mapping = Reject.map;
-    defer os_windows.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = Reject.map;
+    defer windows_ext.TestHooks.direct_volume_mapping = null;
     try std.testing.expectEqual(LocalPath.unsafe, localPathState(path));
-    os_windows.TestHooks.direct_volume_mapping = os_windows.TestHooks.unavailableVolume;
+    windows_ext.TestHooks.direct_volume_mapping = windows_ext.TestHooks.unavailableVolume;
     try std.testing.expect(localPathState(path) != .safe);
-    os_windows.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = null;
     try std.testing.expectEqual(LocalPath.safe, localPathState(path));
-    try tmp.dir.deleteFile("safe.txt");
+    try tmp.dir.deleteFile(std.testing.io, "safe.txt");
     try std.testing.expectEqual(LocalPath.missing, localPathState(path));
 }
 
@@ -1623,21 +1631,21 @@ test "WSL executable probe enters production DOS mapping" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "wsl.exe", .data = "not executed" });
-    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wsl.exe", .data = "not executed" });
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     var env = EnvMap.init(alloc);
     defer env.deinit();
-    os_windows.TestHooks.direct_volume_mapping = Reject.map;
-    defer os_windows.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = Reject.map;
+    defer windows_ext.TestHooks.direct_volume_mapping = null;
     const refused = try localExecutable(alloc, &env, "wsl.exe", cwd);
     defer if (refused) |path| alloc.free(path);
     try std.testing.expectEqual(null, refused);
-    os_windows.TestHooks.direct_volume_mapping = os_windows.TestHooks.unavailableVolume;
+    windows_ext.TestHooks.direct_volume_mapping = windows_ext.TestHooks.unavailableVolume;
     const redirected = try localExecutable(alloc, &env, "wsl.exe", cwd);
     defer if (redirected) |path| alloc.free(path);
     try std.testing.expectEqual(null, redirected);
-    os_windows.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = null;
     const found = (try localExecutable(alloc, &env, "wsl.exe", cwd)) orelse return error.TestUnexpectedResult;
     defer alloc.free(found);
     const expected = try std.fs.path.join(alloc, &.{ cwd, "wsl.exe" });
@@ -1650,7 +1658,7 @@ test "localExecutable refuses remote device and ambiguous search paths" {
     const alloc = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     var env = EnvMap.init(alloc);
     defer env.deinit();
@@ -1665,8 +1673,8 @@ test "localExecutable refuses remote device and ambiguous search paths" {
 
     // An empty opt-out is still set. Even with a cwd executable planted,
     // the probe follows CMD to PATH (unsafe here, so it gives up).
-    var planted = try td.dir.createFile("wsl.exe", .{});
-    planted.close();
+    var planted = try td.dir.createFile(std.testing.io, "wsl.exe", .{});
+    planted.close(std.testing.io);
     try env.put("NoDefaultCurrentDirectoryInExePath", "");
     try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
 
@@ -1688,18 +1696,18 @@ test "probe paths refuse ancestor and final symlinks without following them" {
     const alloc = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    try td.dir.makeDir("target");
-    var exe_file = try td.dir.createFile("target/wsl.exe", .{});
-    exe_file.close();
-    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    try td.dir.createDir(std.testing.io, "target", .default_dir);
+    var exe_file = try td.dir.createFile(std.testing.io, "target/wsl.exe", .{});
+    exe_file.close(std.testing.io);
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     const target = try std.fs.path.join(alloc, &.{ cwd, "target" });
     defer alloc.free(target);
-    td.dir.symLink(target, "link", .{ .is_directory = true }) catch |err| switch (err) {
+    td.dir.symLink(std.testing.io, target, "link", .{ .is_directory = true }) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
-    try td.dir.symLink("target/wsl.exe", "wsl.exe", .{});
+    try td.dir.symLink(std.testing.io, "target/wsl.exe", "wsl.exe", .{});
     const good = try std.fs.path.join(alloc, &.{ target, "wsl.exe" });
     defer alloc.free(good);
     const linked_dir = try std.fs.path.join(alloc, &.{ cwd, "link" });
@@ -1725,16 +1733,16 @@ test "runProbe does not execute a PATHEXT sibling of a missing exe" {
     const alloc = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     const exe = try std.fs.path.join(alloc, &.{ cwd, "wsl.exe" });
     defer alloc.free(exe);
-    var script = try td.dir.createFile("wsl.exe.cmd", .{});
-    try script.writeAll("@echo off\r\necho executed>probe-executed.txt\r\nexit /b 0\r\n");
-    script.close();
-    var env = try std.process.getEnvMap(alloc);
+    var script = try td.dir.createFile(std.testing.io, "wsl.exe.cmd", .{});
+    try script.writeStreamingAll(std.testing.io, "@echo off\r\necho executed>probe-executed.txt\r\nexit /b 0\r\n");
+    script.close(std.testing.io);
+    var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
     try std.testing.expectEqual(null, runProbe(alloc, &env, &.{ exe, "--exec", "infocmp", "xterm-ghostty" }, cwd));
-    try std.testing.expectError(error.FileNotFound, td.dir.access("probe-executed.txt", .{}));
+    try std.testing.expectError(error.FileNotFound, td.dir.access(std.testing.io, "probe-executed.txt", .{}));
 }

@@ -5,10 +5,13 @@ const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
 const diagnostics = @import("diagnostics.zig");
-const lib = @import("../lib/main.zig");
 const homedir = @import("../os/homedir.zig");
+const global = @import("../global.zig");
 
 pub const Options = struct {
+    /// We store an I/O implementation to make maintenance easier.
+    _io: std.Io,
+
     /// This is set by the CLI parser for deinit.
     _arena: ?ArenaAllocator = null,
 
@@ -29,8 +32,18 @@ pub const Options = struct {
     /// there is a "normal" config setting on the cli.
     _diagnostics: diagnostics.DiagnosticList = .{},
 
+    pub const ParseManuallyHookError = error{InvalidValue} ||
+        homedir.ExpandError ||
+        std.Io.Dir.RealPathFileAllocError ||
+        Allocator.Error;
+
     /// Manual parse hook, collect all of the arguments after `+new-window`.
-    pub fn parseManuallyHook(self: *Options, alloc: Allocator, arg: []const u8, iter: anytype) (error{InvalidValue} || homedir.ExpandError || std.fs.Dir.RealPathAllocError || Allocator.Error)!bool {
+    pub fn parseManuallyHook(
+        self: *Options,
+        alloc: Allocator,
+        arg: []const u8,
+        iter: anytype,
+    ) ParseManuallyHookError!bool {
         var e_seen: bool = std.mem.eql(u8, arg, "-e");
 
         // Include the argument that triggered the manual parse hook.
@@ -39,12 +52,12 @@ pub const Options = struct {
         // Gather up the rest of the arguments to use as the command.
         while (iter.next()) |param| {
             if (e_seen) {
-                try self._arguments.append(alloc, try alloc.dupeZ(u8, param));
+                try self._arguments.append(alloc, try alloc.dupeSentinel(u8, param, 0));
                 continue;
             }
             if (std.mem.eql(u8, param, "-e")) {
                 e_seen = true;
-                try self._arguments.append(alloc, try alloc.dupeZ(u8, param));
+                try self._arguments.append(alloc, try alloc.dupeSentinel(u8, param, 0));
                 continue;
             }
             if (try self.checkArg(alloc, param)) |a| try self._arguments.append(alloc, a);
@@ -53,32 +66,41 @@ pub const Options = struct {
         return false;
     }
 
-    fn checkArg(self: *Options, alloc: Allocator, arg: []const u8) (error{InvalidValue} || homedir.ExpandError || std.fs.Dir.RealPathAllocError || Allocator.Error)!?[:0]const u8 {
-        if (lib.cutPrefix(u8, arg, "--class=")) |rest| {
-            self.class = try alloc.dupeZ(u8, std.mem.trim(u8, rest, &std.ascii.whitespace));
+    const CheckArgError = error{InvalidValue} ||
+        homedir.ExpandError ||
+        std.Io.Dir.RealPathFileAllocError ||
+        Allocator.Error;
+
+    fn checkArg(self: *Options, alloc: Allocator, arg: []const u8) CheckArgError!?[:0]const u8 {
+        if (std.mem.cutPrefix(u8, arg, "--class=")) |rest| {
+            self.class = try alloc.dupeSentinel(u8, std.mem.trim(u8, rest, &std.ascii.whitespace), 0);
             return null;
         }
 
-        if (lib.cutPrefix(u8, arg, "--timeout=")) |rest| {
+        if (std.mem.cutPrefix(u8, arg, "--timeout=")) |rest| {
             self.timeout = std.fmt.parseInt(u64, rest, 10) catch return error.InvalidValue;
             if (self.timeout > 10_000) return error.InvalidValue;
             return null;
         }
 
-        if (lib.cutPrefix(u8, arg, "--working-directory=")) |rest| {
+        if (std.mem.cutPrefix(u8, arg, "--working-directory=")) |rest| {
             const stripped = std.mem.trim(u8, rest, &std.ascii.whitespace);
-            if (std.mem.eql(u8, stripped, "home")) return try alloc.dupeZ(u8, arg);
-            if (std.mem.eql(u8, stripped, "inherit")) return try alloc.dupeZ(u8, arg);
-            const cwd: std.fs.Dir = std.fs.cwd();
-            var expandhome_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const expanded = try homedir.expandHome(stripped, &expandhome_buf);
-            var realpath_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const realpath = try cwd.realpath(expanded, &realpath_buf);
+            if (std.mem.eql(u8, stripped, "home")) return try alloc.dupeSentinel(u8, arg, 0);
+            if (std.mem.eql(u8, stripped, "inherit")) return try alloc.dupeSentinel(u8, arg, 0);
+            const cwd: std.Io.Dir = .cwd();
+            var expandhome_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const expanded = expanded: {
+                var environ_map = try global.environMap();
+                defer environ_map.deinit();
+                break :expanded try homedir.expandHome(global.io(), &environ_map, stripped, &expandhome_buf);
+            };
+            var realpath_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const realpath = realpath_buf[0..try cwd.realPathFile(self._io, expanded, &realpath_buf)];
             self._working_directory_seen = true;
-            return try std.fmt.allocPrintSentinel(alloc, "--working-directory={s}", .{realpath}, 0);
+            return try alloc.printSentinel("--working-directory={s}", .{realpath}, 0);
         }
 
-        return try alloc.dupeZ(u8, arg);
+        return try alloc.dupeSentinel(u8, arg, 0);
     }
 
     pub fn deinit(self: *Options) void {
@@ -156,11 +178,11 @@ pub const Options = struct {
 ///
 /// Available since: 1.2.0
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
     const stderr = &stderr_writer.interface;
 
     const result = runArgs(alloc, &iter, stderr);
@@ -194,7 +216,7 @@ fn runArgsWithPerform(
     stderr: *std.Io.Writer,
     performNewWindowFn: PerformNewWindowFn,
 ) !u8 {
-    var opts: Options = .{};
+    var opts: Options = .{ ._io = global.io() };
     defer opts.deinit();
 
     args.parse(Options, alloc_gpa, &opts, argsIter) catch |err| switch (err) {
@@ -212,9 +234,9 @@ fn runArgsWithPerform(
         var exit: bool = false;
         outer: for (opts._diagnostics.items()) |diagnostic| {
             if (diagnostic.location != .cli) continue :outer;
-            inner: inline for (@typeInfo(Options).@"struct".fields) |field| {
-                if (field.name[0] == '_') continue :inner;
-                if (std.mem.eql(u8, field.name, diagnostic.key)) {
+            inner: inline for (@typeInfo(Options).@"struct".field_names) |field| {
+                if (field[0] == '_') continue :inner;
+                if (std.mem.eql(u8, field, diagnostic.key)) {
                     try stderr.print("config error: {f}\n", .{diagnostic});
                     exit = true;
                 }
@@ -225,11 +247,15 @@ fn runArgsWithPerform(
 
     if (!opts._working_directory_seen and !hasLaunchLayoutArgument(opts._arguments.items)) {
         const alloc = opts._arena.?.allocator();
-        const cwd: std.fs.Dir = std.fs.cwd();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const wd = try cwd.realpath(".", &buf);
+        const cwd: std.Io.Dir = .cwd();
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const wd = buf[0..try cwd.realPathFile(global.io(), ".", &buf)];
         // This should be inserted at the beginning of the list, just in case `-e` was used.
-        try opts._arguments.insert(alloc, 0, try std.fmt.allocPrintSentinel(alloc, "--working-directory={s}", .{wd}, 0));
+        try opts._arguments.insert(alloc, 0, try alloc.printSentinel(
+            "--working-directory={s}",
+            .{wd},
+            0,
+        ));
     }
 
     var arena = ArenaAllocator.init(alloc_gpa);
@@ -293,7 +319,7 @@ test "automation-new-window cli forwards class timeout and passthrough arguments
     };
     Hook.called = false;
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--class=lane9 --timeout=42 --working-directory=. --title=kept",
     );
@@ -326,7 +352,7 @@ test "automation-new-window cli rejects invalid timeout before ipc" {
 
     for ([_][]const u8{ "--timeout=10001", "--timeout=18446744073709551616" }) |command_line| {
         Hook.called = false;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, command_line);
         defer iter.deinit();
 
         var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
@@ -357,7 +383,7 @@ test "automation-new-window cli maps fallback and transport failures to five" {
 
     for ([_]bool{ false, true }) |fail_transport| {
         Hook.fail_transport = fail_transport;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, "--working-directory=.");
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, "--working-directory=.");
         defer iter.deinit();
 
         var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);

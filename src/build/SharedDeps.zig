@@ -5,6 +5,7 @@ const std = @import("std");
 const Config = @import("Config.zig");
 const HelpStrings = @import("HelpStrings.zig");
 const UnicodeTables = @import("UnicodeTables.zig");
+const translate_c = @import("translate_c");
 
 config: *const Config,
 
@@ -19,17 +20,68 @@ help_strings: HelpStrings,
 unicode_tables: UnicodeTables,
 uucode_tables: std.Build.LazyPath,
 
+/// Singleton uucode module, instantiated once in `init` and reused
+/// everywhere so that ghostty and vaxis share the same compiled tables in
+/// each final binary instead of each linking its own copy.
+///
+/// Sharing one instance is also a hard requirement (not just an
+/// optimization) for Zig 0.16's strict module model. `SharedDeps.add` runs
+/// many times across different (target, optimize) tuples (macos-aarch64,
+/// macos-x86_64, ios-aarch64, Debug + ReleaseFast, etc.), and on each
+/// call we have to wire uucode into both the step's root module and into
+/// vaxis_mod (because vaxis's `Parser.zig` does `@import("uucode")` and
+/// we pass `external_uucode = true` to vaxis's build.zig so vaxis doesn't
+/// instantiate its own uucode dep). If those two import bindings ever
+/// resolve to *different* `*Module` pointers within a single Compile
+/// step's analysis, Zig fails with:
+///
+///     vaxis/src/Parser.zig: file exists in modules 'uucode' and 'uucode0'
+///
+/// because all those uucode module instances share the same physical
+/// `uucode/src/root.zig` file on disk, and Zig requires every file to belong
+/// to exactly one module within a Compile graph.
+///
+/// The natural way to keep them the same would be to call
+/// `b.lazyDependency("uucode", .{ .tables_path, .build_config_path })`
+/// from each call site and let Zig's dependency cache deduplicate
+/// identical args. That fails because of a bug in Zig's
+/// `userLazyPathsAreTheSame` (Build.zig) where the `.src_path` and
+/// `.generated` equality checks are inverted: `if (std.mem.eql(...))
+/// return false` instead of `if (!std.mem.eql(...)) return false`. The
+/// dep cache key therefore always misses whenever any arg is a
+/// `b.path(...)` LazyPath, so each call returns a fresh `*Dependency`
+/// with a fresh `*Module`. Hoisting the dep into one eager
+/// `b.dependency` call here sidesteps the cache entirely.
+///
+/// This conflict is independent of whether vaxis itself is acquired as a
+/// singleton or per-target dep.
+uucode_mod: *std.Build.Module,
+
 /// Used to keep track of a list of file sources.
 pub const LazyPathList = std.ArrayList(std.Build.LazyPath);
 
 pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
     const uucode_tables = b.path("src/build/uucode_tables.zig");
 
+    // Instantiate the singleton uucode module that both ghostty and vaxis
+    // import. See the doc comment on `uucode_mod`.
+    const uucode_mod = b.dependency("uucode", .{
+        .tables_path = uucode_tables,
+        .build_config_path = b.path("src/build/uucode_config.zig"),
+    }).module("uucode");
+
+    // Re-export the uucode module so that Zig programs that embed libgtostty-vt
+    // can use it. This is necessary to use libraries like libvaxis in
+    // the embedding program that need uucode as well (libvaxis provides
+    // -Dexternal_uucode for this).
+    try b.modules.put(b.allocator, b.dupe("uucode"), uucode_mod);
+
     var result: SharedDeps = .{
         .config = cfg,
         .help_strings = try .init(b, cfg),
         .unicode_tables = try .init(b, cfg, uucode_tables),
         .uucode_tables = uucode_tables,
+        .uucode_mod = uucode_mod,
 
         // Setup by retarget
         .options = undefined,
@@ -112,11 +164,49 @@ fn initOptions(self: *SharedDeps, b: *std.Build, thread_roles: bool) !void {
     self.thread_role_options = options;
 }
 
+/// The uucode module of every artifact of one target and mode, made once for
+/// the whole build (every `SharedDeps` value, the bench deps' own `init`
+/// included, shares it), keyed as vaxis's dependency instance is keyed: by the
+/// target query, its CPU and the mode (`uucodeModule`).
+var uucode_modules: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
+
+/// The uucode module for an artifact of `target` built in `optimize`, which
+/// the artifact and vaxis share. vaxis takes only scalar arguments, so Zig
+/// 0.17.1 hands out one vaxis instance per (target, mode) and each `add`
+/// sets that instance's uucode import; a uucode dependency, whose arguments
+/// are paths, is never found again (`LazyPath.eql` still has the inverted
+/// `.src_path` test this file's `uucode_mod` comment describes), so a fresh
+/// module per call would leave every earlier artifact of that target and mode
+/// with two uucode modules ("file exists in modules 'uucode' and 'uucode0'").
+/// Hence the memo. Each (target, mode) gets its own: the singleton
+/// `uucode_mod` would carry the first artifact's mode into the next (a
+/// ReleaseFast bench beside a Debug app fails `assertModuleOptimizeMode`).
+fn uucodeModule(
+    self: *const SharedDeps,
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) *std.Build.Module {
+    const key = b.fmt("{s}|{s}|{t}", .{
+        target.query.zigTriple(b.allocator) catch @panic("OOM"),
+        target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM"),
+        optimize,
+    });
+    const entry = uucode_modules.getOrPut(b.allocator, key) catch @panic("OOM");
+    if (!entry.found_existing) entry.value_ptr.* = b.dependency("uucode", .{
+        .target = target,
+        .optimize = optimize,
+        .tables_path = self.uucode_tables,
+        .build_config_path = b.path("src/build/uucode_config.zig"),
+    }).module("uucode");
+    return entry.value_ptr.*;
+}
+
 /// The build options of an artifact built in `mode`: with the runtime
 /// thread-role layer when these deps give it and the mode has it.
 fn buildOptions(
     self: *const SharedDeps,
-    mode: std.builtin.OptimizeMode,
+    mode: std.lang.Optimize,
 ) *std.Build.Step.Options {
     if (self.thread_role_options) |options| {
         if (Config.threadRoles(mode)) return options;
@@ -145,7 +235,11 @@ pub fn add(
     step.root_module.addOptions("build_options", self.buildOptions(optimize));
 
     // Every exe needs the terminal options
-    self.config.terminalOptions(.ghostty).add(b, step.root_module);
+    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);
+
+    // Every exe needs the uucode module, in its own target and mode.
+    const uucode = self.uucodeModule(b, target, optimize);
+    step.root_module.addImport("uucode", uucode);
 
     // The bundled ConPTY pin document. scripts/conpty-redist.ps1 stages the
     // Microsoft pair from this file and the portable updater verifies the
@@ -156,22 +250,51 @@ pub fn add(
     });
 
     // C imports for locale constants and functions
-    {
-        const c = b.addTranslateC(.{
-            .root_source_file = b.path("src/os/locale.c"),
-            .target = target,
-            .optimize = optimize,
-        });
-        if (target.result.os.tag.isDarwin()) {
-            const libc = try std.zig.LibCInstallation.findNative(.{
-                .allocator = b.allocator,
-                .target = &target.result,
-                .verbose = false,
+    try translate_c.addImportToModule(b, "locale-c", step.root_module, .{
+        .source = .{ .file = b.path("src/os/locale.c") },
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // C imports needed to manage/create PTYs
+    switch (target.result.os.tag) {
+        .freebsd,
+        .linux,
+        .macos,
+        => {
+            try translate_c.addImportToModule(b, "pty-c", step.root_module, .{
+                .source = .{ .file = b.path("src/pty.c") },
+                .target = target,
+                .optimize = optimize,
             });
-            c.addSystemIncludePath(.{ .cwd_relative = libc.sys_include_dir.? });
-        }
-        step.root_module.addImport("locale-c", c.createModule());
+        },
+        else => {},
     }
+
+    // POSIX C imports that are used throughout Ghostty on a general basis.
+    // (note: errno is C stdlib but we just include it here because that's
+    // where it's generally included otherwise)
+    //
+    // Gated off Windows: the MSVC C runtime has no pwd.h or unistd.h, so
+    // translating them fails the build, and only POSIX paths use these
+    // headers (sys/types.h among them). A Windows module keeps errno.h and
+    // signal.h, so a POSIX-only `@import("posix_c")` still names a module
+    // there.
+    const posix_c_files: []const translate_c.Options.IncludeFile = if (target.result.os.tag == .windows) &.{
+        .{ .path = "errno.h" },
+        .{ .path = "signal.h" },
+    } else &.{
+        .{ .path = "errno.h" },
+        .{ .path = "pwd.h" },
+        .{ .path = "signal.h" },
+        .{ .path = "sys/types.h" },
+        .{ .path = "unistd.h" },
+    };
+    try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
+        .source = .{ .includes = .{ .files = posix_c_files } },
+        .target = target,
+        .optimize = optimize,
+    });
 
     // Freetype. We always include this even if our font backend doesn't
     // use it because Dear Imgui uses Freetype.
@@ -187,10 +310,10 @@ pub fn add(
         );
 
         if (b.systemIntegrationOption("freetype", .{})) {
-            step.linkSystemLibrary2("bzip2", dynamic_link_opts);
-            step.linkSystemLibrary2("freetype2", dynamic_link_opts);
+            step.root_module.linkSystemLibrary("bzip2", dynamic_link_opts);
+            step.root_module.linkSystemLibrary("freetype2", dynamic_link_opts);
         } else {
-            step.linkLibrary(freetype_dep.artifact("freetype"));
+            step.root_module.linkLibrary(freetype_dep.artifact("freetype"));
             try static_libs.append(
                 b.allocator,
                 freetype_dep.artifact("freetype").getEmittedBin(),
@@ -212,9 +335,9 @@ pub fn add(
                 harfbuzz_dep.module("harfbuzz"),
             );
             if (b.systemIntegrationOption("harfbuzz", .{})) {
-                step.linkSystemLibrary2("harfbuzz", dynamic_link_opts);
+                step.root_module.linkSystemLibrary("harfbuzz", dynamic_link_opts);
             } else {
-                step.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+                step.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
                 try static_libs.append(
                     b.allocator,
                     harfbuzz_dep.artifact("harfbuzz").getEmittedBin(),
@@ -236,9 +359,9 @@ pub fn add(
             );
 
             if (b.systemIntegrationOption("fontconfig", .{})) {
-                step.linkSystemLibrary2("fontconfig", dynamic_link_opts);
+                step.root_module.linkSystemLibrary("fontconfig", dynamic_link_opts);
             } else {
-                step.linkLibrary(fontconfig_dep.artifact("fontconfig"));
+                step.root_module.linkLibrary(fontconfig_dep.artifact("fontconfig"));
                 try static_libs.append(
                     b.allocator,
                     fontconfig_dep.artifact("fontconfig").getEmittedBin(),
@@ -256,7 +379,7 @@ pub fn add(
             .target = target,
             .optimize = optimize,
         })) |libpng_dep| {
-            step.linkLibrary(libpng_dep.artifact("png"));
+            step.root_module.linkLibrary(libpng_dep.artifact("png"));
             try static_libs.append(
                 b.allocator,
                 libpng_dep.artifact("png").getEmittedBin(),
@@ -270,7 +393,7 @@ pub fn add(
             .target = target,
             .optimize = optimize,
         })) |zlib_dep| {
-            step.linkLibrary(zlib_dep.artifact("z"));
+            step.root_module.linkLibrary(zlib_dep.artifact("z"));
             try static_libs.append(
                 b.allocator,
                 zlib_dep.artifact("z").getEmittedBin(),
@@ -288,9 +411,9 @@ pub fn add(
             oniguruma_dep.module("oniguruma"),
         );
         if (b.systemIntegrationOption("oniguruma", .{})) {
-            step.linkSystemLibrary2("oniguruma", dynamic_link_opts);
+            step.root_module.linkSystemLibrary("oniguruma", dynamic_link_opts);
         } else {
-            step.linkLibrary(oniguruma_dep.artifact("oniguruma"));
+            step.root_module.linkLibrary(oniguruma_dep.artifact("oniguruma"));
             try static_libs.append(
                 b.allocator,
                 oniguruma_dep.artifact("oniguruma").getEmittedBin(),
@@ -306,13 +429,13 @@ pub fn add(
         })) |glslang_dep| {
             step.root_module.addImport("glslang", glslang_dep.module("glslang"));
             if (b.systemIntegrationOption("glslang", .{})) {
-                step.linkSystemLibrary2("glslang", dynamic_link_opts);
-                step.linkSystemLibrary2(
+                step.root_module.linkSystemLibrary("glslang", dynamic_link_opts);
+                step.root_module.linkSystemLibrary(
                     "glslang-default-resource-limits",
                     dynamic_link_opts,
                 );
             } else {
-                step.linkLibrary(glslang_dep.artifact("glslang"));
+                step.root_module.linkLibrary(glslang_dep.artifact("glslang"));
                 try static_libs.append(
                     b.allocator,
                     glslang_dep.artifact("glslang").getEmittedBin(),
@@ -330,9 +453,9 @@ pub fn add(
                 spirv_cross_dep.module("spirv_cross"),
             );
             if (b.systemIntegrationOption("spirv-cross", .{})) {
-                step.linkSystemLibrary2("spirv-cross-c-shared", dynamic_link_opts);
+                step.root_module.linkSystemLibrary("spirv-cross-c-shared", dynamic_link_opts);
             } else {
-                step.linkLibrary(spirv_cross_dep.artifact("spirv_cross"));
+                step.root_module.linkLibrary(spirv_cross_dep.artifact("spirv_cross"));
                 try static_libs.append(
                     b.allocator,
                     spirv_cross_dep.artifact("spirv_cross").getEmittedBin(),
@@ -352,7 +475,7 @@ pub fn add(
                 "sentry",
                 sentry_dep.module("sentry"),
             );
-            step.linkLibrary(sentry_dep.artifact("sentry"));
+            step.root_module.linkLibrary(sentry_dep.artifact("sentry"));
             try static_libs.append(
                 b.allocator,
                 sentry_dep.artifact("sentry").getEmittedBin(),
@@ -398,18 +521,29 @@ pub fn add(
     if (step.rootModuleTarget().os.tag == .linux) {
         const triple = try step.rootModuleTarget().linuxTriple(b.allocator);
         const path = b.fmt("/usr/lib/{s}", .{triple});
-        if (std.fs.accessAbsolute(path, .{})) {
-            step.addLibraryPath(.{ .cwd_relative = path });
+        if (std.Io.Dir.accessAbsolute(b.graph.io, path, .{})) {
+            step.root_module.addLibraryPath(.{ .cwd_relative = path });
         } else |_| {}
     }
 
+    // nothings/stb headers
+    try translate_c.addImportToModule(b, "stb_c", step.root_module, .{
+        .source = .{ .includes = .{ .files = &.{
+            .{ .path = "stb_image.h" },
+            .{ .path = "stb_image_resize.h" },
+        } } },
+        .target = target,
+        .optimize = optimize,
+        .include_paths = &.{b.path("src/stb")},
+    });
+
     // C files
-    step.linkLibC();
-    step.addIncludePath(b.path("src/stb"));
+    step.root_module.link_libc = true;
+    step.root_module.addIncludePath(b.path("src/stb"));
     // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
     // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
     // the static archive is consumed by an external linker.
-    step.addCSourceFiles(.{
+    step.root_module.addCSourceFiles(.{
         .files = &.{"src/stb/stb.c"},
         .flags = if (step.rootModuleTarget().abi == .msvc)
             &.{ "-fno-sanitize=undefined", "-fno-sanitize-trap=undefined" }
@@ -418,17 +552,17 @@ pub fn add(
     });
 
     if (self.config.renderer_test_tools and target.result.os.tag == .windows) {
-        step.addCSourceFile(.{ .file = b.path("src/renderer/readback.c"), .flags = &.{} });
+        step.root_module.addCSourceFile(.{ .file = b.path("src/renderer/readback.c"), .flags = &.{} });
     }
     if (self.config.d3d11) {
-        step.addCSourceFile(.{
+        step.root_module.addCSourceFile(.{
             .file = b.path("src/renderer/d3d11/bridge.c"),
             .flags = if (self.config.renderer_test_tools)
                 &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=1" }
             else
                 &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=0" },
         });
-        step.addCSourceFile(.{
+        step.root_module.addCSourceFile(.{
             .file = b.path("src/renderer/d3d11/composition.cpp"),
             .flags = &.{ "-std=c++11", "-fno-exceptions", "-fno-rtti" },
         });
@@ -441,7 +575,7 @@ pub fn add(
     // include directories (already added via linkLibC above) contain
     // both C and C++ headers, so linkLibCpp is not needed.
     if (step.rootModuleTarget().abi != .msvc) {
-        step.linkLibCpp();
+        step.root_module.link_libcpp = true;
     }
 
     // Other dependencies, mostly pure Zig
@@ -454,8 +588,11 @@ pub fn add(
     if (b.lazyDependency("vaxis", .{
         .target = target,
         .optimize = optimize,
+        .external_uucode = true,
     })) |dep| {
-        step.root_module.addImport("vaxis", dep.module("vaxis"));
+        const vaxis = dep.module("vaxis");
+        step.root_module.addImport("vaxis", vaxis);
+        vaxis.addImport("uucode", uucode);
     }
     if (b.lazyDependency("wuffs", .{
         .target = target,
@@ -475,7 +612,6 @@ pub fn add(
     })) |dep| {
         step.root_module.addImport("z2d", dep.module("z2d"));
     }
-    self.addUucode(b, step.root_module, target, optimize);
     if (b.lazyDependency("zf", .{
         .target = target,
         .optimize = optimize,
@@ -494,7 +630,7 @@ pub fn add(
         .@"backend-opengl3" = true,
     })) |dep| {
         step.root_module.addImport("dcimgui", dep.module("dcimgui"));
-        step.linkLibrary(dep.artifact("dcimgui"));
+        step.root_module.linkLibrary(dep.artifact("dcimgui"));
         try static_libs.append(
             b.allocator,
             dep.artifact("dcimgui").getEmittedBin(),
@@ -543,8 +679,8 @@ pub fn add(
     // If we're building an exe then we have additional dependencies.
     if (step.kind != .lib) {
         // We always statically compile glad
-        step.addIncludePath(b.path("vendor/glad/include/"));
-        step.addCSourceFile(.{
+        step.root_module.addIncludePath(b.path("vendor/glad/include/"));
+        step.root_module.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
             .flags = &.{},
         });
@@ -552,9 +688,9 @@ pub fn add(
         switch (self.config.app_runtime) {
             .none => {},
             .win32 => {
-                step.linkSystemLibrary2("user32", dynamic_link_opts);
-                step.linkSystemLibrary2("gdi32", dynamic_link_opts);
-                step.linkSystemLibrary2("dbghelp", dynamic_link_opts);
+                step.root_module.linkSystemLibrary("user32", dynamic_link_opts);
+                step.root_module.linkSystemLibrary("gdi32", dynamic_link_opts);
+                step.root_module.linkSystemLibrary("dbghelp", dynamic_link_opts);
             },
         }
     }
@@ -562,50 +698,15 @@ pub fn add(
     self.help_strings.addImport(step);
     self.unicode_tables.addImport(step);
 
-    harmonizeModuleOptimizeMode(b, step.root_module, optimize);
     try assertModuleOptimizeMode(b, step.root_module, optimize);
 
     return static_libs;
 }
 
-fn harmonizeModuleOptimizeMode(
-    b: *std.Build,
-    root: *std.Build.Module,
-    optimize: std.builtin.OptimizeMode,
-) void {
-    var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
-    defer visited.deinit(b.allocator);
-    harmonizeModuleOptimizeModeRecursive(
-        b,
-        root,
-        optimize,
-        &visited,
-    ) catch @panic("OOM while harmonizing product module optimize modes");
-}
-
-fn harmonizeModuleOptimizeModeRecursive(
-    b: *std.Build,
-    module: *std.Build.Module,
-    optimize: std.builtin.OptimizeMode,
-    visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
-) !void {
-    const entry = try visited.getOrPut(b.allocator, module);
-    if (entry.found_existing) return;
-
-    if (module.optimize == null) module.optimize = optimize;
-    var imports = module.import_table.iterator();
-    while (imports.next()) |import| try harmonizeModuleOptimizeModeRecursive(
-        b,
-        import.value_ptr.*,
-        optimize,
-        visited,
-    );
-}
-
 fn assertModuleOptimizeMode(
     b: *std.Build,
     root: *std.Build.Module,
-    expected: std.builtin.OptimizeMode,
+    expected: std.lang.Optimize,
 ) !void {
     var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     defer visited.deinit(b.allocator);
@@ -621,14 +722,21 @@ fn assertModuleOptimizeMode(
 fn assertModuleOptimizeModeRecursive(
     b: *std.Build,
     module: *std.Build.Module,
-    expected: std.builtin.OptimizeMode,
+    expected: std.lang.Optimize,
     import_name: []const u8,
     visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
 ) !void {
     const entry = try visited.getOrPut(b.allocator, module);
     if (entry.found_existing) return;
 
-    const actual = module.optimize orelse .Debug;
+    // A module that names no mode inherits its importer's when it enters an
+    // import table (std.Build.Module.CreateOptions), so only a mode set
+    // explicitly can differ. Zig 0.17 hands out one module per dependency
+    // instance, shared by every artifact that imports it, so writing a mode
+    // into such a module (as the 0.15 build did) would carry the first
+    // artifact's mode into the next: a Debug app and a ReleaseFast bench share
+    // translate-c's c_builtins.
+    const actual = module.optimize orelse expected;
     if (actual != expected) {
         std.log.err(
             "product module optimize mismatch import={s} expected={s} actual={s}",
@@ -746,9 +854,11 @@ pub fn addSimd(
         if (target.result.os.tag == .windows) try flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",
-            // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig
-            // 0.15.2 bundles Clang 20. This only silences that version check.
-            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
+        });
+        if (target.result.abi == .msvc) try flags.appendSlice(b.allocator, &.{
+            // -fno-autolink also drops UCRT's /alternatename fallback.
+            "-D_Avx2WmemEnabledWeakValue=_Avx2WmemEnabled",
+            "-fno-autolink",
         });
 
         m.addCSourceFiles(.{
@@ -760,23 +870,6 @@ pub fn addSimd(
             },
             .flags = flags.items,
         });
-    }
-}
-
-pub fn addUucode(
-    self: *const SharedDeps,
-    b: *std.Build,
-    module: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) void {
-    _ = self;
-    if (b.lazyDependency("uucode", .{
-        .target = target,
-        .optimize = optimize,
-        .build_config_path = b.path("src/build/uucode_config.zig"),
-    })) |dep| {
-        module.addImport("uucode", dep.module("uucode"));
     }
 }
 

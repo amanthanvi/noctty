@@ -4,8 +4,8 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const input = @import("../input.zig");
-const lib = @import("../lib/main.zig");
 
 pub const Options = struct {
     /// This is set by the CLI parser for deinit.
@@ -61,11 +61,11 @@ pub const Options = struct {
 ///   * `--timeout=<ms>`: Response timeout in milliseconds, from 0 through
 ///     10000. The default is 10000.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var stderr_buf: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &stderr_buf);
     const stderr = &stderr_writer.interface;
 
     const result = runArgs(alloc, &iter, stderr);
@@ -115,11 +115,11 @@ fn runArgsWithPerform(
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             return actionpkg.help_error;
         }
-        if (lib.cutPrefix(u8, arg, "--class=")) |class| {
-            opts.class = try opts_alloc.dupeZ(u8, std.mem.trim(u8, class, &std.ascii.whitespace));
+        if (std.mem.cutPrefix(u8, arg, "--class=")) |class| {
+            opts.class = try opts_alloc.dupeSentinel(u8, std.mem.trim(u8, class, &std.ascii.whitespace), 0);
             continue;
         }
-        if (lib.cutPrefix(u8, arg, "--surface-id=")) |raw| {
+        if (std.mem.cutPrefix(u8, arg, "--surface-id=")) |raw| {
             const id = std.fmt.parseInt(u64, raw, 10) catch {
                 try stderr.print("Invalid --surface-id value: {s}\n", .{raw});
                 return 1;
@@ -131,7 +131,7 @@ fn runArgsWithPerform(
             opts.@"surface-id" = id;
             continue;
         }
-        if (lib.cutPrefix(u8, arg, "--timeout=")) |raw| {
+        if (std.mem.cutPrefix(u8, arg, "--timeout=")) |raw| {
             opts.timeout = std.fmt.parseInt(u64, raw, 10) catch {
                 try stderr.print("Invalid --timeout value: {s}\n", .{raw});
                 return 1;
@@ -163,7 +163,6 @@ fn runArgsWithPerform(
             try stderr.print("Invalid action for +perform-action: {s}\n", .{action});
             return 1;
         },
-        else => return err,
     };
 
     if (opts.@"surface-id" != null and parsed_action.scope() == .app) {
@@ -256,7 +255,7 @@ test "automation-action cli forwards class surface and action" {
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
     defer if (Hook.seen_action) |value| testing.allocator.free(value);
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--class=lane9 --surface-id=42 --timeout=0 new_tab",
     );
@@ -294,7 +293,7 @@ test "automation-action cli rejects invalid action before ipc" {
         }
     };
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "definitely_not_an_action",
     );
@@ -332,7 +331,7 @@ test "automation-action cli rejects app action with surface id before ipc" {
         }
     };
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--surface-id=42 quit",
     );
@@ -370,7 +369,7 @@ test "automation-action cli reports invalid ipc response" {
         }
     };
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "new_tab",
     );
@@ -411,7 +410,7 @@ test "automation-action cli rejects invalid arguments before ipc" {
         "new_tab close_tab",
     }) |command_line| {
         Hook.called = false;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, command_line);
         defer iter.deinit();
 
         var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
@@ -448,7 +447,7 @@ test "automation-action cli maps stable runtime exit codes" {
 
     for ([_]u8{ 1, 2, 3, 4, 5 }) |expected| {
         Hook.outcome = expected;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, "new_tab");
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, "new_tab");
         defer iter.deinit();
 
         var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);

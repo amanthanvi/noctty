@@ -4,62 +4,76 @@
 //!   thread-role layer holds its text (`text`, which starts every panic of
 //!   the layer): a ReleaseFast app exe holds none of the layer's panic
 //!   strings. build.zig adds it to the install step of an app exe whose mode
-//!   builds without the layer (`Config.threadRoles`).
+//!   builds without the layer (`Config.threadRoles`). Zig 0.17's build graph
+//!   has no custom steps, so the check is this file's `main`, built for the
+//!   host and run on the exe.
 //! - A test that src/sync imports no src/renderer file (`rendererImport`), so
 //!   lib-vt's search code reaches the mutex wrapper without the renderer.
-const ThreadRoleTextCheck = @This();
-
 const std = @import("std");
 
 /// The text every panic of the runtime thread-role layer starts with
 /// (`src/sync`).
 pub const text = "thread-role layer:";
 
-step: std.Build.Step,
-exe: std.Build.LazyPath,
-
-pub fn create(b: *std.Build, exe: std.Build.LazyPath) *ThreadRoleTextCheck {
-    const check = b.allocator.create(ThreadRoleTextCheck) catch @panic("OOM");
-    check.* = .{
-        .step = .init(.{
-            .id = .custom,
-            .name = "check the exe holds no thread-role layer text",
-            .owner = b,
-            .makeFn = make,
+/// The step that fails when `exe` holds `text`.
+pub fn create(b: *std.Build, exe: std.Build.LazyPath) *std.Build.Step.Run {
+    const tool = b.addExecutable(.{
+        .name = "thread-role-text-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/build/ThreadRoleTextCheck.zig"),
+            .target = b.graph.host,
         }),
-        .exe = exe.dupe(b),
-    };
-    exe.addStepDependencies(&check.step);
-    return check;
+    });
+    const run = b.addRunArtifact(tool);
+    run.setName("check the exe holds no thread-role layer text");
+    run.addFileArg(exe);
+    run.expectExitCode(0);
+    return run;
 }
 
-fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
-    _ = options;
-    const check: *ThreadRoleTextCheck = @fieldParentPtr("step", step);
-    const path = check.exe.getPath2(step.owner, step);
-    const file = std.fs.cwd().openFile(path, .{}) catch |err|
-        return step.fail("unable to open '{s}': {s}", .{ path, @errorName(err) });
-    defer file.close();
+/// The host tool: `thread-role-text-check <exe>` exits 1, naming the text,
+/// when the exe holds it.
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len != 2) {
+        std.log.err("usage: thread-role-text-check <exe>", .{});
+        std.process.exit(2);
+    }
+    const path = args[1];
+    const file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false }) catch |err| {
+        std.log.err("unable to open '{s}': {t}", .{ path, err });
+        std.process.exit(1);
+    };
+    defer file.close(io);
     var buf: [64 * 1024]u8 = undefined;
-    const holds = fileHolds(file, text, &buf) catch |err|
-        return step.fail("unable to read '{s}': {s}", .{ path, @errorName(err) });
-    if (holds) return step.fail(
-        "'{s}' holds the runtime thread-role layer's text \"{s}\", " ++
-            "but its mode builds without the layer (PLAN.md 2.7, acceptance test 14)",
-        .{ path, text },
-    );
+    const holds = fileHolds(io, file, text, &buf) catch |err| {
+        std.log.err("unable to read '{s}': {t}", .{ path, err });
+        std.process.exit(1);
+    };
+    if (holds) {
+        std.log.err(
+            "'{s}' holds the runtime thread-role layer's text \"{s}\", " ++
+                "but its mode builds without the layer (PLAN.md 2.7, acceptance test 14)",
+            .{ path, text },
+        );
+        std.process.exit(1);
+    }
 }
 
 /// Whether `file`, read from its position to its end, holds `needle`,
 /// wherever the reads into `buf` split it. `buf` must be longer than
 /// `needle`.
-pub fn fileHolds(file: std.fs.File, needle: []const u8, buf: []u8) !bool {
+pub fn fileHolds(io: std.Io, file: std.Io.File, needle: []const u8, buf: []u8) !bool {
     std.debug.assert(needle.len > 0 and buf.len > needle.len);
     // The bytes carried over from the last read: a match that the next read
     // completes starts in its last `needle.len - 1` bytes.
     var kept: usize = 0;
     while (true) {
-        const n = try file.read(buf[kept..]);
+        const n = file.readStreaming(io, &.{buf[kept..]}) catch |err| switch (err) {
+            error.EndOfStream => return false,
+            else => |e| return e,
+        };
         if (n == 0) return false;
         const end = kept + n;
         if (std.mem.indexOf(u8, buf[0..end], needle) != null) return true;
@@ -92,7 +106,7 @@ fn rendererImport(gpa: std.mem.Allocator, dir: []const u8, source: [:0]const u8)
         // A name without `.zig` is a module (`std`, `build_options`).
         if (!std.ascii.endsWithIgnoreCase(name, ".zig")) continue;
         std.mem.replaceScalar(u8, name, '\\', '/');
-        const path = try std.fs.path.resolvePosix(gpa, &.{ dir, name });
+        const path = try std.Io.Dir.path.resolveAllocPosix(gpa, &.{ dir, name });
         if (std.ascii.eqlIgnoreCase(path, "src/renderer.zig") or
             std.ascii.startsWithIgnoreCase(path, "src/renderer/")) return path;
         gpa.free(path);
@@ -100,6 +114,7 @@ fn rendererImport(gpa: std.mem.Allocator, dir: []const u8, source: [:0]const u8)
 }
 
 test "fileHolds finds the text at every split of the reads, and only it" {
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var buf: [text.len + 7]u8 = undefined;
@@ -109,38 +124,39 @@ test "fileHolds finds the text at every split of the reads, and only it" {
     for (0..bytes.len - text.len + 1) |at| {
         @memset(&bytes, '.');
         @memcpy(bytes[at..][0..text.len], text);
-        try tmp.dir.writeFile(.{ .sub_path = "exe", .data = &bytes });
-        const file = try tmp.dir.openFile("exe", .{});
-        defer file.close();
-        try std.testing.expect(try fileHolds(file, text, &buf));
+        try tmp.dir.writeFile(io, .{ .sub_path = "exe", .data = &bytes });
+        const file = try tmp.dir.openFile(io, "exe", .{});
+        defer file.close(io);
+        try std.testing.expect(try fileHolds(io, file, text, &buf));
     }
 
     // The text less its last byte, across a boundary, and then nothing.
     @memset(&bytes, '.');
     @memcpy(bytes[buf.len - 3 ..][0 .. text.len - 1], text[0 .. text.len - 1]);
-    try tmp.dir.writeFile(.{ .sub_path = "exe", .data = &bytes });
-    const file = try tmp.dir.openFile("exe", .{});
-    defer file.close();
-    try std.testing.expect(!try fileHolds(file, text, &buf));
+    try tmp.dir.writeFile(io, .{ .sub_path = "exe", .data = &bytes });
+    const file = try tmp.dir.openFile(io, "exe", .{});
+    defer file.close(io);
+    try std.testing.expect(!try fileHolds(io, file, text, &buf));
 }
 
 test "src/sync imports no src/renderer file (acceptance test 14)" {
     // Read from the checkout the suite runs in (its build root), so a file
     // added to src/sync is read too.
     const gpa = std.testing.allocator;
-    var sync = try std.fs.cwd().openDir("src/sync", .{ .iterate = true });
-    defer sync.close();
+    const io = std.testing.io;
+    var sync = try std.Io.Dir.cwd().openDir(io, "src/sync", .{ .iterate = true });
+    defer sync.close(io);
     var walker = try sync.walk(gpa);
     defer walker.deinit();
     var read_state_mutex = false;
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        const source = try entry.dir.readFileAllocOptions(gpa, entry.basename, 16 * 1024 * 1024, null, .of(u8), 0);
+        const source = try entry.dir.readFileAllocOptions(io, entry.basename, gpa, .limited(16 * 1024 * 1024 + 1), .of(u8), 0); // + 1: 0.15 read a file of exactly 16 MiB
         defer gpa.free(source);
         var dir: std.ArrayList(u8) = .empty;
         defer dir.deinit(gpa);
         try dir.appendSlice(gpa, "src/sync");
-        if (std.fs.path.dirname(entry.path)) |sub| {
+        if (std.Io.Dir.path.dirname(entry.path)) |sub| {
             try dir.append(gpa, '/');
             try dir.appendSlice(gpa, sub);
             std.mem.replaceScalar(u8, dir.items, '\\', '/');

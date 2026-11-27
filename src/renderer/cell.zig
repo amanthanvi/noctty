@@ -5,8 +5,9 @@ const font = @import("../font/main.zig");
 const terminal = @import("../terminal/main.zig");
 const renderer = @import("../renderer.zig");
 const shaderpkg = renderer.Renderer.API.shaders;
-const ArrayListCollection = @import("../datastruct/array_list_collection.zig").ArrayListCollection;
 const symbols = @import("../unicode/symbols_table.zig").table;
+
+const CellTextRow = std.ArrayListUnmanaged(shaderpkg.CellText);
 
 /// The possible cell content keys that exist.
 pub const Key = enum {
@@ -49,9 +50,9 @@ pub const Contents = struct {
     /// of directly indexing in order to avoid integer size bugs.
     bg_cells: []shaderpkg.CellBg = &.{},
 
-    /// The ArrayListCollection which holds all of the foreground cells. When
-    /// sized with Contents.resize the individual ArrayLists are given enough
-    /// room that they can hold a single row with #cols glyphs, underlines, and
+    /// The lists which hold all of the foreground cells. When sized with
+    /// Contents.resize the individual ArrayLists are given enough room that
+    /// they can hold a single row with #cols glyphs, underlines, and
     /// strikethroughs; however, appendAssumeCapacity MUST NOT be used since
     /// it is possible to exceed this with combining glyphs that add a glyph
     /// but take up no column since they combine with the previous one, as
@@ -70,11 +71,12 @@ pub const Contents = struct {
     ///
     /// Must be initialized by calling resize on the Contents struct before
     /// calling any operations.
-    fg_rows: ArrayListCollection(shaderpkg.CellText) = .{ .lists = &.{} },
+    fg_rows: []CellTextRow = &.{},
 
     pub fn deinit(self: *Contents, alloc: Allocator) void {
         alloc.free(self.bg_cells);
-        self.fg_rows.deinit(alloc);
+        for (self.fg_rows) |*row| row.deinit(alloc);
+        alloc.free(self.fg_rows);
     }
 
     /// The index of the last cursor list. It is widened first: `rows + 1`
@@ -85,71 +87,55 @@ pub const Contents = struct {
 
     /// Resize the cell contents for the given grid size. This will
     /// always invalidate the entire cell contents.
-    ///
-    /// On an allocation failure the contents, their buffers and `size` are
-    /// left exactly as they were: the renderer indexes the buffers by `size`
-    /// and retries the resize while `size` differs from the terminal's.
     pub fn resize(
         self: *Contents,
         alloc: Allocator,
         size: renderer.GridSize,
     ) Allocator.Error!void {
-        const cell_count = @as(usize, size.columns) * @as(usize, size.rows);
+        const row_count: usize = size.rows;
 
-        const bg_cells = try alloc.alloc(shaderpkg.CellBg, cell_count);
-        errdefer alloc.free(bg_cells);
-        @memset(bg_cells, .{ 0, 0, 0, 0 });
+        // The two extra lists hold cursor cells: index 0 is drawn before the
+        // row contents, and index row_count + 1 is drawn after them.
+        const fg_rows = try alloc.alloc(CellTextRow, row_count + 2);
+        @memset(fg_rows, .empty);
+        errdefer {
+            for (fg_rows) |*row| row.deinit(alloc);
+            alloc.free(fg_rows);
+        }
 
-        // The foreground lists can hold 3 types of items:
-        // - Glyphs
-        // - Underlines
-        // - Strikethroughs
-        // So we give them an initial capacity of size.columns * 3, which will
-        // avoid any further allocations in the vast majority of cases. Sadly
-        // we can not assume capacity though, since with combining glyphs that
-        // form a single grapheme, and multi-substitutions in fonts, the number
-        // of glyphs in a row is theoretically unlimited.
-        //
-        // We have size.rows + 2 lists because indexes 0 and size.rows - 1 are
-        // used for special lists containing the cursor cell which need to
-        // be first and last in the buffer, respectively.
-        //
-        // Both counts are widened first: three entries per column overflow
-        // the 16-bit column count past 21845 columns.
-        var fg_rows: ArrayListCollection(shaderpkg.CellText) = try .init(
-            alloc,
-            @as(usize, size.rows) + 2,
-            @as(usize, size.columns) * 3,
+        // Foreground rows hold glyphs plus underlines, overlines, and
+        // strikethroughs. Three entries per column cover the common cases
+        // without reserving space for every decoration combination. We can't
+        // assume this capacity because combining glyphs and font substitutions
+        // can produce arbitrarily many glyphs in one column.
+        const fg_row_capacity = @as(usize, size.columns) * 3;
+
+        // The cursor lists need just one cell. The rest get the full capacity.
+        fg_rows[0] = try .initCapacity(alloc, 1);
+        fg_rows[row_count + 1] = try .initCapacity(alloc, 1);
+        for (fg_rows[1 .. row_count + 1]) |*row| {
+            row.* = try .initCapacity(alloc, fg_row_capacity);
+        }
+
+        const bg_cells = try alloc.realloc(
+            self.bg_cells,
+            row_count * @as(usize, size.columns),
         );
-        errdefer fg_rows.deinit(alloc);
-
-        // We don't need 3*cols worth of cells for the cursor lists, so we can
-        // replace them with smaller lists. This is technically a tiny bit of
-        // extra work but resize is not a hot function so it's worth it to not
-        // waste the memory. Both are allocated before the lists they replace
-        // are freed, so a failure leaves `fg_rows` whole for its errdefer.
-        var cursor_first: @TypeOf(fg_rows.lists[0]) = try .initCapacity(alloc, 1);
-        errdefer cursor_first.deinit(alloc);
-        var cursor_last: @TypeOf(fg_rows.lists[0]) = try .initCapacity(alloc, 1);
-        errdefer cursor_last.deinit(alloc);
 
         // Perform the swap, no going back from here.
         errdefer comptime unreachable;
-        fg_rows.lists[0].deinit(alloc);
-        fg_rows.lists[0] = cursor_first;
-        fg_rows.lists[lastCursorList(size.rows)].deinit(alloc);
-        fg_rows.lists[lastCursorList(size.rows)] = cursor_last;
-        alloc.free(self.bg_cells);
-        self.fg_rows.deinit(alloc);
+        for (self.fg_rows) |*row| row.deinit(alloc);
+        alloc.free(self.fg_rows);
+        self.size = size;
         self.bg_cells = bg_cells;
         self.fg_rows = fg_rows;
-        self.size = size;
+        self.reset();
     }
 
     /// Reset the cell contents to an empty state without resizing.
     pub fn reset(self: *Contents) void {
         @memset(self.bg_cells, .{ 0, 0, 0, 0 });
-        self.fg_rows.reset();
+        for (self.fg_rows) |*row| row.clearRetainingCapacity();
     }
 
     /// Set the cursor value. If the value is null then the cursor is hidden.
@@ -159,28 +145,28 @@ pub const Contents = struct {
         cursor_style: ?renderer.CursorStyle,
     ) void {
         if (self.size.rows == 0) return;
-        self.fg_rows.lists[0].clearRetainingCapacity();
-        self.fg_rows.lists[lastCursorList(self.size.rows)].clearRetainingCapacity();
+        self.fg_rows[0].clearRetainingCapacity();
+        self.fg_rows[lastCursorList(self.size.rows)].clearRetainingCapacity();
 
         const cell = v orelse return;
         const style = cursor_style orelse return;
 
         switch (style) {
             // Block cursors should be drawn first
-            .block => self.fg_rows.lists[0].appendAssumeCapacity(cell),
+            .block => self.fg_rows[0].appendAssumeCapacity(cell),
             // Other cursor styles should be drawn last
-            .block_hollow, .bar, .underline, .lock => self.fg_rows.lists[lastCursorList(self.size.rows)].appendAssumeCapacity(cell),
+            .block_hollow, .bar, .underline, .lock => self.fg_rows[lastCursorList(self.size.rows)].appendAssumeCapacity(cell),
         }
     }
 
     /// Returns the current cursor glyph if present, checking both cursor lists.
     pub fn getCursorGlyph(self: *Contents) ?shaderpkg.CellText {
         if (self.size.rows == 0) return null;
-        if (self.fg_rows.lists[0].items.len > 0) {
-            return self.fg_rows.lists[0].items[0];
+        if (self.fg_rows[0].items.len > 0) {
+            return self.fg_rows[0].items[0];
         }
-        if (self.fg_rows.lists[lastCursorList(self.size.rows)].items.len > 0) {
-            return self.fg_rows.lists[lastCursorList(self.size.rows)].items[0];
+        if (self.fg_rows[lastCursorList(self.size.rows)].items.len > 0) {
+            return self.fg_rows[lastCursorList(self.size.rows)].items[0];
         }
         return null;
     }
@@ -218,7 +204,7 @@ pub const Contents = struct {
             // We have a special list containing the cursor cell at the start
             // of our fg row collection, so we need to add 1 to the y to get
             // the correct index.
-            => try self.fg_rows.lists[y + 1].append(alloc, cell),
+            => try self.fg_rows[y + 1].append(alloc, cell),
         }
     }
 
@@ -231,7 +217,7 @@ pub const Contents = struct {
         // We have a special list containing the cursor cell at the start
         // of our fg row collection, so we need to add 1 to the y to get
         // the correct index.
-        self.fg_rows.lists[y + 1].clearRetainingCapacity();
+        self.fg_rows[y + 1].clearRetainingCapacity();
     }
 };
 
@@ -408,14 +394,14 @@ test Contents {
 
     // We should start off empty after resizing.
     for (0..rows) |y| {
-        try testing.expect(c.fg_rows.lists[y + 1].items.len == 0);
+        try testing.expect(c.fg_rows[y + 1].items.len == 0);
         for (0..cols) |x| {
             try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(y, x).*);
         }
     }
     // And the cursor row should have a capacity of 1 and also be empty.
-    try testing.expect(c.fg_rows.lists[0].capacity == 1);
-    try testing.expect(c.fg_rows.lists[0].items.len == 0);
+    try testing.expect(c.fg_rows[0].capacity == 1);
+    try testing.expect(c.fg_rows[0].items.len == 0);
 
     // Add some contents.
     const bg_cell: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
@@ -428,12 +414,12 @@ test Contents {
     try c.add(alloc, .text, fg_cell);
     try testing.expectEqual(bg_cell, c.bgCell(1, 4).*);
     // The fg row index is offset by 1 because of the cursor list.
-    try testing.expectEqual(fg_cell, c.fg_rows.lists[2].items[0]);
+    try testing.expectEqual(fg_cell, c.fg_rows[2].items[0]);
 
     // And we should be able to clear it.
     c.clear(1);
     for (0..rows) |y| {
-        try testing.expect(c.fg_rows.lists[y + 1].items.len == 0);
+        try testing.expect(c.fg_rows[y + 1].items.len == 0);
         for (0..cols) |x| {
             try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(y, x).*);
         }
@@ -447,18 +433,47 @@ test Contents {
         .color = .{ 0, 0, 0, 1 },
     };
     c.setCursor(cursor_cell, .block);
-    try testing.expectEqual(cursor_cell, c.fg_rows.lists[0].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[0].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
 
     // And remove it.
     c.setCursor(null, null);
-    try testing.expectEqual(0, c.fg_rows.lists[0].items.len);
+    try testing.expectEqual(0, c.fg_rows[0].items.len);
     try testing.expect(c.getCursorGlyph() == null);
 
     // Add a hollow cursor.
     c.setCursor(cursor_cell, .block_hollow);
-    try testing.expectEqual(cursor_cell, c.fg_rows.lists[rows + 1].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[rows + 1].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
+}
+
+test "Contents resize grows and shrinks" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Contents = .{};
+    defer c.deinit(alloc);
+
+    try c.resize(alloc, .{ .rows = 2, .columns = 2 });
+    var cell: shaderpkg.CellText = .{
+        .atlas = .grayscale,
+        .grid_pos = .{ 1, 1 },
+        .color = .{ 0, 0, 0, 1 },
+    };
+    try c.add(alloc, .text, cell);
+    c.bgCell(1, 1).* = .{ 0, 0, 0, 1 };
+    c.setCursor(cell, .bar);
+
+    try c.resize(alloc, .{ .rows = 3, .columns = 4 });
+    try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(1, 1).*);
+    try testing.expectEqual(@as(usize, 0), c.fg_rows[2].items.len);
+    try testing.expectEqual(@as(?shaderpkg.CellText, null), c.getCursorGlyph());
+    cell.grid_pos = .{ 3, 2 };
+    try c.add(alloc, .text, cell);
+
+    try c.resize(alloc, .{ .rows = 1, .columns = 1 });
+    cell.grid_pos = .{ 0, 0 };
+    try c.add(alloc, .text, cell);
 }
 
 test "Contents clear retains other content" {
@@ -498,7 +513,7 @@ test "Contents clear retains other content" {
     // Row 2 should still contain its cells.
     try testing.expectEqual(bg_cell_2, c.bgCell(2, 4).*);
     // Fg row index is +1 because of cursor list at start
-    try testing.expectEqual(fg_cell_2, c.fg_rows.lists[3].items[0]);
+    try testing.expectEqual(fg_cell_2, c.fg_rows[3].items[0]);
 }
 
 test "Contents clear last added content" {
@@ -538,115 +553,7 @@ test "Contents clear last added content" {
     // Row 1 should still contain its cells.
     try testing.expectEqual(bg_cell_1, c.bgCell(1, 4).*);
     // Fg row index is +1 because of cursor list at start
-    try testing.expectEqual(fg_cell_1, c.fg_rows.lists[2].items[0]);
-}
-
-test "Contents resizes to the 1 pt grid of a 4K client" {
-    // #674: at the zoom-out floor a 3840x2088 client holds 3840x1044 cells
-    // when the cell is 1x2 px. Each foreground row list starts with room for
-    // three entries per column, here 1046 lists of 11,520 entries.
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    const size: renderer.GridSize = .{ .columns = 3840, .rows = 1044 };
-    var c: Contents = .{};
-    try c.resize(alloc, size);
-    defer c.deinit(alloc);
-
-    try testing.expectEqual(@as(usize, 3840 * 1044), c.bg_cells.len);
-    try testing.expectEqual(@as(usize, 1044 + 2), c.fg_rows.lists.len);
-    try testing.expect(c.fg_rows.lists[1].capacity >= 3840 * 3);
-    c.bgCell(1043, 3839).* = .{ 0, 0, 0, 1 };
-    try c.add(alloc, .text, .{
-        .atlas = .grayscale,
-        .grid_pos = .{ 3839, 1043 },
-        .color = .{ 0, 0, 0, 1 },
-    });
-    try testing.expectEqual(@as(usize, 1), c.fg_rows.lists[1044].items.len);
-}
-
-test "Contents resizes past 21845 columns" {
-    // Three foreground entries per column no longer fit a 16-bit column
-    // count past 21845 columns (a window that spans six 4K monitors at the
-    // 1 pt floor), so the capacity is computed in usize.
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var c: Contents = .{};
-    try c.resize(alloc, .{ .columns = 21846, .rows = 1 });
-    defer c.deinit(alloc);
-    try testing.expect(c.fg_rows.lists[1].capacity >= 21846 * 3);
-}
-
-test "Contents reaches its last cursor list at 65535 rows" {
-    // The last cursor list is `lists[rows + 1]`, one past what a 16-bit row
-    // count holds at 65535 rows.
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var c: Contents = .{};
-    try c.resize(alloc, .{ .columns = 1, .rows = 65535 });
-    defer c.deinit(alloc);
-    const cursor: shaderpkg.CellText = .{
-        .atlas = .grayscale,
-        .bools = .{ .is_cursor_glyph = true },
-        .grid_pos = .{ 0, 65534 },
-        .color = .{ 0, 0, 0, 1 },
-    };
-    c.setCursor(cursor, .bar);
-    try testing.expectEqual(cursor, c.getCursorGlyph().?);
-    try testing.expectEqual(@as(usize, 1), c.fg_rows.lists[65536].items.len);
-}
-
-test "Contents keeps its size and buffers when a resize fails" {
-    // #674: at the 1 pt floor one 4K surface asks for about 800 MB of these
-    // buffers. A resize that recorded the new size before allocating left a
-    // failed enlargement with the old, smaller buffers and the new size, so
-    // the next frame skipped the resize and indexed past them. Each
-    // allocation the enlargement makes fails in turn here.
-    const testing = std.testing;
-    const small: renderer.GridSize = .{ .columns = 4, .rows = 2 };
-    const large: renderer.GridSize = .{ .columns = 80, .rows = 24 };
-
-    var fail_at: usize = 0;
-    while (true) : (fail_at += 1) {
-        var failing: testing.FailingAllocator = .init(testing.allocator, .{});
-        const alloc = failing.allocator();
-
-        var c: Contents = .{};
-        try c.resize(alloc, small);
-        defer c.deinit(alloc);
-        c.bgCell(1, 3).* = .{ 1, 2, 3, 4 };
-        try c.add(alloc, .text, .{ .atlas = .grayscale, .grid_pos = .{ 3, 1 }, .color = .{ 0, 0, 0, 1 } });
-        const bg_cells = c.bg_cells;
-        const lists = c.fg_rows.lists;
-
-        failing.fail_index = failing.alloc_index + fail_at;
-        c.resize(alloc, large) catch |err| {
-            errdefer std.debug.print("allocation {d} of the resize failed\n", .{fail_at});
-            try testing.expectEqual(error.OutOfMemory, err);
-            try testing.expectEqual(small, c.size);
-            try testing.expectEqual(bg_cells.ptr, c.bg_cells.ptr);
-            try testing.expectEqual(bg_cells.len, c.bg_cells.len);
-            try testing.expectEqual(lists.ptr, c.fg_rows.lists.ptr);
-            try testing.expectEqual(lists.len, c.fg_rows.lists.len);
-            try testing.expectEqual(shaderpkg.CellBg{ 1, 2, 3, 4 }, c.bgCell(1, 3).*);
-            try testing.expectEqual(@as(usize, 1), c.fg_rows.lists[2].items.len);
-
-            // The next frame's retry succeeds.
-            failing.fail_index = std.math.maxInt(usize);
-            try c.resize(alloc, large);
-            try testing.expectEqual(large, c.size);
-            try testing.expectEqual(@as(usize, 80 * 24), c.bg_cells.len);
-            try testing.expectEqual(@as(usize, 24 + 2), c.fg_rows.lists.len);
-            continue;
-        };
-
-        // No allocation was left to fail: every one has been tried.
-        try testing.expect(fail_at > 0);
-        try testing.expectEqual(large, c.size);
-        break;
-    }
+    try testing.expectEqual(fg_cell_1, c.fg_rows[2].items[0]);
 }
 
 test "Contents with zero-sized screen" {
@@ -660,34 +567,11 @@ test "Contents with zero-sized screen" {
     try testing.expect(c.getCursorGlyph() == null);
 }
 
-test "DirtyRows tracks contiguous bounds" {
-    const testing = std.testing;
-
-    var rows: DirtyRows = .none;
-    rows.includeRow(4);
-    rows.includeRow(6);
-    rows.includeRow(5);
-
-    switch (rows) {
-        .range => |range| {
-            try testing.expectEqual(@as(usize, 4), range.start);
-            try testing.expectEqual(@as(usize, 7), range.end);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    rows.markFull();
-    try testing.expect(rows == .full);
-
-    rows.reset();
-    try testing.expect(rows == .none);
-}
-
 test "Cell constraint widths" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
         .cols = 4,
         .rows = 1,
     });
@@ -854,4 +738,135 @@ test "Cell constraint widths" {
             state.cols,
         ));
     }
+}
+
+test "Contents resizes to the 1 pt grid of a 4K client" {
+    // #674: at the zoom-out floor a 3840x2088 client holds 3840x1044 cells
+    // when the cell is 1x2 px. Each foreground row list starts with room for
+    // three entries per column, here 1046 lists of 11,520 entries.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const size: renderer.GridSize = .{ .columns = 3840, .rows = 1044 };
+    var c: Contents = .{};
+    try c.resize(alloc, size);
+    defer c.deinit(alloc);
+
+    try testing.expectEqual(@as(usize, 3840 * 1044), c.bg_cells.len);
+    try testing.expectEqual(@as(usize, 1044 + 2), c.fg_rows.len);
+    try testing.expect(c.fg_rows[1].capacity >= 3840 * 3);
+    c.bgCell(1043, 3839).* = .{ 0, 0, 0, 1 };
+    try c.add(alloc, .text, .{
+        .atlas = .grayscale,
+        .grid_pos = .{ 3839, 1043 },
+        .color = .{ 0, 0, 0, 1 },
+    });
+    try testing.expectEqual(@as(usize, 1), c.fg_rows[1044].items.len);
+}
+
+test "Contents resizes past 21845 columns" {
+    // Three foreground entries per column no longer fit a 16-bit column
+    // count past 21845 columns (a window that spans six 4K monitors at the
+    // 1 pt floor), so the capacity is computed in usize.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Contents = .{};
+    try c.resize(alloc, .{ .columns = 21846, .rows = 1 });
+    defer c.deinit(alloc);
+    try testing.expect(c.fg_rows[1].capacity >= 21846 * 3);
+}
+
+test "Contents reaches its last cursor list at 65535 rows" {
+    // The last cursor list is `fg_rows[rows + 1]`, one past what a 16-bit row
+    // count holds at 65535 rows.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Contents = .{};
+    try c.resize(alloc, .{ .columns = 1, .rows = 65535 });
+    defer c.deinit(alloc);
+    const cursor: shaderpkg.CellText = .{
+        .atlas = .grayscale,
+        .bools = .{ .is_cursor_glyph = true },
+        .grid_pos = .{ 0, 65534 },
+        .color = .{ 0, 0, 0, 1 },
+    };
+    c.setCursor(cursor, .bar);
+    try testing.expectEqual(cursor, c.getCursorGlyph().?);
+    try testing.expectEqual(@as(usize, 1), c.fg_rows[65536].items.len);
+}
+
+test "Contents keeps its size and buffers when a resize fails" {
+    // #674: at the 1 pt floor one 4K surface asks for about 800 MB of these
+    // buffers. A resize that recorded the new size before allocating left a
+    // failed enlargement with the old, smaller buffers and the new size, so
+    // the next frame skipped the resize and indexed past them. Each
+    // allocation the enlargement makes fails in turn here.
+    const testing = std.testing;
+    const small: renderer.GridSize = .{ .columns = 4, .rows = 2 };
+    const large: renderer.GridSize = .{ .columns = 80, .rows = 24 };
+
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{});
+        const alloc = failing.allocator();
+
+        var c: Contents = .{};
+        try c.resize(alloc, small);
+        defer c.deinit(alloc);
+        c.bgCell(1, 3).* = .{ 1, 2, 3, 4 };
+        try c.add(alloc, .text, .{ .atlas = .grayscale, .grid_pos = .{ 3, 1 }, .color = .{ 0, 0, 0, 1 } });
+        const bg_cells = c.bg_cells;
+        const lists = c.fg_rows;
+
+        failing.fail_index = failing.alloc_index + fail_at;
+        c.resize(alloc, large) catch |err| {
+            errdefer std.debug.print("allocation {d} of the resize failed\n", .{fail_at});
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(small, c.size);
+            try testing.expectEqual(bg_cells.ptr, c.bg_cells.ptr);
+            try testing.expectEqual(bg_cells.len, c.bg_cells.len);
+            try testing.expectEqual(lists.ptr, c.fg_rows.ptr);
+            try testing.expectEqual(lists.len, c.fg_rows.len);
+            try testing.expectEqual(shaderpkg.CellBg{ 1, 2, 3, 4 }, c.bgCell(1, 3).*);
+            try testing.expectEqual(@as(usize, 1), c.fg_rows[2].items.len);
+
+            // The next frame's retry succeeds.
+            failing.fail_index = std.math.maxInt(usize);
+            try c.resize(alloc, large);
+            try testing.expectEqual(large, c.size);
+            try testing.expectEqual(@as(usize, 80 * 24), c.bg_cells.len);
+            try testing.expectEqual(@as(usize, 24 + 2), c.fg_rows.len);
+            continue;
+        };
+
+        // No allocation was left to fail: every one has been tried.
+        try testing.expect(fail_at > 0);
+        try testing.expectEqual(large, c.size);
+        break;
+    }
+}
+
+test "DirtyRows tracks contiguous bounds" {
+    const testing = std.testing;
+
+    var rows: DirtyRows = .none;
+    rows.includeRow(4);
+    rows.includeRow(6);
+    rows.includeRow(5);
+
+    switch (rows) {
+        .range => |range| {
+            try testing.expectEqual(@as(usize, 4), range.start);
+            try testing.expectEqual(@as(usize, 7), range.end);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    rows.markFull();
+    try testing.expect(rows == .full);
+
+    rows.reset();
+    try testing.expect(rows == .none);
 }

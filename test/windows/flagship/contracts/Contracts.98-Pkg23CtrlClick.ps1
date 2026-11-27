@@ -236,13 +236,13 @@ else {
     $pkg23SeamMutations = @(
         @{ Name = 'this checkout'; File = $null; Old = $null; New = $null }
         @{ Name = 'the opener goes on to the shell after the trace'; File = 'app'; Old = 'try recordOpenUrlForTest(self.core_app.alloc, target)) return;'; New = 'try recordOpenUrlForTest(self.core_app.alloc, target)) {}' }
-        @{ Name = 'the trace is not Debug-only but never runs'; File = 'app'; Old = 'if (builtin.mode == .Debug and'; New = 'if (builtin.mode == .ReleaseFast and' }
+        @{ Name = 'the trace is not Debug-only but never runs'; File = 'app'; Old = 'if (builtin.mode == .debug and'; New = 'if (builtin.mode == .fast and' }
         @{ Name = 'a queued target goes straight to the shell'; File = 'app'; Old = 'target, dispatchOpenTarget),'; New = 'target, shellExecuteOpenTarget),' }
         @{ Name = 'a second caller reaches the shell'; File = 'app'; Old = 'try self.deferShellRequest(.{ .target = owned });'; New = 'try self.deferShellRequest(.{ .target = owned }); if (false) try shellExecuteOpenTarget(self, owned);' }
         @{ Name = 'a link open is not queued'; File = 'app'; Old = 'orelse return self.app.deferOpenTarget(checked);'; New = 'orelse return self.app.dispatchOpenTarget(checked);' }
         @{ Name = 'the trace variable is renamed'; File = 'win32'; Old = '"NOCTTY_WIN32_OPEN_URL_TRACE_FILE",'; New = '"NOCTTY_OPEN_URL_TRACE",' }
-        @{ Name = 'the trace appends'; File = 'win32'; Old = 'createFileAbsolute(path, .{ .truncate = true })'; New = 'createFileAbsolute(path, .{ .truncate = false })' }
-        @{ Name = 'the trace reports no record'; File = 'win32'; Old = "try writeOpenUrlTrace(file, url);`n    return true;"; New = "try writeOpenUrlTrace(file, url);`n    return false;" }
+        @{ Name = 'the trace appends'; File = 'win32'; Old = 'createFileAbsolute(io, path, .{ .truncate = true })'; New = 'createFileAbsolute(io, path, .{ .truncate = false })' }
+        @{ Name = 'the trace reports no record'; File = 'win32'; Old = "try writeOpenUrlTrace(io, file, url);`n    return true;"; New = "try writeOpenUrlTrace(io, file, url);`n    return false;" }
         @{ Name = 'a record has no line end'; File = 'win32'; Old = 'print("{s}\r\n", .{url})'; New = 'print("{s}", .{url})' }
     )
     foreach ($mutation in $pkg23SeamMutations) {

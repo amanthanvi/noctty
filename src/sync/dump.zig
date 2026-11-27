@@ -66,6 +66,8 @@
 //! Zig 0.15.2: conpty.md, 2026-10-31 SURFACE-STACK).
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const thread_role = @import("thread_role.zig");
@@ -235,8 +237,8 @@ pub const Dump = struct {
     /// Sets the header's kind. It fails once the dump has been opened or
     /// found off, that is after the first pair.
     pub fn setKind(self: *Dump, kind: ProcessKind) error{AlreadyDecided}!void {
-        open_lock.lock();
-        defer open_lock.unlock();
+        open_lock.lockUncancelable(lockIo());
+        defer open_lock.unlock(lockIo());
         if (self.state.load(.acquire) != .closed) return error.AlreadyDecided;
         self.kind = kind;
     }
@@ -252,8 +254,8 @@ pub const Dump = struct {
     /// process dump stays open until the process ends.
     pub fn close(self: *Dump) void {
         {
-            open_lock.lock();
-            defer open_lock.unlock();
+            open_lock.lockUncancelable(lockIo());
+            defer open_lock.unlock(lockIo());
             if (self.state.load(.seq_cst) != .open) return;
             self.off = .unset;
             self.state.store(.off, .seq_cst);
@@ -281,8 +283,8 @@ pub const Dump = struct {
         @branchHint(.cold);
         var dir_len: usize = 0;
         const handle = handle: {
-            open_lock.lock();
-            defer open_lock.unlock();
+            open_lock.lockUncancelable(lockIo());
+            defer open_lock.unlock(lockIo());
             switch (self.state.load(.acquire)) {
                 .open => return self.handle.?,
                 .off => return null,
@@ -353,18 +355,18 @@ pub const Dump = struct {
         // Write access, not append access alone: a failure overwrites the
         // header's first byte (`markFailed`); every line is written at the
         // end-of-file offset.
-        const handle = windows.kernel32.CreateFileW(
+        const handle = win32_sys.CreateFileW(
             path_buf[0..len :0].ptr,
-            windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA,
-            windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE,
+            win32_types.FILE_WRITE_DATA | win32_types.FILE_APPEND_DATA,
+            win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_DELETE,
             null, // not inheritable
-            windows.CREATE_NEW,
-            windows.FILE_ATTRIBUTE_NORMAL,
+            win32_types.CREATE_NEW,
+            win32_types.FILE_ATTRIBUTE_NORMAL,
             null,
         );
         if (handle == windows.INVALID_HANDLE_VALUE) {
             const err = windows.GetLastError();
-            return self.fail(if (err == .FILE_EXISTS) .exists else .create_failed, @intFromEnum(err));
+            return self.fail(if (err == .FILE_EXISTS) .exists else .create_failed, @backingInt(err));
         }
 
         const header = formatHeader(&header_buf, .{
@@ -390,7 +392,15 @@ pub const Dump = struct {
 };
 
 /// Serialises every dump's open, and guards the static buffers below.
-var open_lock: std.Thread.Mutex = .{};
+var open_lock: std.Io.Mutex = .init;
+
+/// The `Io` of `open_lock`'s waits and wakes: as `state_mutex.zig`'s
+/// `innerIo`, `lockUncancelable` and `unlock` reach only the futex calls,
+/// which `std.Io.Threaded` runs on the OS futex whatever the instance, so a
+/// dump keeps its `Io`-free API with no cancelation point, as on 0.15.
+inline fn lockIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 var path_buf: [32768]u16 = undefined;
 var module_buf: [32768]u16 = undefined;
 var header_buf: [header_max]u8 = undefined;
@@ -411,7 +421,7 @@ pub const failed_mark: u8 = '!';
 const end_of_file: u64 = std.math.maxInt(u64);
 
 /// The failed pair write a test injects (`Fault`): a full disk's.
-const injected_error: ?u32 = @intFromEnum(windows.Win32Error.DISK_FULL);
+const injected_error: ?u32 = @backingInt(windows.Win32Error.DISK_FULL);
 
 /// A test's writer fault: the first `pairs_before` pairs are written and
 /// every later one fails as a full disk fails it, writing nothing; with
@@ -430,16 +440,16 @@ pub const Fault = struct {
 fn writeAt(handle: windows.HANDLE, bytes: []const u8, offset: u64) ?u32 {
     var written: windows.DWORD = 0;
     const len: windows.DWORD = @intCast(bytes.len);
-    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME = .{
         .Offset = @truncate(offset),
         .OffsetHigh = @truncate(offset >> 32),
     };
     // The handle is synchronous: the call returns once the write is done.
-    if (windows.kernel32.WriteFile(handle, bytes.ptr, len, &written, &overlapped) == 0) {
-        return @intFromEnum(windows.GetLastError());
+    if (win32_sys.WriteFile(handle, bytes.ptr, len, &written, &overlapped) == 0) {
+        return @backingInt(windows.GetLastError());
     }
-    if (written != len) return @intFromEnum(windows.Win32Error.WRITE_FAULT);
+    if (written != len) return @backingInt(windows.Win32Error.WRITE_FAULT);
     return null;
 }
 
@@ -498,7 +508,7 @@ fn lower(unit: u16) u16 {
 /// The file name of the image at `base`, in `module_buf` (under
 /// `open_lock`).
 fn moduleFileName(base: usize) ?[]const u16 {
-    const n = windows.kernel32.GetModuleFileNameW(@ptrFromInt(base), &module_buf, module_buf.len);
+    const n = win32_sys.GetModuleFileNameW(@ptrFromInt(base), &module_buf, module_buf.len);
     if (n == 0 or n >= module_buf.len) return null;
     return baseName(u16, module_buf[0..n]);
 }
@@ -887,7 +897,7 @@ extern "kernel32" fn GetModuleHandleExW(
     flags: u32,
     name: ?*const anyopaque,
     module: *?windows.HMODULE,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn GetProcessTimes(
     process: windows.HANDLE,
@@ -895,7 +905,7 @@ extern "kernel32" fn GetProcessTimes(
     exit: *windows.FILETIME,
     kernel: *windows.FILETIME,
     user: *windows.FILETIME,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn GetEnvironmentVariableW(
     name: [*:0]const u16,
@@ -1142,7 +1152,7 @@ test "processIdentity is this process's ID and creation time" {
     try testing.expectEqual(windows.GetCurrentProcessId(), id.pid);
     // Created after 2020-01-01 (FILETIME 132223104000000000) and not in the
     // future (1970 is FILETIME 116444736000000000).
-    const now: u64 = @intCast(@divFloor(std.time.nanoTimestamp(), 100) + 116444736000000000);
+    const now: u64 = @intCast(@divFloor(std.Io.Timestamp.now(testing.io, .real).toNanoseconds(), 100) + 116444736000000000);
     try testing.expect(id.start > 132223104000000000);
     try testing.expect(id.start <= now);
     try testing.expectEqual(id, processIdentity());
@@ -1178,7 +1188,7 @@ pub const TestDir = struct {
     pub fn init() !TestDir {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
-        const utf8 = try tmp.dir.realpathAlloc(testing.allocator, ".");
+        const utf8 = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
         defer testing.allocator.free(utf8);
         return .{ .tmp = tmp, .path = try std.unicode.wtf8ToWtf16LeAllocZ(testing.allocator, utf8) };
     }
@@ -1192,22 +1202,22 @@ pub const TestDir = struct {
     pub fn count(self: *TestDir) !usize {
         var n: usize = 0;
         var it = self.tmp.dir.iterate();
-        while (try it.next()) |_| n += 1;
+        while (try it.next(testing.io)) |_| n += 1;
         return n;
     }
 
     /// The one dump's contents, read through a handle of its own.
     pub fn read(self: *TestDir) ![]u8 {
         var it = self.tmp.dir.iterate();
-        const entry = (try it.next()) orelse return error.NoDump;
-        if (try it.next() != null) return error.TwoFiles;
+        const entry = (try it.next(testing.io)) orelse return error.NoDump;
+        if (try it.next(testing.io) != null) return error.TwoFiles;
         if (!std.mem.endsWith(u8, entry.name, extension)) return error.NotADump;
-        return self.tmp.dir.readFileAlloc(testing.allocator, entry.name, 1 << 20);
+        return self.tmp.dir.readFileAlloc(testing.io, entry.name, testing.allocator, .limited(1 << 20));
     }
 
     pub fn name(self: *TestDir, buf: []u8) ![]const u8 {
         var it = self.tmp.dir.iterate();
-        const entry = (try it.next()) orelse return error.NoDump;
+        const entry = (try it.next(testing.io)) orelse return error.NoDump;
         if (entry.name.len > buf.len) return error.NoSpace;
         @memcpy(buf[0..entry.name.len], entry.name);
         return buf[0..entry.name.len];
@@ -1282,7 +1292,7 @@ test "a dump never truncates or appends to an existing file, and it reads back a
     try testing.expect(b.append(0x3000, .search, .lock));
     try testing.expect(!b.isOpen());
     try testing.expectEqual(Off.exists, b.off.?);
-    try testing.expectEqual(@intFromEnum(windows.Win32Error.FILE_EXISTS), b.win32_error);
+    try testing.expectEqual(@backingInt(windows.Win32Error.FILE_EXISTS), b.win32_error);
 
     const after = try dir.read();
     defer testing.allocator.free(after);
@@ -1343,7 +1353,7 @@ test "a pair the dump fails to write marks it failed in place, and no reader tak
     // A full disk: nothing of the pair is written, and append says so.
     try testing.expect(!d.append(0x2000, .termio, .lock));
     try testing.expectEqual(@as(u32, 1), d.failedAppends());
-    try testing.expectEqual(@intFromEnum(windows.Win32Error.DISK_FULL), d.append_error);
+    try testing.expectEqual(@backingInt(windows.Win32Error.DISK_FULL), d.append_error);
     const after = try dir.read();
     defer testing.allocator.free(after);
     // The header's first byte is `!`, overwritten in place; the rest is as
@@ -1410,7 +1420,7 @@ test "isolated: a full disk that stops both a pair and the in-place mark panics 
     if (thread_role.layer == .off) return error.SkipZigTest;
     const isolated = @import("isolated.zig");
     if (isolated.inChild()) {
-        const dir_utf8 = try std.process.getEnvVarOwned(testing.allocator, env_var);
+        const dir_utf8 = try testing.environ.getAlloc(testing.allocator, env_var);
         defer testing.allocator.free(dir_utf8);
         const dir = try std.unicode.wtf8ToWtf16LeAllocZ(testing.allocator, dir_utf8);
         defer testing.allocator.free(dir);
@@ -1479,6 +1489,6 @@ test "a missing directory leaves the dump off with its Win32 error" {
     var d: Dump = .{ .target = .{ .directory = missing } };
     try testing.expect(d.append(0x1000, .ui, .lock));
     try testing.expectEqual(Off.create_failed, d.off.?);
-    try testing.expectEqual(@intFromEnum(windows.Win32Error.PATH_NOT_FOUND), d.win32_error);
+    try testing.expectEqual(@backingInt(windows.Win32Error.PATH_NOT_FOUND), d.win32_error);
     try testing.expectEqual(@as(usize, 0), try dir.count());
 }

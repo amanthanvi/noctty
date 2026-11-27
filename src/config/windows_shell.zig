@@ -1,8 +1,13 @@
 const std = @import("std");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 const win32 = @import("../os/windows.zig");
+const windows_ext = @import("../os/windows_ext.zig");
 const thread_role = @import("../sync/thread_role.zig");
 const Command = @import("command.zig").Command;
 const windows_shell_types = @import("windows_shell_types.zig");
@@ -13,10 +18,10 @@ const windows = std.os.windows;
 
 const wsl_probe_timeout_ms: windows.DWORD = 1500;
 const wsl_list_timeout_ms: windows.DWORD = 1500;
-var wsl_probe_mutex: std.Thread.Mutex = .{};
+var wsl_probe_mutex: std.Io.Mutex = .init;
 var wsl_probe_cache: ?bool = null;
 var wsl_profile_probe_cache: ?bool = null;
-var ssh_missing_mutex: std.Thread.Mutex = .{};
+var ssh_missing_mutex: std.Io.Mutex = .init;
 var ssh_missing_logged = false;
 const wsl_shell_integration_next_step =
     "Enable shell integration inside the selected WSL shell startup.";
@@ -44,7 +49,7 @@ pub fn shouldApplyUtf8Console(
 
 pub fn shouldApplyUtf8ConsoleForCurrentSystem(mode: Utf8Console) bool {
     if (comptime builtin.os.tag != .windows) return false;
-    return shouldApplyUtf8Console(mode, win32.GetACP(), win32.GetOEMCP());
+    return shouldApplyUtf8Console(mode, windows_ext.GetACP(), windows_ext.GetOEMCP());
 }
 
 fn isLegacyCjkCodePage(code_page: u32) bool {
@@ -106,7 +111,7 @@ pub const Profile = struct {
         var command = try self.command.clone(alloc);
         errdefer command.deinit(alloc);
         const working_directory: ?WorkingDirectory = if (self.working_directory) |dir| switch (dir) {
-            .path => |path| .{ .path = try alloc.dupeZ(u8, path) },
+            .path => |path| .{ .path = try alloc.dupeSentinel(u8, path, 0) },
             .home, .inherit => dir,
         } else null;
         errdefer if (working_directory) |dir| switch (dir) {
@@ -193,7 +198,7 @@ pub const UserLaunch = struct {
     env: []const EnvEntry = &.{},
 
     pub fn clone(self: UserLaunch, alloc: Allocator) Allocator.Error!UserLaunch {
-        const line = try alloc.dupeZ(u8, self.command_line);
+        const line = try alloc.dupeSentinel(u8, self.command_line, 0);
         errdefer alloc.free(line);
         const env = try alloc.alloc(EnvEntry, self.env.len);
         var copied: usize = 0;
@@ -205,9 +210,9 @@ pub const UserLaunch = struct {
             alloc.free(env);
         }
         for (self.env, env) |src, *dst| {
-            const key = try alloc.dupeZ(u8, src.key);
+            const key = try alloc.dupeSentinel(u8, src.key, 0);
             errdefer alloc.free(key);
-            dst.* = .{ .key = key, .value = try alloc.dupeZ(u8, src.value) };
+            dst.* = .{ .key = key, .value = try alloc.dupeSentinel(u8, src.value, 0) };
             copied += 1;
         }
         return .{ .command_line = line, .env = env };
@@ -237,7 +242,7 @@ pub fn layerEnv(alloc: Allocator, env: anytype, entries: []const EnvEntry) Alloc
             } else index += 1;
         }
         if (entry.value.len == 0) continue;
-        try env.map.put(alloc, try alloc.dupeZ(u8, entry.key), try alloc.dupeZ(u8, entry.value));
+        try env.map.put(alloc, try alloc.dupeSentinel(u8, entry.key, 0), try alloc.dupeSentinel(u8, entry.value, 0));
     }
 }
 
@@ -311,8 +316,8 @@ pub const UserProfiles = struct {
         var i: usize = 0;
         while (it.next()) |kv| : (i += 1) {
             out[i] = .{
-                .key = try alloc.dupeZ(u8, kv.key_ptr.*),
-                .value = try alloc.dupeZ(u8, kv.value_ptr.*),
+                .key = try alloc.dupeSentinel(u8, kv.key_ptr.*, 0),
+                .value = try alloc.dupeSentinel(u8, kv.value_ptr.*, 0),
             };
         }
         return out;
@@ -330,6 +335,18 @@ pub const UserProfiles = struct {
     }
 };
 
+/// One variable of the live environment, as 0.15's `getEnvVarOwned` read it
+/// on Windows: that entry alone, as WTF-8. `Environ.getAlloc` copies the whole
+/// block into a map for each lookup, which an arena (profile discovery's)
+/// keeps until it is freed.
+fn envVarOwned(alloc: Allocator, name: []const u8) error{ OutOfMemory, EnvironmentVariableMissing, InvalidWtf8 }![]u8 {
+    if (comptime builtin.os.tag != .windows) return global.environ().getAlloc(alloc, name);
+    const name_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, name);
+    defer alloc.free(name_w);
+    const value = global.environ().getWindows(name_w) orelse return error.EnvironmentVariableMissing;
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, value);
+}
+
 /// noctty's own environment, read by name for `%NAME%` in a user profile
 /// (`expandProfileText`). The seam `appendUserProfiles` takes; tests pass a
 /// table of their own.
@@ -337,9 +354,9 @@ pub const ProcessEnvironment = struct {
     /// The value of `name` (compared without case, as Windows does), or null
     /// when it is not set.
     pub fn get(_: ProcessEnvironment, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
-        return std.process.getEnvVarOwned(alloc, name) catch |err| switch (err) {
+        return envVarOwned(alloc, name) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+            error.EnvironmentVariableMissing, error.InvalidWtf8 => null,
         };
     }
 };
@@ -433,7 +450,7 @@ const ExpandEnvironment = struct {
 pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const u8 {
     const wide = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, line);
     defer alloc.free(wide);
-    var it = try std.process.ArgIteratorWindows.init(alloc, wide);
+    var it = try std.process.Args.Iterator.Windows.init(alloc, wide);
     defer it.deinit();
     var argv: std.ArrayList([:0]const u8) = .empty;
     errdefer {
@@ -441,7 +458,7 @@ pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const 
         argv.deinit(alloc);
     }
     while (it.next()) |arg| {
-        const copy = try alloc.dupeZ(u8, arg);
+        const copy = try alloc.dupeSentinel(u8, arg, 0);
         argv.append(alloc, copy) catch |err| {
             alloc.free(copy);
             return err;
@@ -583,9 +600,9 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
     for (definition.env, env) |src, *dst| {
         const value = try expandProfileText(alloc, src.value, definition.global_env, expander);
         defer alloc.free(value);
-        const owned_value = try alloc.dupeZ(u8, value);
+        const owned_value = try alloc.dupeSentinel(u8, value, 0);
         errdefer alloc.free(owned_value);
-        dst.* = .{ .key = try alloc.dupeZ(u8, src.key), .value = owned_value };
+        dst.* = .{ .key = try alloc.dupeSentinel(u8, src.key, 0), .value = owned_value };
         filled += 1;
     }
 
@@ -595,7 +612,7 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
         .label = label,
         .command = command,
         .working_directory = working_directory,
-        .user = .{ .command_line = try alloc.dupeZ(u8, line), .env = env },
+        .user = .{ .command_line = try alloc.dupeSentinel(u8, line, 0), .env = env },
     };
 }
 
@@ -615,15 +632,17 @@ fn userWorkingDirectory(
     if (std.mem.eql(u8, value, "home")) return .home;
     if (std.mem.eql(u8, value, "inherit")) return .inherit;
     if (value.len >= 2 and value[0] == '~' and (value[1] == '/' or value[1] == '\\')) {
+        var environ_map = try global.environ().createMap(alloc);
+        defer environ_map.deinit();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (internal_os.home(&buf) catch null) |home| {
+        if (internal_os.home(global.io(), &environ_map, &buf) catch null) |home| {
             return .{ .path = try std.fmt.allocPrintSentinel(alloc, "{s}\\{s}", .{
-                std.mem.trimRight(u8, home, "\\/"),
+                std.mem.trimEnd(u8, home, "\\/"),
                 value[2..],
             }, 0) };
         }
     }
-    return .{ .path = try alloc.dupeZ(u8, value) };
+    return .{ .path = try alloc.dupeSentinel(u8, value, 0) };
 }
 
 /// noctty's environment for tests, a fixed table: the seam
@@ -779,7 +798,7 @@ test "user profile %NAME% reads env lines before noctty's environment" {
     } };
     // `env = Path=C:\team` and `env = PATH=C:\later` (Windows sees the
     // later one), plus a variable only noctty's environment has.
-    const global = [_]EnvEntry{
+    const global_env = [_]EnvEntry{
         .{ .key = "Path", .value = "C:\\team" },
         .{ .key = "OTHER", .value = "%USERPROFILE%" },
         .{ .key = "PATH", .value = "C:\\later" },
@@ -794,7 +813,7 @@ test "user profile %NAME% reads env lines before noctty's environment" {
             // The profile's own variable is not visible to its values.
             .{ .key = "SEEN", .value = "%MODE%" },
         },
-        .global_env = &global,
+        .global_env = &global_env,
     }};
     const profiles = try appendUserProfiles(alloc, try alloc.alloc(Profile, 0), &definitions, process);
     defer deinitProfiles(alloc, profiles);
@@ -878,11 +897,13 @@ test "user profile working directories take the working-directory values" {
         try testing.expectEqual(case.want, std.meta.activeTag(dir));
     }
     if (builtin.os.tag == .windows) {
+        var environ_map = try testing.environ.createMap(alloc);
+        defer environ_map.deinit();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (try internal_os.home(&buf)) |home| {
+        if (try internal_os.home(testing.io, &environ_map, &buf)) |home| {
             const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{});
             defer alloc.free(dir.path);
-            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimRight(u8, home, "\\/")));
+            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimEnd(u8, home, "\\/")));
             try testing.expect(std.mem.endsWith(u8, dir.path, "\\src"));
         }
     }
@@ -1366,7 +1387,7 @@ fn appendVisualStudioInstance(
     if (!visual_studio.isPlainInstanceId(instance.id)) return;
     if (!isOnLocalDrive(instance.path)) return;
     if (!host.installDirectory(instance.path)) return;
-    const root = std.mem.trimRight(u8, instance.path, "\\/");
+    const root = std.mem.trimEnd(u8, instance.path, "\\/");
     const dev_args = visual_studio.devCmdArguments(arch, instance.version);
 
     const bat = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, visual_studio.dev_cmd_relative });
@@ -1740,10 +1761,10 @@ test "Visual Studio installs on a share or behind a link are skipped" {
     // refused, the same install by its own path is listed.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("real/Common7/Tools");
-    try tmp.dir.makePath("link");
-    try tmp.dir.writeFile(.{ .sub_path = "real/Common7/Tools/VsDevCmd.bat", .data = "@echo off" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "real/Common7/Tools");
+    try tmp.dir.createDirPath(std.testing.io, "link");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/Common7/Tools/VsDevCmd.bat", .data = "@echo off" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const real = try std.fmt.allocPrint(alloc, "{s}\\real", .{root});
     defer alloc.free(real);
@@ -1952,7 +1973,7 @@ test "the machine's Visual Studio shells, through the stages a listing runs" {
                 try testing.expect(!std.mem.containsAtLeast(u8, profile.key, 1, first_id.?));
             }
         }
-        if (std.process.hasEnvVarConstant("NOCTTY_PRINT_VISUAL_STUDIO_PROFILES")) {
+        if (std.testing.environ.containsConstant("NOCTTY_PRINT_VISUAL_STUDIO_PROFILES")) {
             std.debug.print("visual-studio-profiles = {s}: {d} shown, {d} hidden\n", .{ @tagName(mode), shown_vs, vs_count - shown_vs });
             for (profiles) |profile| {
                 if (std.mem.startsWith(u8, profile.key, "vs:")) std.debug.print("  {s} {s}{s}\n", .{ profile.key, profile.label, if (profile.hidden) " (hidden)" else "" });
@@ -2153,10 +2174,10 @@ test "cloneProfiles copies every field into the target allocator" {
     defer arena.deinit();
     const src_alloc = arena.allocator();
     const argv = try src_alloc.alloc([:0]const u8, 2);
-    argv[0] = try src_alloc.dupeZ(u8, "wsl.exe");
-    argv[1] = try src_alloc.dupeZ(u8, "-d");
+    argv[0] = try src_alloc.dupeSentinel(u8, "wsl.exe", 0);
+    argv[1] = try src_alloc.dupeSentinel(u8, "-d", 0);
     const source = [_]Profile{
-        .{ .kind = .pwsh, .key = "pwsh", .label = "PowerShell", .command = .{ .shell = try src_alloc.dupeZ(u8, "pwsh.exe") } },
+        .{ .kind = .pwsh, .key = "pwsh", .label = "PowerShell", .command = .{ .shell = try src_alloc.dupeSentinel(u8, "pwsh.exe", 0) } },
         .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "Ubuntu", .palette_title = "WSL: Ubuntu", .command = .{ .direct = argv } },
     };
     const copy = try cloneProfiles(testing.allocator, &source);
@@ -2285,20 +2306,20 @@ pub fn executableCommand(alloc: Allocator, command: Command) !Command {
     if (!windowsNonDirectoryPathExists(path)) return command;
     const argv = try alloc.alloc([:0]const u8, 1);
     errdefer alloc.free(argv);
-    argv[0] = try alloc.dupeZ(u8, path);
+    argv[0] = try alloc.dupeSentinel(u8, path, 0);
     return .{ .direct = argv };
 }
 
 /// Resolve a bare integration executable using the child's search environment.
 /// Never consult the app's PATH or cwd, and never probe a network PATH entry.
 /// A batch/script match keeps the caller on its original shell launch path.
-pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.process.EnvMap) !?[:0]const u8 {
+pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.process.Environ.Map) !?[:0]const u8 {
     if (builtin.os.tag != .windows or exe.len == 0 or
         std.mem.indexOfAny(u8, exe, "\\/:") != null) return null;
     const path = env.get("PATH") orelse return null;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const found = searchPath(&buf, exe, path, env.get("PATHEXT"), false, acceptAnyPath) orelse return null;
-    return try alloc.dupeZ(u8, found);
+    return try alloc.dupeSentinel(u8, found, 0);
 }
 
 fn acceptAnyPath(_: []const u8) bool {
@@ -2320,7 +2341,7 @@ fn searchPath(
     accept: anytype,
 ) ?[]const u8 {
     const error_mode = struct {
-        extern "kernel32" fn SetThreadErrorMode(mode: u32, previous: ?*u32) callconv(.winapi) windows.BOOL;
+        extern "kernel32" fn SetThreadErrorMode(mode: u32, previous: ?*u32) callconv(.winapi) win32_types.BOOL;
     };
     var previous_mode: u32 = 0;
     const suppressed = error_mode.SetThreadErrorMode(0x0001 | 0x8000, &previous_mode) != 0;
@@ -2332,11 +2353,11 @@ fn searchPath(
     dirs: while (dirs.next()) |raw_dir| {
         const dir = stripOuterQuotes(std.mem.trim(u8, raw_dir, " \t"));
         if (internal_os.path.isNetworkOrDevicePath(dir) or !isDriveAbsolutePath(dir)) continue;
-        const drive_type = internal_os.windows.driveTypeForLetter(dir[0]);
-        if (drive_type == internal_os.windows.DRIVE_REMOTE) continue;
+        const drive_type = internal_os.windows_ext.driveTypeForLetter(dir[0]);
+        if (drive_type == internal_os.windows_ext.DRIVE_REMOTE) continue;
         // Discovery never spins up removable/optical media on the UI thread.
-        if (discovery and drive_type != internal_os.windows.DRIVE_FIXED and
-            drive_type != internal_os.windows.DRIVE_RAMDISK) continue;
+        if (discovery and drive_type != internal_os.windows_ext.DRIVE_FIXED and
+            drive_type != internal_os.windows_ext.DRIVE_RAMDISK) continue;
         if (discovery and !isLocalSearchDirectory(dir)) continue;
         var extensions = std.mem.splitScalar(u8, if (extension.len > 0) "" else pathext orelse ".COM;.EXE;.BAT;.CMD", ';');
         exts: while (extensions.next()) |raw_ext| {
@@ -2349,7 +2370,7 @@ fn searchPath(
             const candidate = std.fmt.bufPrint(buf, "{s}\\{s}{s}", .{ dir, exe, ext }) catch continue;
             if (discovery) {
                 const attributes = pathAttributes(candidate) orelse continue;
-                if (attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+                if (attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
             } else if (!windowsNonDirectoryPathExists(candidate)) continue;
             if (!isExeOrCom(if (extension.len > 0) extension else ext)) return null;
             if (!accept(candidate)) continue :dirs;
@@ -2362,7 +2383,7 @@ fn searchPath(
 /// Disable cmd's implicit cwd executable search for the final shell wrapper.
 /// Keep this in its environment: clearing it before the target immediately
 /// restores cwd lookup. Explicit paths and PATH entries retain cmd semantics.
-pub fn configureShellSearch(env: *std.process.EnvMap, windows_cmd_shell: bool) !void {
+pub fn configureShellSearch(env: *std.process.Environ.Map, windows_cmd_shell: bool) !void {
     if (builtin.os.tag == .windows and windows_cmd_shell and
         env.get("NoDefaultCurrentDirectoryInExePath") == null)
         try env.put("NoDefaultCurrentDirectoryInExePath", "1");
@@ -2370,7 +2391,7 @@ pub fn configureShellSearch(env: *std.process.EnvMap, windows_cmd_shell: bool) !
 
 test "PKG48 only shell wrappers receive the inherited cwd search guard" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var env = std.process.EnvMap.init(std.testing.allocator);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("PATH", "relative;C:\\Tools!;%literal%");
     try configureShellSearch(&env, false);
@@ -2391,10 +2412,10 @@ test "PKG48 only shell wrappers receive the inherited cwd search guard" {
 fn windowsNonDirectoryPathExists(path: []const u8) bool {
     // Explicit commands retain Windows link semantics, including Scoop's
     // current junction and paths with spaces. Only discovery refuses redirects.
-    const path_w = windows.sliceToPrefixedFileW(null, path) catch return false;
-    const attributes = windows.kernel32.GetFileAttributesW(path_w.span().ptr);
+    const path_w = prefixed_path.sliceToPrefixedFileW(path) catch return false;
+    const attributes = win32_sys.GetFileAttributesW(path_w.span().ptr);
     if (attributes == windows.INVALID_FILE_ATTRIBUTES) return false;
-    return attributes & windows.FILE_ATTRIBUTE_DIRECTORY == 0;
+    return attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY == 0;
 }
 
 /// Open only the final object, refusing every reparse ancestor in the kernel.
@@ -2403,13 +2424,13 @@ fn windowsNonDirectoryPathExists(path: []const u8) bool {
 /// ancestor link into a share or an unchecked redirect chain.
 fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
     if (!isDriveAbsolutePath(path) or internal_os.path.isNetworkOrDevicePath(path)) return null;
-    const drive_type = internal_os.windows.driveTypeForLetter(path[0]);
-    if (drive_type != internal_os.windows.DRIVE_FIXED and drive_type != internal_os.windows.DRIVE_RAMDISK) return null;
+    const drive_type = internal_os.windows_ext.driveTypeForLetter(path[0]);
+    if (drive_type != internal_os.windows_ext.DRIVE_FIXED and drive_type != internal_os.windows_ext.DRIVE_RAMDISK) return null;
     var handle: windows.HANDLE = undefined;
     const status = ntOpenDontReparse(
         path,
-        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE,
-        windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT,
+        win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE,
+        win32_types.FILE_OPEN_REPARSE_POINT | win32_types.FILE_SYNCHRONOUS_IO_NONALERT,
         &handle,
     ) orelse return null;
     return if (status == .SUCCESS) handle else null;
@@ -2422,26 +2443,27 @@ fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
 /// is open for the caller to close.
 pub fn ntOpenDontReparse(
     path: []const u8,
-    access: windows.ACCESS_MASK,
+    access: u32,
     options: windows.ULONG,
     handle: *windows.HANDLE,
 ) ?windows.NTSTATUS {
-    // Zig 0.15.2's `sliceToPrefixedFileW` writes past its fixed buffer for a
-    // longer path; a WTF-8 byte is at most one unit, so this always fits.
+    // Zig's `sliceToPrefixedFileW` (0.15.2's, and 0.17's in `std.Io.Threaded`)
+    // writes past its fixed buffer for a longer path; a WTF-8 byte is at most
+    // one unit, so this always fits.
     if (path.len > windows.PATH_MAX_WIDE) return null;
-    var wide = windows.sliceToPrefixedFileW(null, path) catch return null;
+    var wide = std.Io.Threaded.sliceToPrefixedFileW(null, path, .{}) catch return null;
     // Older Windows also treats the DOS drive-letter mapping as a reparse.
     // Resolve just that mapping without opening a filesystem target, and accept
     // only a direct local volume device. The rest keeps the kernel guard.
-    if (!internal_os.windows.directVolumePath(&wide)) return null;
+    if (!internal_os.windows_ext.directVolumePath(&wide)) return null;
     const span = wide.span();
     var name: windows.UNICODE_STRING = .{
         .Length = @intCast(span.len * 2),
         .MaximumLength = @intCast(span.len * 2),
         .Buffer = @constCast(span.ptr),
     };
-    var attrs: windows.OBJECT_ATTRIBUTES = .{
-        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
+    var attrs: win32_types.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(win32_types.OBJECT_ATTRIBUTES),
         .RootDirectory = null,
         .ObjectName = &name,
         .Attributes = 0x1000, // OBJ_DONT_REPARSE
@@ -2449,15 +2471,15 @@ pub fn ntOpenDontReparse(
         .SecurityQualityOfService = null,
     };
     var io: windows.IO_STATUS_BLOCK = undefined;
-    return windows.ntdll.NtCreateFile(
+    return win32_sys.NtCreateFile(
         handle,
         access,
         &attrs,
         &io,
         null,
-        windows.FILE_ATTRIBUTE_NORMAL,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
-        windows.FILE_OPEN,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
+        win32_types.FILE_OPEN,
         options,
         null,
         0,
@@ -2465,12 +2487,12 @@ pub fn ntOpenDontReparse(
 }
 
 /// Attributes of the final object, with no ancestor or final link followed.
-fn pathInfo(path: []const u8) ?windows.FILE_ATTRIBUTE_TAG_INFO {
+fn pathInfo(path: []const u8) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
     const handle = openPathNoRedirect(path) orelse return null;
     defer windows.CloseHandle(handle);
-    var info: windows.FILE_ATTRIBUTE_TAG_INFO = undefined;
+    var info: win32_types.FILE_ATTRIBUTE_TAG_INFO = undefined;
     var io: windows.IO_STATUS_BLOCK = undefined;
-    if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .FileAttributeTagInformation) != .SUCCESS) return null;
+    if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .AttributeTag) != .SUCCESS) return null;
     return info;
 }
 
@@ -2487,15 +2509,15 @@ fn pathAttributes(path: []const u8) ?windows.DWORD {
 fn isLaunchableFile(path: []const u8) bool {
     const info = pathInfo(path) orelse return false;
     if (isLocalExecutableInfo(info)) return true;
-    if (info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
+    if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
     return appExecLinkTargetExists(path);
 }
 
 /// WOF compression and deduplication keep file data on the local volume.
 /// Neither is a name redirect or a cloud placeholder that can fetch data.
-fn isLocalExecutableInfo(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
-    if (info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
-    return info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
+fn isLocalExecutableInfo(info: win32_types.FILE_ATTRIBUTE_TAG_INFO) bool {
+    if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
+    return info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
         info.ReparseTag == 0x80000017 or info.ReparseTag == 0x80000013;
 }
 
@@ -2503,9 +2525,9 @@ fn isLocalExecutableInfo(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
 /// the call filled, or null.
 fn readReparseData(handle: windows.HANDLE, buf: []align(4) u8) ?[]const u8 {
     var returned: windows.DWORD = 0;
-    if (internal_os.windows.DeviceIoControl(
+    if (internal_os.windows_ext.DeviceIoControl(
         handle,
-        windows.FSCTL_GET_REPARSE_POINT,
+        win32_types.FSCTL_GET_REPARSE_POINT,
         null,
         0,
         buf.ptr,
@@ -2520,8 +2542,8 @@ fn readReparseData(handle: windows.HANDLE, buf: []align(4) u8) ?[]const u8 {
 /// by openPathNoRedirect; final folder links and cloud placeholders are skipped.
 fn isLocalSearchDirectory(dir: []const u8) bool {
     const attributes = pathAttributes(dir) orelse return false;
-    return attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0 and
-        attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0;
+    return attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0 and
+        attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0;
 }
 
 const IO_REPARSE_TAG_APPEXECLINK: u32 = 0x8000001b;
@@ -2591,24 +2613,24 @@ test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
     const alloc = arena.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nu.exe", .data = "exe" });
-    try tmp.dir.writeFile(.{ .sub_path = "nu.com", .data = "com" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
-    var env = std.process.EnvMap.init(alloc);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.exe", .data = "exe" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.com", .data = "com" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    var env = std.process.Environ.Map.init(alloc);
     try env.put("PATH", try std.fmt.allocPrint(alloc, "relative;;\\\\server\\share;\\??\\UNC\\server\\share;\"{s}\"", .{dir}));
     try env.put("PATHEXT", ".com;.exe");
-    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.com"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.com", alloc), (try lookupChildExecutable(alloc, "nu", &env)).?);
     try env.put("PATHEXT", ".exe;.com");
-    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.exe", alloc), (try lookupChildExecutable(alloc, "nu", &env)).?);
     // An explicit extension is looked up exactly, regardless of PATHEXT.
     try env.put("PATHEXT", ".com");
-    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu.exe", &env)).?);
+    try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.exe", alloc), (try lookupChildExecutable(alloc, "nu.exe", &env)).?);
     // Preserve a cmd/batch wrapper that wins PATHEXT instead of skipping it.
-    try tmp.dir.writeFile(.{ .sub_path = "nu.cmd", .data = "wrapper" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.cmd", .data = "wrapper" });
     try env.put("PATHEXT", ".cmd;.exe");
     try std.testing.expect(try lookupChildExecutable(alloc, "nu", &env) == null);
     try std.testing.expect(try lookupChildExecutable(alloc, "missing", &env) == null);
-    try tmp.dir.makeDir("directory.exe");
+    try tmp.dir.createDir(std.testing.io, "directory.exe", .default_dir);
     try std.testing.expect(try lookupChildExecutable(alloc, "directory.exe", &env) == null);
     for ([_][]const u8{ "C:nu", ".\\nu", "\\nu", "\\\\server\\nu" }) |value|
         try std.testing.expect(try lookupChildExecutable(alloc, value, &env) == null);
@@ -2619,27 +2641,27 @@ test "PKG08 round3 child lookup accepts a real App Execution Alias" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var host_env = try std.process.getEnvMap(alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     const local_app_data = host_env.get("LOCALAPPDATA") orelse return error.SkipZigTest;
     const dir = try std.fs.path.join(alloc, &.{ local_app_data, "Microsoft", "WindowsApps" });
     if (internal_os.path.isNetworkOrDevicePath(dir) or
         dir.len < 3 or dir[1] != ':' or
-        internal_os.windows.driveTypeForLetter(dir[0]) == internal_os.windows.DRIVE_REMOTE)
+        internal_os.windows_ext.driveTypeForLetter(dir[0]) == internal_os.windows_ext.DRIVE_REMOTE)
         return error.SkipZigTest;
-    var env = std.process.EnvMap.init(alloc);
+    var env = std.process.Environ.Map.init(alloc);
     try env.put("PATH", dir);
     try env.put("PATHEXT", ".EXE");
     // These aliases are installed by Store PowerShell or the Windows Python
     // launcher. Do not launch them: an unconfigured alias can open the Store.
     for ([_][]const u8{ "pwsh.exe", "python.exe", "python3.exe" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ dir, name });
-        const attributes = windows.GetFileAttributes(path) catch continue;
-        if (attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
-            attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+        const attributes = win32_sys.getFileAttributes(path) catch continue;
+        if (attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
+            attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
         const result = try lookupChildExecutable(alloc, name, &env);
         try std.testing.expect(result != null);
         try std.testing.expectEqualStrings(path, result.?);
-        const normalized = try executableCommand(alloc, .{ .shell = try alloc.dupeZ(u8, path) });
+        const normalized = try executableCommand(alloc, .{ .shell = try alloc.dupeSentinel(u8, path, 0) });
         try std.testing.expect(normalized == .direct);
         try std.testing.expectEqualStrings(path, normalized.direct[0]);
         return;
@@ -2654,19 +2676,19 @@ test "PKG08 whole executable path with spaces launches directly" {
     const alloc = arena.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("PowerShell 7");
-    const exe = try tmp.dir.createFile("PowerShell 7/pwsh.exe", .{});
-    exe.close();
-    const path = try tmp.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
-    const input: Command = .{ .shell = try alloc.dupeZ(u8, path) };
+    try tmp.dir.createDir(std.testing.io, "PowerShell 7", .default_dir);
+    const exe = try tmp.dir.createFile(std.testing.io, "PowerShell 7/pwsh.exe", .{});
+    exe.close(std.testing.io);
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "PowerShell 7/pwsh.exe", alloc);
+    const input: Command = .{ .shell = try alloc.dupeSentinel(u8, path, 0) };
     const result = try prepareCommandWithLookup(std.testing.allocator, input, null, false, false, lookupExecutable);
     defer result.deinit(std.testing.allocator);
     try std.testing.expect(result == .direct);
     try std.testing.expectEqual(@as(usize, 1), result.direct.len);
     try std.testing.expectEqualStrings(path, result.direct[0]);
-    const current = try std.process.getCwdAlloc(alloc);
-    const relative = try std.fs.path.relative(alloc, current, path);
-    const relative_input: Command = .{ .shell = try alloc.dupeZ(u8, relative) };
+    const current = try std.process.currentPathAlloc(std.testing.io, alloc);
+    const relative = try std.fs.path.relativeAlloc(alloc, current, null, current, path);
+    const relative_input: Command = .{ .shell = try alloc.dupeSentinel(u8, relative, 0) };
     const preserved = try executableCommand(alloc, relative_input);
     try std.testing.expect(preserved == .shell);
     try std.testing.expectEqualStrings(relative, preserved.shell);
@@ -2811,13 +2833,12 @@ fn safeCurrentDirectoryWithCurrent(
 }
 
 fn currentWindowsDirectory(alloc: Allocator) !?[]const u8 {
-    return std.process.getCwdAlloc(alloc) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => {
-            log.warn("failed to read current windows cwd err={}", .{err});
-            return null;
-        },
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = std.process.currentPath(global.io(), &buf) catch |err| {
+        log.warn("failed to read current windows cwd err={}", .{err});
+        return null;
     };
+    return try alloc.dupe(u8, buf[0..len]);
 }
 
 fn prepareCommandWithLookup(
@@ -3020,7 +3041,7 @@ const DefaultShellHost = struct {
     fn systemPath(alloc: Allocator, relative: []const u8) !?[]u8 {
         if (builtin.os.tag != .windows) return null;
         var buf: [windows.MAX_PATH:0]u16 = undefined;
-        const len = windows.kernel32.GetSystemDirectoryW(&buf, buf.len);
+        const len = win32_sys.GetSystemDirectoryW(&buf, buf.len);
         if (len == 0 or len >= buf.len) return null;
         const dir = std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..len]) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -3249,20 +3270,20 @@ fn resolveSshExecutable(alloc: Allocator, lookup: anytype, access: anytype) !?[]
 }
 
 fn accessAbsolute(path: []const u8) !void {
-    try std.fs.accessAbsolute(path, .{});
+    try std.Io.Dir.accessAbsolute(global.io(), path, .{});
 }
 
 fn warnSshDiscoveryOnce(err: anyerror) void {
-    ssh_missing_mutex.lock();
-    defer ssh_missing_mutex.unlock();
+    ssh_missing_mutex.lockUncancelable(global.io());
+    defer ssh_missing_mutex.unlock(global.io());
     if (ssh_missing_logged) return;
     ssh_missing_logged = true;
     log.warn("SSH hosts skipped: discovery failed err={}", .{err});
 }
 
 fn warnMissingSshOnce() void {
-    ssh_missing_mutex.lock();
-    defer ssh_missing_mutex.unlock();
+    ssh_missing_mutex.lockUncancelable(global.io());
+    defer ssh_missing_mutex.unlock(global.io());
     if (ssh_missing_logged) return;
     ssh_missing_logged = true;
     log.warn("SSH hosts skipped: ssh.exe was not found on PATH or in Windows OpenSSH", .{});
@@ -3274,7 +3295,7 @@ fn deinitProfileList(alloc: Allocator, profiles: *std.ArrayList(Profile)) void {
 }
 
 fn detectProfileOrderHint(alloc: Allocator) ?[]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
+    const raw = envVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
         return null;
     errdefer alloc.free(raw);
 
@@ -4227,8 +4248,8 @@ test "UserProfiles frees profile-order and profile-hidden when no profile is def
 fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
 
-    wsl_probe_mutex.lock();
-    defer wsl_probe_mutex.unlock();
+    wsl_probe_mutex.lockUncancelable(global.io());
+    defer wsl_probe_mutex.unlock(global.io());
 
     if (wsl_probe_cache) |cached| return cached;
 
@@ -4240,8 +4261,8 @@ fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
 fn probeWslExecutableForProfiles(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
 
-    wsl_probe_mutex.lock();
-    defer wsl_probe_mutex.unlock();
+    wsl_probe_mutex.lockUncancelable(global.io());
+    defer wsl_probe_mutex.unlock(global.io());
 
     if ((wsl_profile_probe_cache orelse false) or (wsl_probe_cache orelse false)) return true;
 
@@ -4254,39 +4275,40 @@ fn probeWslExecutableForProfiles(alloc: Allocator, exe_path: []const u8) !bool {
 
 fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
+    // A spawn takes no allocator: the Io allocates what it needs.
+    _ = alloc;
+    const io = global.io();
 
-    var child = std.process.Child.init(&.{ exe_path, "--status" }, alloc);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.create_no_window = true;
-
-    win32.spawnChildHoldingInheritLock(&child) catch |err| {
+    var child = windows_ext.spawnChildHoldingInheritLock(io, .{
+        .argv = &.{ exe_path, "--status" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .create_no_window = true,
+    }) catch |err| {
         log.warn("failed to probe wsl responsiveness exe={s} err={}", .{ exe_path, err });
         return false;
     };
-    errdefer {
-        _ = child.kill() catch {};
-    }
+    errdefer child.kill(io);
 
-    windows.WaitForSingleObjectEx(child.id, wsl_probe_timeout_ms, false) catch |err| switch (err) {
+    win32_sys.waitForSingleObjectEx(child.id.?, wsl_probe_timeout_ms, false) catch |err| switch (err) {
         error.WaitTimeOut => {
             log.warn("skipping unresponsive wsl default shell exe={s} timeout_ms={}", .{
                 exe_path,
                 wsl_probe_timeout_ms,
             });
-            _ = child.kill() catch {};
+            child.kill(io);
             return false;
         },
 
         else => {
             log.warn("wsl probe wait failed exe={s} err={}", .{ exe_path, err });
-            _ = child.kill() catch {};
+            child.kill(io);
             return false;
         },
     };
 
-    _ = child.wait() catch |err| {
+    _ = child.wait(io) catch |err| {
         log.warn("wsl probe wait cleanup failed exe={s} err={}", .{ exe_path, err });
         return false;
     };
@@ -4330,17 +4352,17 @@ fn prepareWslDirect(
     const args = try alloc.alloc([:0]const u8, count);
     var j: usize = 0;
     if (resolved_exe) |path| {
-        args[j] = try alloc.dupeZ(u8, path);
+        args[j] = try alloc.dupeSentinel(u8, path, 0);
     } else {
-        args[j] = try alloc.dupeZ(u8, argv[0]);
+        args[j] = try alloc.dupeSentinel(u8, argv[0], 0);
     }
     j += 1;
 
     if (target_cwd) |cwd| {
         _ = target_home;
-        args[j] = try alloc.dupeZ(u8, "--cd");
+        args[j] = try alloc.dupeSentinel(u8, "--cd", 0);
         j += 1;
-        args[j] = try alloc.dupeZ(u8, cwd);
+        args[j] = try alloc.dupeSentinel(u8, cwd, 0);
         j += 1;
     }
 
@@ -4355,7 +4377,7 @@ fn prepareWslDirect(
             continue;
         }
 
-        args[j] = try alloc.dupeZ(u8, argv[i]);
+        args[j] = try alloc.dupeSentinel(u8, argv[i], 0);
         j += 1;
     }
 
@@ -4382,7 +4404,7 @@ fn directCommand(alloc: Allocator, argv: []const []const u8) !Command {
         alloc.free(args);
     }
     for (argv, args) |arg, *dst| {
-        dst.* = try alloc.dupeZ(u8, arg);
+        dst.* = try alloc.dupeSentinel(u8, arg, 0);
         filled += 1;
     }
     return .{ .direct = args };
@@ -4393,8 +4415,11 @@ fn directCommand(alloc: Allocator, argv: []const []const u8) !Command {
 /// on what is installed: local absolute `PATH` entries only, quoted entries
 /// understood, and guarded metadata handles (no reparse ancestor is followed).
 fn lookupExecutable(alloc: Allocator, exe: []const u8) !?[]u8 {
-    if (builtin.os.tag != .windows or std.mem.indexOfAny(u8, exe, "\\/:") != null)
-        return try internal_os.path.expand(alloc, exe);
+    if (builtin.os.tag != .windows or std.mem.indexOfAny(u8, exe, "\\/:") != null) {
+        var environ_map = try global.environ().createMap(alloc);
+        defer environ_map.deinit();
+        return try internal_os.path.expand(global.io(), alloc, &environ_map, exe);
+    }
     // The built-in shells live in the system directory, where `defaultCommand`
     // takes them from, so the picker lists exactly the executable a new tab runs.
     if (std.ascii.eqlIgnoreCase(exe, "cmd.exe")) {
@@ -4402,7 +4427,7 @@ fn lookupExecutable(alloc: Allocator, exe: []const u8) !?[]u8 {
     } else if (std.ascii.eqlIgnoreCase(exe, "powershell.exe")) {
         return try DefaultShellHost.systemShell(alloc, windows_powershell_relative);
     }
-    const path = std.process.getEnvVarOwned(alloc, "PATH") catch |err| switch (err) {
+    const path = envVarOwned(alloc, "PATH") catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
@@ -4432,7 +4457,7 @@ const git_registry_hives = 2;
 
 const GitBashHost = struct {
     fn fileExists(path: []const u8) bool {
-        std.fs.cwd().access(path, .{}) catch return false;
+        std.Io.Dir.cwd().access(global.io(), path, .{}) catch return false;
         return true;
     }
 
@@ -4451,8 +4476,8 @@ const GitBashHost = struct {
     }
 
     fn systemRoot(alloc: Allocator) ![]u8 {
-        return std.process.getEnvVarOwned(alloc, "SystemRoot") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound, error.InvalidWtf8 => try alloc.dupe(u8, "C:\\Windows"),
+        return envVarOwned(alloc, "SystemRoot") catch |err| switch (err) {
+            error.EnvironmentVariableMissing, error.InvalidWtf8 => try alloc.dupe(u8, "C:\\Windows"),
             else => |e| return e,
         };
     }
@@ -4468,16 +4493,16 @@ fn registryString(
 ) !?[]u8 {
     var buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-    const status = windows.advapi32.RegGetValueW(
+    const status = win32_sys.RegGetValueW(
         hive,
         subkey,
         name,
-        windows.advapi32.RRF.RT_REG_SZ | windows.advapi32.RRF.ZEROONFAILURE,
+        win32_types.RRF.RT_REG_SZ | win32_types.RRF.ZEROONFAILURE,
         null,
         @ptrCast(&buf),
         &bytes,
     );
-    if (status != @intFromEnum(windows.Win32Error.SUCCESS)) return null;
+    if (status != @backingInt(windows.Win32Error.SUCCESS)) return null;
     // The size counts the terminator.
     if (bytes < @sizeOf(u16) or bytes % @sizeOf(u16) != 0) return null;
     const len = bytes / @sizeOf(u16) - 1;
@@ -4560,7 +4585,7 @@ fn isWslBashLauncher(path: []const u8, system_root: []const u8) bool {
 /// Whether `path` is `dir` or below it, ignoring case and the kind of
 /// separator, as Windows does.
 fn pathIsUnder(path: []const u8, dir: []const u8) bool {
-    const root = std.mem.trimRight(u8, dir, "/\\");
+    const root = std.mem.trimEnd(u8, dir, "/\\");
     if (root.len == 0 or path.len <= root.len) return false;
     for (root, path[0..root.len]) |a, b| {
         if (isSeparator(a) and isSeparator(b)) continue;
@@ -4580,7 +4605,7 @@ pub fn isWslBashLauncherPath(alloc: Allocator, path: []const u8) !bool {
 const WslOutputDrain = struct {
     /// The read end of a pipe opened for overlapped I/O, as
     /// `std.process.Child` makes a child's stdout and stderr.
-    pipe: std.fs.File,
+    pipe: std.Io.File,
     /// Set when a read completes (manual reset; `ReadFile` resets it).
     io_event: windows.HANDLE,
     /// Set by `stop` (manual reset), and left set: the read in progress ends,
@@ -4592,10 +4617,10 @@ const WslOutputDrain = struct {
     /// ended (`error.WslListCancelled`). Null when the pipe ended.
     err: ?anyerror = null,
 
-    fn init(pipe: std.fs.File) !WslOutputDrain {
-        const io_event = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    fn init(pipe: std.Io.File) !WslOutputDrain {
+        const io_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         errdefer windows.CloseHandle(io_event);
-        const stop_event = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+        const stop_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         return .{ .pipe = pipe, .io_event = io_event, .stop_event = stop_event };
     }
 
@@ -4636,18 +4661,18 @@ const WslOutputDrain = struct {
     /// `stop` cancels the read and waits for it to complete before this
     /// returns, so `buf` is never written after.
     fn readOnce(self: *WslOutputDrain, buf: []u8) !windows.DWORD {
-        var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+        var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
         overlapped.hEvent = self.io_event;
-        if (windows.kernel32.ReadFile(self.pipe.handle, buf.ptr, @intCast(buf.len), null, &overlapped) == 0) switch (windows.GetLastError()) {
+        if (win32_sys.ReadFile(self.pipe.handle, buf.ptr, @intCast(buf.len), null, &overlapped) == 0) switch (windows.GetLastError()) {
             .IO_PENDING => {},
             .BROKEN_PIPE, .HANDLE_EOF => return 0,
             else => |code| return windows.unexpectedError(code),
         };
         const events = [2]windows.HANDLE{ self.io_event, self.stop_event };
-        const waited = windows.kernel32.WaitForMultipleObjects(events.len, &events, windows.FALSE, windows.INFINITE);
-        if (waited != windows.WAIT_OBJECT_0) _ = windows.kernel32.CancelIoEx(self.pipe.handle, &overlapped);
+        const waited = win32_sys.WaitForMultipleObjects(events.len, &events, win32_types.FALSE, win32_types.INFINITE);
+        if (waited != win32_types.WAIT_OBJECT_0) _ = win32_sys.CancelIoEx(self.pipe.handle, &overlapped);
         var transferred: windows.DWORD = 0;
-        if (windows.kernel32.GetOverlappedResult(self.pipe.handle, &overlapped, &transferred, windows.TRUE) == 0) return switch (windows.GetLastError()) {
+        if (win32_sys.GetOverlappedResult(self.pipe.handle, &overlapped, &transferred, win32_types.TRUE) == 0) return switch (windows.GetLastError()) {
             .OPERATION_ABORTED => error.WslListCancelled,
             .BROKEN_PIPE, .HANDLE_EOF => 0,
             else => |code| windows.unexpectedError(code),
@@ -4668,14 +4693,14 @@ const WslOutputDrain = struct {
     }
 };
 
-extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 
 /// Tests only: called by a drain before each read, on its own thread
 /// (`WslOutputDrain.run`), so a test can hold it there.
 var test_wsl_before_read: if (builtin.is_test) ?*const fn () void else void = if (builtin.is_test) null else {};
 
 fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
-    var env = try std.process.getEnvMap(alloc);
+    var env = try global.environ().createMap(alloc);
     defer env.deinit();
     return listWslDistrosIn(alloc, exe_path, &env);
 }
@@ -4688,41 +4713,45 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
 /// before it, and the inbox WSL of Windows 10, write UTF-16 whatever it is
 /// (inferred from that opt-in, not run). An inherited `WSL_UTF8`, in any
 /// case (the map compares names as Windows does), would otherwise decide it.
-fn pinWslOutputEncoding(env: *std.process.EnvMap) void {
-    env.remove("WSL_UTF8");
+fn pinWslOutputEncoding(env: *std.process.Environ.Map) void {
+    _ = env.swapRemove("WSL_UTF8");
 }
 
-/// Tests only: called with the `wsl -l -q` child just before it would be
-/// spawned (`listWslDistrosIn`); an error it returns ends the list there.
-var test_wsl_list_spawn: if (builtin.is_test) ?*const fn (*const std.process.Child) anyerror!void else void = if (builtin.is_test) null else {};
+/// Tests only: called with the `wsl -l -q` child's spawn options just
+/// before it would be spawned (`listWslDistrosIn`); an error it returns ends
+/// the list there.
+var test_wsl_list_spawn: if (builtin.is_test) ?*const fn (*const std.process.SpawnOptions) anyerror!void else void = if (builtin.is_test) null else {};
 
 /// `listWslDistros` with `env` (this process's) for `wsl.exe`'s
 /// environment, which it pins first (`pinWslOutputEncoding`).
-fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.EnvMap) ![][]u8 {
+fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.Environ.Map) ![][]u8 {
     pinWslOutputEncoding(env);
-    var child = std.process.Child.init(&.{ exe_path, "-l", "-q" }, alloc);
-    child.env_map = env;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    // Its errors are read on a failure, wherever wsl.exe writes them: the
-    // Store WSL writes them to stdout, and the inbox stub's stream is not
-    // known. A success's warnings on stderr are not distribution names.
-    child.stderr_behavior = .Pipe;
-    child.create_no_window = true;
+    const io = global.io();
+    const options: std.process.SpawnOptions = .{
+        .argv = &.{ exe_path, "-l", "-q" },
+        .environ_map = env,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        // Its errors are read on a failure, wherever wsl.exe writes them: the
+        // Store WSL writes them to stdout, and the inbox stub's stream is not
+        // known. A success's warnings on stderr are not distribution names.
+        .stderr = .pipe,
+        .create_no_window = true,
+    };
 
-    if (builtin.is_test) if (test_wsl_list_spawn) |hook| try hook(&child);
-    try win32.spawnChildHoldingInheritLock(&child);
+    if (builtin.is_test) if (test_wsl_list_spawn) |hook| try hook(&options);
+    var child = try windows_ext.spawnChildHoldingInheritLock(io, options);
     var child_running = true;
     errdefer {
-        if (child_running) _ = child.kill() catch {};
+        if (child_running) child.kill(io);
     }
 
     const stdout = child.stdout orelse {
-        _ = child.kill() catch {};
+        child.kill(io);
         return error.Unexpected;
     };
     const stderr = child.stderr orelse {
-        _ = child.kill() catch {};
+        child.kill(io);
         return error.Unexpected;
     };
 
@@ -4737,23 +4766,23 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // No thread reads the pipes yet: the errdefer may kill.
     const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
     const errors_thread = std.Thread.spawn(.{}, WslOutputDrain.run, .{&errors}) catch |err| {
-        windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id.?, 1) catch {};
         joinWslDrains(&.{&drain}, &.{drain_thread});
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
         child_running = false;
         return err;
     };
     const drains = [_]*WslOutputDrain{ &drain, &errors };
     const threads = [_]std.Thread{ drain_thread, errors_thread };
 
-    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
+    win32_sys.waitForSingleObjectEx(child.id.?, wsl_list_timeout_ms, false) catch |err| {
         if (err == error.WaitTimeOut) log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
             exe_path,
             wsl_list_timeout_ms,
         });
-        windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id.?, 1) catch {};
         joinWslDrains(&drains, &threads);
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
         child_running = false;
         return if (err == error.WaitTimeOut) error.WslListTimeout else err;
     };
@@ -4762,8 +4791,8 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // The whole exit code, before `child.wait()` keeps only its low byte: a
     // crash whose code ends in a zero byte is no success.
     var code: windows.DWORD = undefined;
-    const exit_code: ?u32 = if (windows.kernel32.GetExitCodeProcess(child.id, &code) != 0) code else null;
-    _ = try child.wait();
+    const exit_code: ?u32 = if (win32_sys.GetExitCodeProcess(child.id.?, &code) != 0) code else null;
+    _ = try child.wait(io);
     child_running = false;
     // Stdout read whole to the pipe's end, or the list is not complete: a
     // read that failed or was stopped may have cut it short.
@@ -4797,7 +4826,7 @@ const wsl_drain_grace_ms = 500;
 /// failed.
 fn joinWslDrains(drains: []const *WslOutputDrain, threads: []const std.Thread) void {
     for (drains, threads) |drain, thread| {
-        windows.WaitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
+        win32_sys.waitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
         thread.join();
     }
 }
@@ -4880,10 +4909,10 @@ fn classifyWslList(alloc: Allocator, run: WslListRun) Allocator.Error!WslListOut
     defer alloc.free(err);
     const text = try std.mem.concat(alloc, u8, &.{ out, "\n", err });
     defer alloc.free(text);
-    if (std.ascii.indexOfIgnoreCase(text, "WSL_E_DEFAULT_DISTRO_NOT_FOUND") != null) return .{ .absent = .no_distributions };
-    if (std.ascii.indexOfIgnoreCase(text, "WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED") != null or
-        std.ascii.indexOfIgnoreCase(text, "0x8007019e") != null) return .{ .absent = .not_enabled };
-    if (exit_code == 1 and std.ascii.indexOfIgnoreCase(text, "wsl.exe --install") != null) return .{ .absent = .not_installed };
+    if (std.ascii.findIgnoreCase(text, "WSL_E_DEFAULT_DISTRO_NOT_FOUND") != null) return .{ .absent = .no_distributions };
+    if (std.ascii.findIgnoreCase(text, "WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED") != null or
+        std.ascii.findIgnoreCase(text, "0x8007019e") != null) return .{ .absent = .not_enabled };
+    if (exit_code == 1 and std.ascii.findIgnoreCase(text, "wsl.exe --install") != null) return .{ .absent = .not_installed };
     return .failed;
 }
 
@@ -4982,7 +5011,7 @@ const LxssRegistry = struct {
 
     fn open(self: *LxssRegistry) LxssRead(void) {
         const path = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss");
-        return switch (windows.advapi32.RegOpenKeyExW(windows.HKEY_CURRENT_USER, path, 0, windows.KEY_READ, &self.key)) {
+        return switch (win32_sys.RegOpenKeyExW(windows.HKEY_CURRENT_USER, path, 0, win32_types.KEY_READ, &self.key)) {
             0 => .{ .found = {} },
             error_file_not_found => .missing,
             else => .failed,
@@ -4990,7 +5019,7 @@ const LxssRegistry = struct {
     }
 
     fn close(self: *LxssRegistry) void {
-        _ = windows.advapi32.RegCloseKey(self.key);
+        _ = win32_sys.RegCloseKey(self.key);
     }
 
     fn subkey(self: *LxssRegistry, index: u32, buf: *[256:0]u16) LxssRead([:0]const u16) {
@@ -5010,11 +5039,11 @@ const LxssRegistry = struct {
     fn distributionName(self: *LxssRegistry, name: [:0]const u16, out: []u8) LxssRead([]const u8) {
         var buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
         var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-        switch (windows.advapi32.RegGetValueW(
+        switch (win32_sys.RegGetValueW(
             self.key,
             name,
             std.unicode.utf8ToUtf16LeStringLiteral("DistributionName"),
-            windows.advapi32.RRF.RT_REG_SZ,
+            win32_types.RRF.RT_REG_SZ,
             null,
             @ptrCast(&buf),
             &bytes,
@@ -5144,8 +5173,8 @@ fn deinitOwnedStringList(alloc: Allocator, values: []const []u8) void {
 
 fn defaultWindowsHome(alloc: Allocator) !?[]const u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (try internal_os.windows.knownFolderPathUtf8(
-        &internal_os.windows.FOLDERID_Profile,
+    if (try internal_os.windows_ext.knownFolderPathUtf8(
+        &internal_os.windows_ext.FOLDERID_Profile,
         &buf,
     )) |path| {
         return try alloc.dupe(u8, path);
@@ -5171,7 +5200,7 @@ pub const isDriveAbsolutePath = internal_os.path.isDriveAbsolutePath;
 fn isOnLocalDrive(path: []const u8) bool {
     return isDriveAbsolutePath(path) and
         !internal_os.path.isNetworkOrDevicePath(path) and
-        internal_os.windows.driveTypeForLetter(path[0]) != internal_os.windows.DRIVE_REMOTE;
+        internal_os.windows_ext.driveTypeForLetter(path[0]) != internal_os.windows_ext.DRIVE_REMOTE;
 }
 
 /// `value` without one pair of enclosing double quotes, if it has them.
@@ -5202,7 +5231,7 @@ fn isSeparator(c: u8) bool {
 }
 
 fn trimLeadingSeparators(path: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, path, "/\\");
+    return std.mem.trimStart(u8, path, "/\\");
 }
 
 const normalizeWslPath = internal_os.path.normalizeWslPath;
@@ -5374,20 +5403,20 @@ fn appExecLinkRecord(alloc: Allocator, strings: []const []const u8) ![]u8 {
 /// Creates an empty file `name` in `dir` and makes it an App Execution Alias to
 /// `target`, as the Store does for an installed package. Skips the test where
 /// the volume refuses a reparse point.
-fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) !void {
+fn createTestAppExecLink(dir: std.Io.Dir, name: []const u8, target: []const u8) !void {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     // Reopen it for the reparse write, without following what it will become.
-    (try dir.createFile(name, .{})).close();
+    (try dir.createFile(std.testing.io, name, .{})).close(std.testing.io);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try dir.realpath(name, &path_buf);
-    const path_w = try windows.sliceToPrefixedFileW(null, path);
-    const handle = windows.kernel32.CreateFileW(
+    const path = path_buf[0..try dir.realPathFile(std.testing.io, name, &path_buf)];
+    const path_w = try prefixed_path.sliceToPrefixedFileW(path);
+    const handle = win32_sys.CreateFileW(
         path_w.span().ptr,
-        windows.GENERIC_WRITE,
+        win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_FLAG_OPEN_REPARSE_POINT,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_FLAG_OPEN_REPARSE_POINT,
         null,
     );
     if (handle == windows.INVALID_HANDLE_VALUE) return error.SkipZigTest;
@@ -5398,7 +5427,7 @@ fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) 
     defer alloc.free(record);
 
     const FSCTL_SET_REPARSE_POINT: windows.DWORD = 0x900a4;
-    windows.DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, record, null) catch return error.SkipZigTest;
+    win32_sys.deviceIoControl(handle, FSCTL_SET_REPARSE_POINT, record, null) catch return error.SkipZigTest;
 }
 
 test "appExecLinkTarget reads the third string and rejects a cut, foreign or odd record" {
@@ -5443,7 +5472,7 @@ test "appExecLinkTarget reads the third string and rejects a cut, foreign or odd
     defer alloc.free(empty);
     try std.testing.expect(appExecLinkTarget(empty, &out) == null);
     // The unfilled tail of the zeroed buffer after a short call reads as empty strings.
-    var zeroed = [_]u8{0} ** 512;
+    var zeroed = @as([512]u8, @splat(0));
     @memcpy(zeroed[0..40], record[0..40]);
     try std.testing.expect(appExecLinkTarget(&zeroed, &out) == null);
 }
@@ -5459,7 +5488,7 @@ test "ntOpenDontReparse refuses a path past PATH_MAX_WIDE before converting it" 
         @memset(path, 'a');
         @memcpy(path[0..3], "C:\\");
         var handle: windows.HANDLE = undefined;
-        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle));
+        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, win32_types.FILE_READ_ATTRIBUTES, 0, &handle));
     }
 }
 
@@ -5468,13 +5497,13 @@ test "shell discovery refuses reparse ancestors before reading the target" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("real/bin");
-    try tmp.dir.writeFile(.{ .sub_path = "real/bin/pwsh.exe", .data = "MZ" });
-    tmp.dir.symLink("real", "link", .{ .is_directory = true }) catch |err| switch (err) {
+    try tmp.dir.createDirPath(std.testing.io, "real/bin");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/bin/pwsh.exe", .data = "MZ" });
+    tmp.dir.symLink(std.testing.io, "real", "link", .{ .is_directory = true }) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fmt.allocPrint(alloc, "{s}\\link\\bin\\pwsh.exe", .{root});
     defer alloc.free(path);
@@ -5492,7 +5521,7 @@ test "shell discovery searches only ordinary local folders" {
     // A real folder passes, a missing one does not (nothing to search).
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     try std.testing.expect(isLocalSearchDirectory(root));
     const missing = try std.fmt.allocPrint(alloc, "{s}\\absent", .{root});
@@ -5507,8 +5536,8 @@ fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !voi
     defer alloc.free(nt_target);
     const target_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, nt_target);
     defer alloc.free(target_w);
-    const link_w = try windows.sliceToPrefixedFileW(null, link);
-    const handle = windows.kernel32.CreateFileW(link_w.span().ptr, windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS, null);
+    const link_w = try prefixed_path.sliceToPrefixedFileW(link);
+    const handle = win32_sys.CreateFileW(link_w.span().ptr, win32_types.GENERIC_WRITE, 0, null, win32_types.OPEN_EXISTING, win32_types.FILE_FLAG_OPEN_REPARSE_POINT | win32_types.FILE_FLAG_BACKUP_SEMANTICS, null);
     if (handle == windows.INVALID_HANDLE_VALUE) return error.AccessDenied;
     defer windows.CloseHandle(handle);
     const bytes: u16 = @intCast(target_w.len * 2);
@@ -5522,7 +5551,7 @@ fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !voi
     try record.appendSlice(alloc, &.{ 0, 0 }); // empty print name
     try record.appendSlice(alloc, std.mem.sliceAsBytes(target_w));
     try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // terminators
-    try windows.DeviceIoControl(handle, 0x900a4, record.items, null);
+    try win32_sys.deviceIoControl(handle, 0x900a4, record.items, null);
 }
 
 test "explicit commands and child PATH keep junctions with spaces" {
@@ -5530,10 +5559,10 @@ test "explicit commands and child PATH keep junctions with spaces" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("real");
-    try tmp.dir.makePath("current tools");
-    try tmp.dir.writeFile(.{ .sub_path = "real/pwsh.exe", .data = "MZ" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "real");
+    try tmp.dir.createDirPath(std.testing.io, "current tools");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/pwsh.exe", .data = "MZ" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const link = try std.fmt.allocPrint(alloc, "{s}\\current tools", .{root});
     defer alloc.free(link);
@@ -5546,7 +5575,7 @@ test "explicit commands and child PATH keep junctions with spaces" {
     defer command.deinit(alloc);
     try std.testing.expect(command == .direct);
     try std.testing.expectEqualStrings(exe, command.direct[0]);
-    var env = std.process.EnvMap.init(alloc);
+    var env = std.process.Environ.Map.init(alloc);
     defer env.deinit();
     try env.put("PATH", link);
     const child = (try lookupChildExecutable(alloc, "pwsh.exe", &env)).?;
@@ -5558,11 +5587,11 @@ test "explicit commands and child PATH keep junctions with spaces" {
 
 test "local executable data reparse tags exclude redirects and cloud files" {
     for ([_]u32{ 0x80000017, 0x80000013 }) |tag| {
-        try std.testing.expect(isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
-        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_DIRECTORY, .ReparseTag = tag }));
+        try std.testing.expect(isLocalExecutableInfo(.{ .FileAttributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
+        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_DIRECTORY, .ReparseTag = tag }));
     }
     for ([_]u32{ 0xa000000c, 0xa0000003, 0x9000001a, 0x8000001b }) |tag|
-        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
+        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
 }
 
 test "shell discovery uses the production DOS mapping before metadata opens" {
@@ -5575,22 +5604,22 @@ test "shell discovery uses the production DOS mapping before metadata opens" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "not executed" });
-    const path = try tmp.dir.realpathAlloc(alloc, "pwsh.exe");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pwsh.exe", .data = "not executed" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "pwsh.exe", alloc);
     defer alloc.free(path);
-    win32.TestHooks.direct_volume_mapping = Reject.map;
-    defer win32.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = Reject.map;
+    defer windows_ext.TestHooks.direct_volume_mapping = null;
     try std.testing.expectEqual(null, pathInfo(path));
-    win32.TestHooks.direct_volume_mapping = win32.TestHooks.unavailableVolume;
+    windows_ext.TestHooks.direct_volume_mapping = windows_ext.TestHooks.unavailableVolume;
     try std.testing.expectEqual(null, pathInfo(path));
-    win32.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = null;
     try std.testing.expect(pathInfo(path) != null);
 }
 
 test "shell discovery accepts a real installed Store execution alias" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
-    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return error.SkipZigTest;
+    const local = std.testing.environ.getAlloc(alloc, "LOCALAPPDATA") catch return error.SkipZigTest;
     defer alloc.free(local);
     for ([_][]const u8{ "wt.exe", "winget.exe" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ local, "Microsoft", "WindowsApps", name });
@@ -5632,15 +5661,15 @@ test "pwsh search skips what cannot start and keeps going down PATH" {
 
     // 1: a directory named pwsh.exe. 2: an alias whose package is gone.
     // 3: the real thing. 4: one that must not be reached.
-    try tmp.dir.makePath("dir/pwsh.exe");
-    try tmp.dir.makePath("gone");
+    try tmp.dir.createDirPath(std.testing.io, "dir/pwsh.exe");
+    try tmp.dir.createDirPath(std.testing.io, "gone");
     try createTestAppExecLink(tmp.dir, "gone/pwsh.exe", "C:\\Program Files\\WindowsApps\\Missing.Package_1.0.0.0_x64__abc\\pwsh.exe");
-    try tmp.dir.makePath("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real/pwsh.exe", .data = "MZ" });
-    try tmp.dir.makePath("later");
-    try tmp.dir.writeFile(.{ .sub_path = "later/pwsh.exe", .data = "MZ" });
+    try tmp.dir.createDirPath(std.testing.io, "real");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/pwsh.exe", .data = "MZ" });
+    try tmp.dir.createDirPath(std.testing.io, "later");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later/pwsh.exe", .data = "MZ" });
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fmt.allocPrint(
         alloc,
@@ -5666,10 +5695,10 @@ test "an App Execution Alias counts only while its target exists" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("pkg");
-    try tmp.dir.writeFile(.{ .sub_path = "pkg/pwsh.exe", .data = "MZ" });
-    try tmp.dir.makePath("pkg/folder");
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "pkg");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pkg/pwsh.exe", .data = "MZ" });
+    try tmp.dir.createDirPath(std.testing.io, "pkg/folder");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
 
     const present = try std.fmt.allocPrint(alloc, "{s}\\pkg\\pwsh.exe", .{root});
@@ -5882,7 +5911,7 @@ test "registryString reads a string value and nothing else" {
     var key: windows.HKEY = undefined;
     try testing.expectEqual(@as(i32, 0), Reg.RegCreateKeyExW(windows.HKEY_CURRENT_USER, subkey, 0, null, 0, key_write, null, &key, null));
     defer _ = Reg.RegDeleteKeyW(windows.HKEY_CURRENT_USER, subkey);
-    defer _ = windows.advapi32.RegCloseKey(key);
+    defer _ = win32_sys.RegCloseKey(key);
 
     // Present but not a string.
     const number: windows.DWORD = 7;
@@ -6265,10 +6294,10 @@ fn testWslPipe(read_end: *windows.HANDLE, write_end: *windows.HANDLE) !void {
     var wide: [96:0]u16 = undefined;
     const len = try std.unicode.utf8ToUtf16Le(&wide, name);
     wide[len] = 0;
-    const rd = windows.kernel32.CreateNamedPipeW(wide[0..len :0], windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED, windows.PIPE_TYPE_BYTE, 1, 4096, 4096, 0, null);
+    const rd = win32_sys.CreateNamedPipeW(wide[0..len :0], win32_types.PIPE_ACCESS_INBOUND | win32_types.FILE_FLAG_OVERLAPPED, win32_types.PIPE_TYPE_BYTE, 1, 4096, 4096, 0, null);
     if (rd == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
     errdefer windows.CloseHandle(rd);
-    const wr = windows.kernel32.CreateFileW(wide[0..len :0], windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, null);
+    const wr = win32_sys.CreateFileW(wide[0..len :0], win32_types.GENERIC_WRITE, 0, null, win32_types.OPEN_EXISTING, win32_types.FILE_ATTRIBUTE_NORMAL, null);
     if (wr == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
     read_end.* = rd;
     write_end.* = wr;
@@ -6296,13 +6325,13 @@ fn testJoinWithin(drain: *WslOutputDrain, thread: std.Thread, write_end: windows
         thread.join();
         return err;
     };
-    const ended = if (windows.WaitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
+    const ended = if (win32_sys.waitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
     windows.CloseHandle(write_end);
     // Bounded too. With the write end closed, a read ends at the pipe's
     // end, and a reader held in a test hook is released by its test within
     // seconds. A join still running after this would leave the drain freed
     // under live threads if the test returned, so it ends the run instead.
-    windows.WaitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
+    win32_sys.waitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
         @panic("a WSL drain's join did not end after its pipe closed");
     joiner.join();
     if (!ended) return error.TestJoinHung;
@@ -6317,9 +6346,9 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         var write_end: windows.HANDLE = undefined;
         try testWslPipe(&read_end, &write_end);
         defer windows.CloseHandle(read_end);
-        var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+        var drain: WslOutputDrain = try .init(.{ .handle = read_end, .flags = .{ .nonblocking = true } });
         defer drain.deinit();
-        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         windows.CloseHandle(write_end);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
         joinWslDrains(&.{&drain}, &.{thread});
@@ -6336,9 +6365,9 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         defer windows.CloseHandle(read_end);
         var write_open: ?windows.HANDLE = write_end;
         defer if (write_open) |handle| windows.CloseHandle(handle);
-        var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+        var drain: WslOutputDrain = try .init(.{ .handle = read_end, .flags = .{ .nonblocking = true } });
         defer drain.deinit();
-        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
         // The reader and the write end are `testJoinWithin`'s from here.
         write_open = null;
@@ -6362,7 +6391,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
             if (held) return;
             held = true;
             _ = SetEvent(at_hook.?);
-            windows.WaitForSingleObjectEx(release.?, windows.INFINITE, false) catch {};
+            win32_sys.waitForSingleObjectEx(release.?, win32_types.INFINITE, false) catch {};
         }
 
         /// Releases the reader once the join has stopped it (the drain's
@@ -6374,15 +6403,15 @@ test "a WSL drain held outside its read until long after it was stopped still en
         fn releaseAfterStop() void {
             var waited: u32 = 0;
             while (!drain.?.stopping.load(.acquire) and waited < 5000) : (waited += 10) {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
             }
-            std.Thread.sleep(1500 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1500), .awake) catch {};
             _ = SetEvent(release.?);
         }
     };
-    Hold.at_hook = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    Hold.at_hook = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
     defer windows.CloseHandle(Hold.at_hook.?);
-    Hold.release = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    Hold.release = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
     defer windows.CloseHandle(Hold.release.?);
     Hold.held = false;
     test_wsl_before_read = &Hold.before;
@@ -6395,7 +6424,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
     defer windows.CloseHandle(read_end);
     var write_open: ?windows.HANDLE = write_end;
     defer if (write_open) |handle| windows.CloseHandle(handle);
-    var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+    var drain: WslOutputDrain = try .init(.{ .handle = read_end, .flags = .{ .nonblocking = true } });
     defer drain.deinit();
     Hold.drain = &drain;
     defer Hold.drain = null;
@@ -6410,7 +6439,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
         drain.stop();
         thread.join();
     };
-    try windows.WaitForSingleObjectEx(Hold.at_hook.?, 3000, false);
+    try win32_sys.waitForSingleObjectEx(Hold.at_hook.?, 3000, false);
     const releaser = try std.Thread.spawn(.{}, Hold.releaseAfterStop, .{});
     defer releaser.join();
     // The reader and the write end are `testJoinWithin`'s from here: it
@@ -6433,8 +6462,8 @@ test "wsl -l -q runs without an inherited WSL_UTF8, so it writes the UTF-16LE it
 
         /// Reads the child's environment and stops before it runs: no
         /// wsl.exe runs.
-        fn check(child: *const std.process.Child) anyerror!void {
-            const env = child.env_map orelse return error.TestExpectedEnv;
+        fn check(options: *const std.process.SpawnOptions) anyerror!void {
+            const env = options.environ_map orelse return error.TestExpectedEnv;
             pinned = env.get("WSL_UTF8") == null and env.get("Path") != null;
             return error.TestNotSpawned;
         }
@@ -6443,7 +6472,7 @@ test "wsl -l -q runs without an inherited WSL_UTF8, so it writes the UTF-16LE it
     defer test_wsl_list_spawn = null;
     // Windows compares the names without case, and so does the map.
     for ([_][]const u8{ "WSL_UTF8", "wsl_utf8" }) |name| {
-        var env = std.process.EnvMap.init(alloc);
+        var env = std.process.Environ.Map.init(alloc);
         defer env.deinit();
         try env.put("Path", "C:\\Windows\\System32");
         try env.put(name, "1");
@@ -7283,4 +7312,42 @@ test "utf8-console cmd preamble preserves option-only switches" {
             try testing.expectEqualStrings(expected, actual);
         }
     }
+}
+
+test "held file: the PATH search goes past a candidate another handle holds (re-check item 34)" {
+    // Profile discovery's PATH search (`internal_os.path.expand`) keeps std's
+    // retry on its worker: a candidate held without read sharing was
+    // `AccessDenied` on Zig 0.15 and skipped; 0.17 waits about four seconds
+    // and reports `FileBusy`, which is skipped the same way.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "first", .default_dir);
+    try tmp.dir.createDir(io, "second", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "first/held-tool.exe", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "second/held-tool.exe", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
+    const first = try std.fs.path.join(alloc, &.{ root, "first" });
+    defer alloc.free(first);
+    const second = try std.fs.path.join(alloc, &.{ root, "second" });
+    defer alloc.free(second);
+    const held_path = try std.fs.path.join(alloc, &.{ first, "held-tool.exe" });
+    defer alloc.free(held_path);
+    const search = try std.fmt.allocPrint(alloc, "{s};{s}", .{ first, second });
+    defer alloc.free(search);
+    var environ_map: std.process.Environ.Map = .init(alloc);
+    defer environ_map.deinit();
+    try environ_map.put("PATH", search);
+
+    const held = try win32_sys.HeldFile.hold(held_path, .deny_read);
+    defer held.release();
+    const start = win32_sys.HeldFile.now();
+    const found = (try internal_os.path.expand(io, alloc, &environ_map, "held-tool.exe")).?;
+    defer alloc.free(found);
+    const ms = win32_sys.HeldFile.msSince(start);
+    std.debug.print("held file: PATH search past deny_read: found the next after {d} ms\n", .{ms});
+    try std.testing.expect(std.mem.startsWith(u8, found, second));
+    try std.testing.expect(ms > win32_sys.HeldFile.std_retry_floor_ms);
 }

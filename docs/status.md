@@ -68,13 +68,13 @@ fork with scheduled merge windows; see the
   it loads the shipped script.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained in the tree, built and tested, for Zig and C
-  consumers who build it themselves. No package ships it. From 1.3.137 the
-  portable ZIP's `ghostty-vt.dll` is a noctty placeholder, not the library:
-  it exports nothing and fails to load (`ERROR_DLL_INIT_FAILED`), and it is
-  there only because the portable updater of 1.3.125 to 1.3.136 requires the
-  file. v1.4.100 drops it; portable copies on 1.3.125 to 1.3.136 that have
-  not installed 1.3.137 or later by then update by hand
-  ([PACKAGING.md](../PACKAGING.md#library-consumers)).
+  consumers who build it themselves. No package ships it. From v1.4.100 the
+  portable ZIP carries no `ghostty-vt.dll`. From 1.3.137 until then it
+  carried a noctty placeholder under that name, not the library, which
+  exported nothing and failed to load (`ERROR_DLL_INIT_FAILED`), only because
+  the portable updater of 1.3.125 to 1.3.136 requires the file. Portable
+  copies on 1.3.125 to 1.3.136 that have not installed 1.3.137 or later
+  update by hand ([PACKAGING.md](../PACKAGING.md#library-consumers)).
 
 Win32-validated VT protocol coverage is tracked in
 [windows-vt-conformance.md](windows-vt-conformance.md).

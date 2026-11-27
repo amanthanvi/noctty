@@ -9,8 +9,10 @@ const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const fastmem = @import("../fastmem.zig");
+const simd = @import("../simd/main.zig");
 const tripwire = @import("../tripwire.zig");
 const DoublyLinkedList = @import("../datastruct/main.zig").IntrusiveDoublyLinkedList;
+const datastruct = @import("../datastruct/main.zig");
 const color = @import("color.zig");
 const compression = @import("compress.zig");
 const highlight = @import("highlight.zig");
@@ -27,14 +29,24 @@ const Page = pagepkg.Page;
 const Row = pagepkg.Row;
 
 const log = std.log.scoped(.page_list);
+const native_freestanding = builtin.target.os.tag == .freestanding and
+    !builtin.target.cpu.arch.isWasm();
 
-/// The number of PageList.Nodes we preheat the pool with. A node is
-/// a very small struct so we can afford to preheat many, but the exact
-/// number is uncertain. Any number too large is wasting memory, any number
-/// too small will cause the pool to have to allocate more memory later.
-/// This should be set to some reasonable minimum that we expect a terminal
-/// window to scroll into quickly.
+/// The number of pages we preheat the page pool with. For operating systems
+/// that support it, pages are demand-paged (see PagePool) so this only
+/// costs us address space. For other operating systems, we don't preheat.
 const page_preheat = 4;
+
+/// The number of nodes we preheat the node pool with. Unlike pages, nodes
+/// are ordinary heap memory so every idle preheated node costs real
+/// memory. A new PageList needs exactly one node for its first page, so
+/// we preheat that one and let the pool grow on demand.
+const node_preheat = 1;
+
+/// The number of pins we preheat the pin pool with: the viewport pin that
+/// every PageList tracks and the cursor pin that every Screen tracks.
+/// Selections, searches, and so on grow the pool on demand.
+const pin_preheat = 2;
 
 /// The list of pages in the screen. These are expected to be in order
 /// where the first page is the topmost page (scrollback) and the last is
@@ -302,7 +314,14 @@ const Node = struct {
 };
 
 /// The memory pool we get page nodes from.
-const NodePool = std.heap.MemoryPool(List.Node);
+///
+/// We don't use a std memory pool here because it is backed by an arena
+/// and we end up paying a lot of wasted memory for the growth factor when
+/// in practice we don't usually use many nodes.
+///
+/// We don't need the "untouched" property of our UntouchedPool but
+/// this gives us a GPA-allocated pool so we reuse it here.
+const NodePool = datastruct.UntouchedPool(List.Node, .of(List.Node));
 
 /// The standard page capacity that we use as a starting point for
 /// all pages. This is chosen as a sane default that fits most terminal
@@ -312,13 +331,32 @@ const std_capacity = pagepkg.std_capacity;
 /// The byte size required for a standard page.
 const std_size = Page.layout(std_capacity).total_size;
 
+/// True when the page pool is the wasm page pool, which recycles items
+/// through a free list shared by the whole module instance instead of
+/// dying with the pool.
+///
+/// Test builds use the native pool even on wasm so that pool memory goes
+/// through the testing allocator and participates in leak detection.
+const wasm_page_pool = builtin.target.cpu.arch.isWasm() and !builtin.is_test;
+
 /// The memory pool we use for page memory buffers. We use a separate pool
 /// so we can allocate these with a page allocator. We have to use a page
 /// allocator because we need memory that is zero-initialized and page-aligned.
-const PagePool = std.heap.MemoryPoolAligned(
-    [std_size]u8,
-    .fromByteUnits(std.heap.page_size_min),
-);
+const PagePool = if (wasm_page_pool)
+    datastruct.WasmPagePool([std_size]u8)
+else untouched: {
+    // Untouched pools never read/write to the items so that we can
+    // use demand-paging on operating systems that support it. This makes
+    // it so that an idle item in the pool costs no physical memory,
+    // only virtual memory.
+    //
+    // Contract for PageList is that every path that returns an item
+    // to the pool must zero it.
+    break :untouched datastruct.UntouchedPool(
+        [std_size]u8,
+        .fromByteUnits(std.heap.page_size_min),
+    );
+};
 
 /// List of pins, known as "tracked" pins. These are pins that are kept
 /// up to date automatically through page-modifying operations.
@@ -340,11 +378,11 @@ pub const MemoryPool = struct {
         page_alloc: Allocator,
         preheat: usize,
     ) Allocator.Error!MemoryPool {
-        var node_pool = try NodePool.initPreheated(gen_alloc, preheat);
+        var node_pool = try NodePool.initCapacity(gen_alloc, gen_alloc, node_preheat);
         errdefer node_pool.deinit();
-        var page_pool = try PagePool.initPreheated(page_alloc, preheat);
+        var page_pool = try PagePool.initCapacity(gen_alloc, page_alloc, preheat);
         errdefer page_pool.deinit();
-        var pin_pool = try PinPool.initPreheated(gen_alloc, 8);
+        var pin_pool = try PinPool.initCapacity(gen_alloc, pin_preheat);
         errdefer pin_pool.deinit();
         return .{
             .alloc = gen_alloc,
@@ -357,7 +395,7 @@ pub const MemoryPool = struct {
     pub fn deinit(self: *MemoryPool) void {
         self.pages.deinit();
         self.nodes.deinit();
-        self.pins.deinit();
+        self.pins.deinit(self.alloc);
     }
 
     pub fn reset(self: *MemoryPool, mode: ResetMode) void {
@@ -418,15 +456,17 @@ page_size: usize,
 /// in the state struct.
 page_compression: IncrementalCompressionState = .{},
 
-/// Maximum size of the page allocation in bytes. This only includes pages
-/// that are used ONLY for scrollback. If the active area is still partially
-/// in a page that also includes scrollback, then that page is not included.
-explicit_max_size: usize,
+/// A node available for immediate reuse by createPage, bypassing the
+/// memory pool round trip. This is only set during column reflow
+/// (resizeCols), which destroys one source page for roughly every
+/// destination page it creates: returning a page buffer to the pool
+/// decommits it and taking one back recommits it, and that syscall
+/// pair per page is a significant part of reflow cost. Always null
+/// outside of an in-progress reflow.
+recycle_node: ?*List.Node = null,
 
-/// This is the minimum max size that we will respect due to the rows/cols
-/// of the PageList. We must always be able to fit at least the active area
-/// and at least two pages for our algorithms.
-min_max_size: usize,
+/// Limits for scrollback.
+limits: Limits,
 
 /// The total number of rows represented by this PageList. This is used
 /// specifically for scrollbar information so we can have the total size.
@@ -495,59 +535,6 @@ pub const Viewport = union(enum) {
     pin,
 };
 
-/// Returns the minimum valid "max size" for a given number of rows and cols
-/// such that we can fit the active area AND at least two pages. Note we
-/// need the two pages for algorithms to work properly (such as grow) but
-/// we don't need to fit double the active area.
-///
-/// This min size may not be totally correct in the case that a large
-/// number of other dimensions makes our row size in a page very small.
-/// But this gives us a nice fast heuristic for determining min/max size.
-/// Therefore, if the page size is violated you should always also verify
-/// that we have enough space for the active area.
-fn minMaxSize(cols: size.CellCountInt, rows: size.CellCountInt) usize {
-    // Invariant required to ensure our divCeil below cannot overflow.
-    comptime {
-        const max_rows = std.math.maxInt(size.CellCountInt);
-        _ = std.math.divCeil(usize, max_rows, 1) catch unreachable;
-    }
-
-    // Get our capacity to fit our rows. If the cols are too big, it may
-    // force less rows than we want meaning we need more than one page to
-    // represent a viewport.
-    const cap = initialCapacity(cols);
-
-    // Calculate the number of standard sized pages we need to represent
-    // an active area.
-    const pages_exact = if (cap.rows >= rows) 1 else std.math.divCeil(
-        usize,
-        rows,
-        cap.rows,
-    ) catch {
-        // Not possible:
-        // - initialCapacity guarantees at least 1 row
-        // - numerator/denominator can't overflow because of comptime check above
-        unreachable;
-    };
-
-    // We always need at least one page extra so that we
-    // can fit partial pages to spread our active area across two pages.
-    // Even for caps that can't fit all rows in a single page, we add one
-    // because the most extra space we need at any given time is only
-    // the partial amount of one page.
-    const pages = pages_exact + 1;
-    assert(pages >= 2);
-
-    // log.debug("minMaxSize cols={} rows={} cap={} pages={}", .{
-    //     cols,
-    //     rows,
-    //     cap,
-    //     pages,
-    // });
-
-    return PagePool.item_size * pages;
-}
-
 /// Calculates the initial capacity for a new page for a given column
 /// count. This will attempt to fit within std_size at all times so we
 /// can use our memory pool, but if cols is too big, this will return a
@@ -592,11 +579,18 @@ fn initialCapacity(cols: size.CellCountInt) Capacity {
     return cap;
 }
 
-/// This is the page allocator we'll use for all our underlying
-/// VM page allocations.
-inline fn pageAllocator() Allocator {
+/// Returns the allocator used for underlying page allocations.
+///
+/// `alloc` is the caller-provided allocator. It is used on native freestanding
+/// targets, where no OS page allocator is available. Other targets select a
+/// platform-specific allocator below.
+inline fn pageAllocator(alloc: Allocator) Allocator {
     // In tests we use our testing allocator so we can detect leaks.
     if (builtin.is_test) return std.testing.allocator;
+
+    // Native freestanding targets don't have an OS page allocator, so use
+    // the allocator provided by the embedder.
+    if (native_freestanding) return alloc;
 
     // On non-macOS we use our standard Zig page allocator.
     if (!builtin.target.os.tag.isDarwin()) return std.heap.page_allocator;
@@ -614,29 +608,53 @@ const init_tw = tripwire.module(enum {
     viewport_pin_track,
 }, init);
 
+pub const Options = struct {
+    /// The initial active-area size. This can be resized with `resize`.
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
+
+    /// The maximum number of bytes allocated for pages. The effective limit
+    /// is raised when necessary to hold the active area. Null is unlimited.
+    max_size: ?usize = null,
+
+    /// The maximum number of scrollback rows, excluding the active
+    /// area. Rows are physical (viewed) rows, so a wrapped row counts as
+    /// multiple rows. Max line pruning only happens at page-boundaries
+    /// (the minimum internal allocation size) so in practice the max lines
+    /// is always slightly larger than configured.
+    ///
+    /// Null is unlimited.
+    max_lines: ?usize = null,
+};
+
 /// Initialize the page. The top of the first page in the list is always the
 /// top of the active area of the screen (important knowledge for quickly
 /// setting up cursors in Screen).
 ///
-/// max_size is the maximum number of bytes that will be allocated for
+/// `max_size` is the maximum number of bytes that will be allocated for
 /// pages. If this is smaller than the bytes required to show the viewport
 /// then max_size will be ignored and the viewport will be shown, but no
 /// scrollback will be created. max_size is always rounded down to the nearest
 /// terminal page size (not virtual memory page), otherwise we would always
 /// slightly exceed max_size in the limits.
 ///
-/// If max_size is null then there is no defined limit and the screen will
-/// grow forever. In reality, the limit is set to the byte limit that your
-/// computer can address in memory. If you somehow require more than that
-/// (due to disk paging) then please contribute that yourself and perhaps
-/// search deep within yourself to find out why you need that.
+/// `max_lines` is the maximum number of physical rows retained as scrollback,
+/// excluding the active area. It is a page-granular heuristic: at least one
+/// standard page worth of rows is permitted and only complete historical
+/// pages are removed.
+///
+/// If either limit is null then that dimension has no defined limit and the
+/// screen will grow forever. In reality, the limit is set to the amount your
+/// computer can address in memory. If you somehow require more than that (due
+/// to disk paging) then please contribute that yourself and perhaps search
+/// deep within yourself to find out why you need that.
 pub fn init(
     alloc: Allocator,
-    cols: size.CellCountInt,
-    rows: size.CellCountInt,
-    max_size: ?usize,
+    opts: Options,
 ) Allocator.Error!PageList {
     const tw = init_tw;
+    const cols = opts.cols;
+    const rows = opts.rows;
 
     // The screen starts with a single page that is the entire viewport,
     // and we'll split it thereafter if it gets too large and add more as
@@ -644,7 +662,7 @@ pub fn init(
     try tw.check(.init_memory_pool);
     var pool = try MemoryPool.init(
         alloc,
-        pageAllocator(),
+        pageAllocator(alloc),
         page_preheat,
     );
     errdefer pool.deinit();
@@ -657,20 +675,20 @@ pub fn init(
         cols,
         rows,
     );
-    errdefer freeInitialHeapPages(pool.pages.arena.child_allocator, page_list);
+    errdefer releasePages(&pool, page_list);
 
-    // Get our minimum max size, see doc comments for more details.
-    const min_max_size = minMaxSize(cols, rows);
+    var limits: Limits = .init(cols, rows);
+    limits.set(.bytes, opts.max_size);
+    limits.set(.lines, opts.max_lines);
 
     // We always track our viewport pin to ensure this is never an allocation
     try tw.check(.viewport_pin);
-    const viewport_pin = try pool.pins.create();
+    const viewport_pin = try pool.pins.create(pool.alloc);
     viewport_pin.* = .{ .node = page_list.first.? };
-    var tracked_pins: PinSet = .{};
-    errdefer tracked_pins.deinit(pool.alloc);
 
     try tw.check(.viewport_pin_track);
-    try tracked_pins.putNoClobber(pool.alloc, viewport_pin, {});
+    var tracked_pins = try initTrackedPins(pool.alloc, viewport_pin);
+    errdefer tracked_pins.deinit(pool.alloc);
 
     errdefer comptime unreachable;
     const result: PageList = .{
@@ -681,8 +699,7 @@ pub fn init(
         .page_serial = page_serial,
         .page_serial_epoch = 0,
         .page_size = page_size,
-        .explicit_max_size = max_size orelse std.math.maxInt(usize),
-        .min_max_size = min_max_size,
+        .limits = limits,
         .total_rows = rows,
         .tracked_pins = tracked_pins,
         .viewport = .{ .active = {} },
@@ -691,6 +708,17 @@ pub fn init(
     };
     result.assertIntegrity();
     return result;
+}
+
+/// Create the tracked pin set for a new PageList with the viewport pin
+/// already tracked. The set is sized for exactly the viewport pin and the
+/// cursor pin that every Screen tracks.
+fn initTrackedPins(alloc: Allocator, viewport_pin: *Pin) Allocator.Error!PinSet {
+    var set: PinSet = .{};
+    errdefer set.deinit(alloc);
+    try set.entries.setCapacity(alloc, pin_preheat);
+    set.putAssumeCapacityNoClobber(viewport_pin, {});
+    return set;
 }
 
 const initPages_tw = tripwire.module(enum {
@@ -714,15 +742,14 @@ fn initPages(
     const cap = initialCapacity(cols);
     const layout = Page.layout(cap);
     const pooled = layout.total_size <= std_size;
-    const page_alloc = pool.pages.arena.child_allocator;
+    const page_alloc = pool.pages.allocator;
 
     // Guaranteed by comptime checks in initialCapacity but
     // redundant here for safety.
     assert(layout.total_size <= size.max_page_size);
 
-    // If we have an error, we need to clean up our heap-owned pages
-    // since they're not in the pool.
-    errdefer freeInitialHeapPages(page_alloc, page_list);
+    // If we have an error, we need to release the pages we created.
+    errdefer releasePages(pool, page_list);
 
     var rem = rows;
     while (rem > 0) {
@@ -753,7 +780,7 @@ fn initPages(
         // (WASM), the WasmAllocator reuses freed slots without zeroing since
         // only fresh memory.grow pages are guaranteed zero by the WASM spec.
         // On native, the OS page allocator (mmap) returns zeroed pages.
-        if (comptime std.debug.runtime_safety or builtin.os.tag == .freestanding)
+        if (comptime std.debug.runtime_safety or builtin.target.os.tag == .freestanding)
             @memset(page_buf, 0);
 
         // Initialize the first set of pages to contain our viewport so that
@@ -812,6 +839,7 @@ pub inline fn pauseIntegrityChecks(self: *PageList, pause: bool) void {
 }
 
 const IntegrityError = error{
+    MaxLinesExceeded,
     PageSerialInvalid,
     TotalRowsMismatch,
     TrackedPinInvalid,
@@ -854,6 +882,21 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
             .{ self.total_rows, actual_total },
         );
         return IntegrityError.TotalRowsMismatch;
+    }
+
+    // A line limit may only be exceeded when the oldest page also contains
+    // active rows. Complete historical pages are always eligible for pruning.
+    if (self.total_rows > self.rows) {
+        const history_rows = self.total_rows - self.rows;
+        if (history_rows > self.limits.max(.lines) and
+            self.pages.first.? != self.getTopLeft(.active).node)
+        {
+            log.warn(
+                "PageList integrity violation: max lines exceeded history={} max={}",
+                .{ history_rows, self.limits.max(.lines) },
+            );
+            return IntegrityError.MaxLinesExceeded;
+        }
     }
 
     // Verify that all our tracked pins point to valid pages.
@@ -903,6 +946,45 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
     }
 }
 
+/// Release every page in the list during a teardown walk (deinit,
+/// reset, or an errdefer unwinding a partially built list): heap-owned
+/// pages go back to the page allocator, pool-owned pages back to the
+/// page pool, and the nodes back to the node pool's free list.
+fn releasePages(pool: *MemoryPool, list: List) void {
+    const page_alloc = pool.pages.allocator;
+    var it = list.first;
+    while (it) |node| {
+        it = node.next;
+        const page = node.restore(.discard);
+        switch (node.owned) {
+            .pool => releasePoolPage(pool, page),
+            .heap => page_alloc.free(page.memory),
+        }
+        pool.nodes.destroy(node);
+    }
+}
+
+/// Release a pool-owned page during a teardown walk. Unlike
+/// destroyNodeExt, this does not zero the page: on native, the item goes
+/// straight back to the page allocator, and zeroing it first would write
+/// the whole page (and fault a decommitted mapping back in) only for it
+/// to be unmapped.
+fn releasePoolPage(pool: *MemoryPool, page: *const Page) void {
+    const item: *align(std.heap.page_size_min) [std_size]u8 =
+        @ptrCast(@alignCast(page.memory.ptr));
+
+    // The wasm pool's items are shared by every pool in the module and
+    // never return to the allocator, so they go back to the free list
+    // zeroed for reuse (mirroring destroyNodeExt).
+    if (comptime wasm_page_pool) {
+        _ = terminal_mem.decommit(.zero, item, page.memory.len);
+        pool.pages.destroy(item);
+        return;
+    }
+
+    pool.pages.release(item);
+}
+
 /// Deinit the pagelist, freeing all page memory and the memory pool.
 pub fn deinit(self: *PageList) void {
     // Verify integrity before cleanup
@@ -911,20 +993,8 @@ pub fn deinit(self: *PageList) void {
     // Always deallocate our hashmap.
     self.tracked_pins.deinit(self.pool.alloc);
 
-    // Go through our linked list and deallocate all pages that are
-    // heap-owned (not in the pool).
-    const page_alloc = self.pool.pages.arena.child_allocator;
-    var it = self.pages.first;
-    while (it) |node| : (it = node.next) {
-        const page = node.restore(.discard);
-        switch (node.owned) {
-            .pool => {},
-            .heap => page_alloc.free(page.memory),
-        }
-    }
-
-    // Deallocate all the pages. We don't need to deallocate the list or
-    // nodes because they all reside in the pool.
+    // Release every page and node back to the pools, then free the pools.
+    releasePages(&self.pool, self.pages);
     self.pool.deinit();
 }
 
@@ -960,56 +1030,24 @@ pub fn reset(self: *PageList) void {
         cap.rows,
     ) catch unreachable;
 
-    // Before resetting our pools we need to free any pages that
-    // are heap-owned since those were allocated outside the pool.
-    {
-        const page_alloc = self.pool.pages.arena.child_allocator;
-        var it = self.pages.first;
-        while (it) |node| : (it = node.next) {
-            const page = node.restore(.discard);
-            switch (node.owned) {
-                .pool => {},
-                .heap => page_alloc.free(page.memory),
-            }
-        }
-    }
+    // Before resetting our pools we need to release our pages: heap-owned
+    // pages go back to the page allocator and pool-owned pages back to
+    // the page pool.
+    releasePages(&self.pool, self.pages);
 
     // Reset our pools to free as much memory as possible while retaining
     // the capacity for at least the minimum number of pages we need.
     // The return value is whether memory was reclaimed or not, but in
     // either case the pool is left in a valid state.
+    //
+    // Retained page pool items are zero (see PagePool), so there is
+    // nothing to scrub before initPages reuses them.
     _ = self.pool.pages.reset(.{
         .retain_with_limit = page_count * PagePool.item_size,
     });
     _ = self.pool.nodes.reset(.{
         .retain_with_limit = page_count * NodePool.item_size,
     });
-
-    // Our page pool relies on mmap to zero our page memory. Since we're
-    // retaining a certain amount of memory, it won't use mmap and won't
-    // be zeroed. This block zeroes out all the memory in the pool arena.
-    {
-        // Note: we only have to do this for the page pool because the
-        // nodes are always fully overwritten on each allocation.
-        const page_arena = &self.pool.pages.arena;
-        var it = page_arena.state.buffer_list.first;
-        while (it) |node| : (it = node.next) {
-            // WARN: Since HeapAllocator's BufNode is not public API,
-            // we have to hardcode its layout here. We do a comptime assert
-            // on Zig version to verify we check it on every bump.
-            const BufNode = struct {
-                data: usize,
-                node: std.SinglyLinkedList.Node,
-            };
-            const buf_node: *BufNode = @fieldParentPtr("node", node);
-
-            // The fully allocated buffer
-            const alloc_buf = @as([*]u8, @ptrCast(buf_node))[0..buf_node.data];
-            // The buffer minus our header
-            const data_buf = alloc_buf[@sizeOf(BufNode)..];
-            @memset(data_buf, 0);
-        }
-    }
 
     // Initialize our pages. This should not be able to fail since
     // we retained the capacity for the minimum number of pages we need.
@@ -1091,30 +1129,20 @@ pub fn clone(
     // Setup our pool
     var pool: MemoryPool = try .init(
         alloc,
-        pageAllocator(),
+        pageAllocator(alloc),
         page_count,
     );
     errdefer pool.deinit();
 
     // Create our viewport. In a clone, the viewport always goes
     // to the top.
-    const viewport_pin = try pool.pins.create();
-    var tracked_pins: PinSet = .{};
+    const viewport_pin = try pool.pins.create(pool.alloc);
+    var tracked_pins = try initTrackedPins(pool.alloc, viewport_pin);
     errdefer tracked_pins.deinit(pool.alloc);
-    try tracked_pins.putNoClobber(pool.alloc, viewport_pin, {});
 
     // Our list of pages
     var page_list: List = .{};
-    errdefer {
-        const page_alloc = pool.pages.arena.child_allocator;
-        var page_it = page_list.first;
-        while (page_it) |node| : (page_it = node.next) {
-            switch (node.owned) {
-                .pool => {},
-                .heap => page_alloc.free(node.page().memory),
-            }
-        }
-    }
+    errdefer releasePages(&pool, page_list);
 
     // Copy our pages
     var page_serial: u64 = 0;
@@ -1129,6 +1157,11 @@ pub fn clone(
             &page_serial,
             &page_size,
         );
+
+        // Add the page to the list immediately so that the errdefer
+        // above releases it if cloning fails.
+        page_list.append(node);
+
         const dst_page = node.page();
         const src_page = chunk.node.page();
         assert(node.capacity().rows >= chunk.end - chunk.start);
@@ -1143,8 +1176,6 @@ pub fn clone(
 
         dst_page.dirty = src_page.dirty;
 
-        page_list.append(node);
-
         total_rows += node.rows();
 
         // Remap our tracked pins by changing the page and
@@ -1156,7 +1187,7 @@ pub fn clone(
                 if (p.node != chunk.node or
                     p.y < chunk.start or
                     p.y >= chunk.end) continue;
-                const new_p = try pool.pins.create();
+                const new_p = try pool.pins.create(pool.alloc);
                 new_p.* = p.*;
                 new_p.node = node;
                 new_p.y -= chunk.start;
@@ -1176,8 +1207,7 @@ pub fn clone(
         .page_serial = page_serial,
         .page_serial_epoch = 0,
         .page_size = page_size,
-        .explicit_max_size = self.explicit_max_size,
-        .min_max_size = self.min_max_size,
+        .limits = self.limits,
         .cols = self.cols,
         .rows = self.rows,
         .total_rows = total_rows,
@@ -1206,6 +1236,9 @@ pub fn clone(
         // Update our total rows to be our row size.
         result.total_rows = result.rows;
     }
+
+    // A clone can copy more history than its inherited line limit.
+    result.limits.enforce(&result, .lines);
 
     result.assertIntegrity();
     return result;
@@ -1279,17 +1312,22 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
     // its too easy to get the logic wrong in here.
     self.viewport_pin_row_offset = null;
 
-    if (!opts.reflow) return try self.resizeWithoutReflow(opts);
+    if (!opts.reflow) {
+        try self.resizeWithoutReflow(opts);
+        // Shrinking the active row count turns former active rows into
+        // scrollback even without reflow, which can cross the line limit.
+        self.limits.enforce(self, .lines);
+        return;
+    }
 
-    // Recalculate our minimum max size. This allows grow to work properly
-    // when increasing beyond our initial minimum max size or explicit max
-    // size to fit the active area.
-    const old_min_max_size = self.min_max_size;
-    self.min_max_size = minMaxSize(
+    // Recalculate our minimum limits. This allows grow to work properly when
+    // increasing beyond the explicit limits to fit the active area.
+    const old_limits = self.limits;
+    self.limits.resize(
         opts.cols orelse self.cols,
         opts.rows orelse self.rows,
     );
-    errdefer self.min_max_size = old_min_max_size;
+    errdefer self.limits = old_limits;
 
     // On reflow, the main thing that causes reflow is column changes. If
     // only rows change, reflow is impossible. So we change our behavior based
@@ -1361,6 +1399,11 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
         },
         .active, .top => {},
     }
+
+    // Column reflow can change the physical history row count, and a row
+    // resize can move the active boundary. Both may expose whole old pages
+    // that are now eligible for line-limit pruning.
+    self.limits.enforce(self, .lines);
 }
 
 /// Resize the pagelist with reflow by adding or removing columns.
@@ -1486,6 +1529,14 @@ fn resizeCols(
         }
     }
 
+    // Reflowed source pages are stashed for reuse as destination
+    // pages (see recycle_node). Whether we succeed or fail, a stashed
+    // node must not outlive the reflow.
+    defer if (self.recycle_node) |node| {
+        self.recycle_node = null;
+        self.destroyNode(node);
+    };
+
     // Set our new page as the only page. This orphans the existing pages
     // in the list, but that's fine since we're gonna delete them anyway.
     self.pages.first = first_rewritten_node;
@@ -1501,11 +1552,21 @@ fn resizeCols(
                 if (preserved_cursor) |c| c.tracked_pin else null,
             );
 
-            // Once we're done reflowing a page, destroy it immediately.
-            // This frees memory and makes it more likely in memory
-            // constrained environments that the next reflow will work.
-            if (row.y == row.node.rows() - 1) {
-                self.destroyNode(row.node);
+            // Once we're done reflowing a page, we're done with it, so
+            // make it available for reuse (or destroy it). Making it
+            // immediately available frees memory and makes it more
+            // likely in memory constrained environments that the next
+            // reflow will work.
+            if (row.y == row.node.rows() - 1) destroy_node: {
+                if (self.recycle_node != null or
+                    row.node.owned != .pool or
+                    row.node.data != .resident)
+                {
+                    self.destroyNode(row.node);
+                    break :destroy_node;
+                }
+
+                self.recycle_node = row.node;
             }
         }
 
@@ -1609,6 +1670,37 @@ const ReflowCursor = struct {
     /// This is the final row count of the reflowed pages.
     total_rows: usize,
 
+    /// Memoizes the most recent source-to-destination style id
+    /// mapping. Styled cells come in long runs sharing the same style
+    /// so this lets writeCell bump the destination ref count directly
+    /// instead of performing a set lookup for every styled cell.
+    ///
+    /// The destination id is only valid for the current destination
+    /// page, which is why this lives on the cursor: every destination
+    /// page change goes through init() which resets this.
+    style_cache: StyleCache,
+
+    /// Memoizes the capacity adjustment for new destination pages
+    /// (see reflowRow). It only depends on the source page so this is
+    /// keyed by the source page pointer, which reflow visits
+    /// sequentially and never revisits.
+    cap_memo: ?struct {
+        src_page: *const Page,
+        cap: Capacity,
+    },
+
+    const StyleCache = struct {
+        src_page: ?*const Page,
+        src_id: stylepkg.Id,
+        dst_id: stylepkg.Id,
+
+        const invalid: StyleCache = .{
+            .src_page = null,
+            .src_id = stylepkg.default_id,
+            .dst_id = stylepkg.default_id,
+        };
+    };
+
     fn init(node: *List.Node) ReflowCursor {
         const page = node.page();
         const rows = page.rows.ptr(page.memory);
@@ -1624,6 +1716,9 @@ const ReflowCursor = struct {
 
             // Initially whatever size our input node is.
             .total_rows = node.rows(),
+
+            .style_cache = .invalid,
+            .cap_memo = null,
         };
     }
 
@@ -1653,15 +1748,24 @@ const ReflowCursor = struct {
             if (cols_len == 0 and src_row.semantic_prompt != .none) cols_len = 1;
         }
 
-        // Handle tracked pin adjustments.
+        // Handle tracked pin adjustments. We also note whether any
+        // tracked pin is on this row at all so that the per-cell loop
+        // below can skip pin scans entirely for the overwhelmingly
+        // common case of a row with no pins. Note we compare nodes
+        // rather than pages since a node owns exactly one page; this
+        // is cheaper and avoids `page()` restoring unrelated
+        // compressed nodes purely for a comparison.
+        var row_has_pins = false;
         {
             // Deferred line breaks and pending wrap reset the destination column.
             const dst_x = if (self.new_rows > 0 or self.pending_wrap) 0 else self.x;
 
             const pin_keys = list.tracked_pins.keys();
             for (pin_keys) |p| {
-                if (p.node.page() != src_page or
-                    p.y != src_y) continue;
+                if (p.node != row.node or p.y != src_y) continue;
+
+                // This row has pins
+                row_has_pins = true;
 
                 if (cursor_pin != null and p == cursor_pin.?) continue;
 
@@ -1683,7 +1787,7 @@ const ReflowCursor = struct {
         // If the cursor is after blanks on the right, those cells are still
         // before the next write and must reflow with it.
         if (cursor_pin) |p| {
-            if (p.node.page() == src_page and p.y == src_y) {
+            if (p.node == row.node and p.y == src_y) {
                 cols_len = @max(cols_len, p.x + 1);
             }
         }
@@ -1700,18 +1804,16 @@ const ReflowCursor = struct {
 
         // Inherit increased styles or grapheme bytes from the src page
         // we're reflowing from for new pages.
-        const cap = src_page.capacity.adjust(
-            .{ .cols = self.page.size.cols },
-        ) catch |err| err: {
-            comptime assert(@TypeOf(err) == error{OutOfMemory});
-
-            var cap = src_page.capacity;
-            cap.cols = self.page.size.cols;
-            // We're already a non-standard page. We don't want to
-            // inherit a massive set of rows, so cap it at our std size.
-            cap.rows = @min(src_page.size.rows, std_capacity.rows);
-            break :err cap;
-        };
+        //
+        // This only depends on the source page, which we process row
+        // by row, so memoize it: computing the adjustment requires a
+        // full page layout calculation which is much too expensive to
+        // do for every row.
+        const cap: Capacity = if (self.cap_memo) |memo| cap: {
+            if (memo.src_page == src_page) break :cap memo.cap;
+            // Source page changed, fall through to recompute.
+            break :cap self.computeAndMemoizeCap(src_page);
+        } else self.computeAndMemoizeCap(src_page);
 
         // Our row isn't blank, write any new rows we deferred.
         while (self.new_rows > 0) {
@@ -1740,11 +1842,32 @@ const ReflowCursor = struct {
                 }
             }
 
+            // Fast path: bulk-copy a run of simple cells directly
+            // into the destination row. The vast majority of cells
+            // are narrow cells or complete wide pairs, have no
+            // managed memory (graphemes, hyperlinks), and share a
+            // single style in long runs, so this avoids the
+            // per-cell state machine below for most of the work.
+            // Rows with tracked pins take the slow path so pin
+            // remapping behaves identically.
+            if (!row_has_pins) {
+                const max_run = @min(
+                    cols_len - x,
+                    @as(usize, self.page.size.cols) - self.x,
+                );
+                const window = cells[x..][0..max_run];
+                const run = bulkRunLength(window);
+                if (run > 0 and self.copyRun(window[0..run], src_page)) {
+                    x += run;
+                    continue;
+                }
+            }
+
             // Move any tracked pins from the source.
-            {
+            if (row_has_pins) {
                 const pin_keys = list.tracked_pins.keys();
                 for (pin_keys) |p| {
-                    if (p.node.page() != src_page or
+                    if (p.node != row.node or
                         p.y != src_y or
                         p.x != x) continue;
 
@@ -1767,16 +1890,15 @@ const ReflowCursor = struct {
                 .skip_next => {
                     // Remap any tracked pins at the skipped position (x+1)
                     // since we won't process that cell in the loop.
-                    const pin_keys = list.tracked_pins.keys();
-                    for (pin_keys) |p| {
-                        if (p.node.page() != src_page or
+                    if (row_has_pins) for (list.tracked_pins.keys()) |p| {
+                        if (p.node != row.node or
                             p.y != src_y or
                             p.x != x + 1) continue;
 
                         p.node = self.node;
                         p.x = self.x;
                         p.y = self.y;
-                    }
+                    };
 
                     x += 2;
                 },
@@ -1812,6 +1934,280 @@ const ReflowCursor = struct {
         if (!src_row.wrap) {
             self.new_rows += 1;
         }
+    }
+
+    /// Compute and memoize the new-page capacity for the given source
+    /// page. See the call site in reflowRow for details.
+    fn computeAndMemoizeCap(
+        self: *ReflowCursor,
+        src_page: *const Page,
+    ) Capacity {
+        const cap = src_page.capacity.adjust(
+            .{ .cols = self.page.size.cols },
+        ) catch |err| err: {
+            comptime assert(@TypeOf(err) == error{OutOfMemory});
+
+            var cap = src_page.capacity;
+            cap.cols = self.page.size.cols;
+            // We're already a non-standard page. We don't want to
+            // inherit a massive set of rows, so cap it at our std size.
+            cap.rows = @min(src_page.size.rows, std_capacity.rows);
+            break :err cap;
+        };
+
+        self.cap_memo = .{ .src_page = src_page, .cap = cap };
+        return cap;
+    }
+
+    /// True if this cell can be copied verbatim as part of a bulk
+    /// run: a narrow plain-text or bg-color cell with no managed
+    /// memory (graphemes, hyperlinks) and no special reflow handling
+    /// (wide characters, spacers, Kitty virtual placeholders). For
+    /// these cells writeCell reduces to a copy of the raw cell plus
+    /// a style ref count adjustment.
+    inline fn bulkCopyable(cell: pagepkg.Cell) bool {
+        return switch (cell.content_tag) {
+            .codepoint => copyable: {
+                if (cell.wide != .narrow) break :copyable false;
+                if (cell.hyperlink) break :copyable false;
+                if (comptime build_options.kitty_graphics) {
+                    // Placeholders must set a row flag, so they take
+                    // the slow path.
+                    if (cell.content.codepoint.data ==
+                        kitty.graphics.unicode.placeholder)
+                    {
+                        break :copyable false;
+                    }
+                }
+                break :copyable true;
+            },
+
+            // Grapheme data must be cloned cell-by-cell.
+            .codepoint_grapheme => false,
+
+            // These are guaranteed to have no style or grapheme data
+            // (see writeCell) so they are pure copies. The style
+            // check is defensive so that a bg cell can never join or
+            // extend a styled run.
+            .bg_color_palette,
+            .bg_color_rgb,
+            => cell.style_id == stylepkg.default_id,
+        };
+    }
+
+    /// The group length for the vectorized bulk run scan below: the
+    /// SIMD lane count where the target supports it, otherwise a
+    /// plain unrolled group like other cell scans use (e.g. the
+    /// render state scans).
+    const bulk_group_len = simd.lanes(u64) orelse 8;
+
+    /// Masked compare helper covering every cell field that a run
+    /// must share to be copied by copyRun: given that the first cell
+    /// of a run passed the full bulkCopyable predicate, equality on
+    /// these fields implies the same for every subsequent cell, with
+    /// the same style.
+    ///
+    /// Note this is slightly stricter than bulkCopyable (e.g. a
+    /// bg-color cell won't extend an unstyled text run even though it
+    /// is copyable): that only splits the copy into multiple runs,
+    /// which is still correct.
+    const BulkRunMask = pagepkg.Mask(pagepkg.Cell, &.{
+        "content_tag",
+        "style_id",
+        "wide",
+        "hyperlink",
+    }, bulk_group_len);
+
+    /// Masked compare helper for detecting the Kitty virtual
+    /// placeholder codepoint in text cells. Placeholders take the
+    /// slow path (they must set a row flag), so they terminate a run.
+    const PlaceholderMask = pagepkg.Mask(pagepkg.Cell, &.{
+        "content.codepoint.data",
+    }, bulk_group_len);
+
+    /// The length of the prefix of cells that can be copied at once
+    /// with copyRun: bulk-copyable cells sharing a single style. The
+    /// scan uses masked compares of the raw cell bits (see
+    /// BulkRunMask), which is significantly cheaper than the
+    /// field-wise predicate for this hot loop.
+    fn bulkRunLength(cells: []const pagepkg.Cell) usize {
+        if (cells.len == 0) return 0;
+        const first = cells[0];
+
+        // A run may start on a bulk-copyable narrow cell or on a wide pair.
+        const pair_start = first.content_tag == .codepoint and
+            first.wide == .wide and
+            !first.hyperlink;
+        if (!pair_start and !bulkCopyable(first)) return 0;
+
+        // Patterns for each cell shape admitted to the run.
+        var proto = first;
+        proto.wide = .narrow;
+        const narrow_pattern = BulkRunMask.pattern(proto);
+        proto.wide = .wide;
+        const wide_pattern = BulkRunMask.pattern(proto);
+        proto.wide = .spacer_tail;
+        const tail_pattern = BulkRunMask.pattern(proto);
+
+        // Only text cells can contain a placeholder; for bg color
+        // tags the content bits are a color, so we skip the check for
+        // those (the tag is part of BulkRunMask, making tags uniform
+        // per run).
+        const check_placeholder = build_options.kitty_graphics and
+            first.content_tag == .codepoint;
+        const placeholder_pattern = comptime pattern: {
+            // Never used without kitty graphics (check_placeholder
+            // is comptime-false), but it must still compile and the
+            // placeholder codepoint doesn't exist in that build.
+            if (!build_options.kitty_graphics) break :pattern 0;
+
+            break :pattern PlaceholderMask.pattern(.init(
+                kitty.graphics.unicode.placeholder,
+            ));
+        };
+
+        var len: usize = 0;
+        outer: while (true) {
+            // Vectorized scan: check whole groups of narrow cells at
+            // once. If a group fully matches, the run extends by the
+            // whole group; otherwise fall through to the scalar loop
+            // below, which finds the exact end of the run within it
+            // or continues through a wide pair.
+            while (cells.len - len >= bulk_group_len) {
+                if (!BulkRunMask.eql(cells, len, narrow_pattern)) break;
+                if (check_placeholder and PlaceholderMask.eqlAny(
+                    cells,
+                    len,
+                    placeholder_pattern,
+                )) break;
+                len += bulk_group_len;
+            }
+
+            while (len < cells.len) {
+                const cell = cells[len];
+                if (BulkRunMask.eqlScalar(cell, narrow_pattern)) {
+                    if (check_placeholder and PlaceholderMask.eqlScalar(
+                        cell,
+                        placeholder_pattern,
+                    )) break :outer;
+                    len += 1;
+                    continue;
+                }
+
+                // Wide pairs are consumed atomically so the run
+                // (or window) end can never split a pair.
+                if (len + 1 < cells.len and
+                    BulkRunMask.eqlScalar(cell, wide_pattern) and
+                    BulkRunMask.eqlScalar(cells[len + 1], tail_pattern))
+                {
+                    len += 2;
+                    // Re-enter the vectorized loop: narrow groups
+                    // commonly follow a stretch of pairs.
+                    continue :outer;
+                }
+
+                break :outer;
+            }
+
+            break;
+        }
+
+        return len;
+    }
+
+    /// Copy a run of bulk-copyable cells (see bulkCopyable) sharing
+    /// one style into the destination row at the current position,
+    /// then advance the cursor. The run must fit in the remaining
+    /// columns of the destination row.
+    ///
+    /// Returns false without any state change if the style could not
+    /// be mapped into the destination page without a capacity
+    /// change; the caller should fall back to writeCell which
+    /// handles growing capacity.
+    fn copyRun(
+        self: *ReflowCursor,
+        src_cells: []const pagepkg.Cell,
+        src_page: *const Page,
+    ) bool {
+        assert(!self.pending_wrap);
+        assert(src_cells.len >= 1);
+        assert(src_cells.len <= self.page.size.cols - self.x);
+
+        const style_id = src_cells[0].style_id;
+        const n: u16 = @intCast(src_cells.len);
+
+        // Resolve the destination style id for this run and take one
+        // reference per cell. This mirrors the per-cell style logic
+        // in writeCell, including the memoization (see StyleCache).
+        const dst_style_id: stylepkg.Id = if (style_id == stylepkg.default_id)
+            stylepkg.default_id
+        else dst: {
+            if (self.style_cache.src_page == @as(?*const Page, src_page) and
+                self.style_cache.src_id == style_id)
+            {
+                const id = self.style_cache.dst_id;
+                self.page.styles.useMultiple(self.page.memory, id, n);
+                break :dst id;
+            }
+
+            const style = src_page.styles.get(
+                src_page.memory,
+                style_id,
+            ).*;
+
+            // Any error here (set full or needs rehash) is handled
+            // by falling back to the slow path, which grows capacity.
+            // No state has been modified yet at this point.
+            const id = (self.page.styles.addWithId(
+                self.page.memory,
+                style,
+                style_id,
+            ) catch return false) orelse style_id;
+
+            // addWithId took one reference, take the rest.
+            if (n > 1) self.page.styles.useMultiple(
+                self.page.memory,
+                id,
+                n - 1,
+            );
+
+            self.style_cache = .{
+                .src_page = src_page,
+                .src_id = style_id,
+                .dst_id = id,
+            };
+
+            break :dst id;
+        };
+
+        // Copy the raw cell contents.
+        const dst_cells: []pagepkg.Cell = @as(
+            [*]pagepkg.Cell,
+            @ptrCast(self.page_cell),
+        )[0..src_cells.len];
+        @memcpy(dst_cells, src_cells);
+
+        // If the style resolved to a different id in the destination
+        // page then rewrite the copied cells to point at it.
+        if (dst_style_id != style_id) {
+            for (dst_cells) |*cell| cell.style_id = dst_style_id;
+        }
+        if (dst_style_id != stylepkg.default_id) self.page_row.styled = true;
+
+        // Advance the cursor, matching what repeated cursorForward
+        // calls after each cell write would have done.
+        const cols = self.page.size.cols;
+        const cell_ptr: [*]pagepkg.Cell = @ptrCast(self.page_cell);
+        if (self.x + n == cols) {
+            self.x = cols - 1;
+            self.page_cell = @ptrCast(cell_ptr + n - 1);
+            self.pending_wrap = true;
+        } else {
+            self.x += n;
+            self.page_cell = @ptrCast(cell_ptr + n);
+        }
+
+        return true;
     }
 
     /// Write a cell. On error, this will not unwrite the cell but
@@ -1856,7 +2252,7 @@ const ReflowCursor = struct {
                             // head and wrap before handling it.
                             self.page_cell.* = .{
                                 .content_tag = .codepoint,
-                                .content = .{ .codepoint = 0 },
+                                .content = .{ .codepoint = .{ .data = 0 } },
                                 .wide = .spacer_head,
                             };
 
@@ -1876,7 +2272,7 @@ const ReflowCursor = struct {
                         // Edge case, when resizing to 1 column, wide
                         // characters are just destroyed and replaced
                         // with empty narrow cells.
-                        self.page_cell.content.codepoint = 0;
+                        self.page_cell.content.codepoint = .{ .data = 0 };
                         self.page_cell.wide = .narrow;
                         self.cursorForward();
 
@@ -1996,7 +2392,7 @@ const ReflowCursor = struct {
 
                 // Unsafe builds we throw away grapheme data!
                 self.page_cell.content_tag = .codepoint;
-                self.page_cell.content = .{ .codepoint = 0xFFFD };
+                self.page_cell.content = .{ .codepoint = .{ .data = 0xFFFD } };
             };
         }
 
@@ -2130,6 +2526,23 @@ const ReflowCursor = struct {
 
         // Copy style data.
         if (cell.hasStyling()) style: {
+            // Fast path: styled cells come in long runs sharing the
+            // same style. If this source style was just mapped into
+            // the current destination page, bump the ref count
+            // directly and skip the set lookup. The destination id is
+            // guaranteed alive because a previously written cell in
+            // this page holds a reference, and the cache is reset
+            // whenever the destination page changes (see init).
+            if (self.style_cache.src_page == src_page and
+                self.style_cache.src_id == cell.style_id)
+            {
+                const id = self.style_cache.dst_id;
+                self.page.styles.use(self.page.memory, id);
+                self.page_row.styled = true;
+                self.page_cell.style_id = id;
+                break :style;
+            }
+
             const style = src_page.styles.get(
                 src_page.memory,
                 cell.style_id,
@@ -2171,6 +2584,14 @@ const ReflowCursor = struct {
                     break :style;
                 };
             } orelse cell.style_id;
+
+            // Update our style cache with the latest style set so runs
+            // of cells with the same style are faster to write.
+            self.style_cache = .{
+                .src_page = src_page,
+                .src_id = cell.style_id,
+                .dst_id = id,
+            };
 
             self.page_row.styled = true;
             self.page_cell.style_id = id;
@@ -2451,14 +2872,14 @@ const ReflowCursor = struct {
 };
 
 fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
-    // We only set the new min_max_size if we're not reflowing. If we are
-    // reflowing, then resize handles this for us.
-    const old_min_max_size = self.min_max_size;
-    self.min_max_size = if (!opts.reflow) minMaxSize(
+    // We only set the new minimums if we're not reflowing. If we are
+    // reflowing, then the outer resize call handles this for us.
+    const old_limits = self.limits;
+    if (!opts.reflow) self.limits.resize(
         opts.cols orelse self.cols,
         opts.rows orelse self.rows,
-    ) else old_min_max_size;
-    errdefer self.min_max_size = old_min_max_size;
+    );
+    errdefer self.limits = old_limits;
 
     // Important! We have to do cols first because cols may cause us to
     // destroy pages if we're increasing cols which will free up page_size
@@ -2952,7 +3373,14 @@ fn trimTrailingBlankRows(
             self.invalidateNodeLayout(row_pin.node);
             invalidated_node = row_pin.node;
         }
+
+        // The row has no text but can still carry metadata (e.g. a
+        // blank prompt continuation line) and background-colored
+        // cells. The retired storage is re-exposed by the grow()
+        // fast path without any clearing, so it must be left in the
+        // default state.
         row_pin.node.page().resetRow(row_pin.rowAndCell().row);
+
         row_pin.node.page().size.rows -= 1;
         if (row_pin.node.page().size.rows == 0) {
             self.erasePage(row_pin.node);
@@ -3005,7 +3433,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
     defer self.assertIntegrity();
 
     // Special case no-scrollback mode to never allow scrolling.
-    if (self.explicit_max_size == 0) {
+    if (self.limits.bytes.explicit == 0) {
         self.viewport = .active;
         return;
     }
@@ -3573,7 +4001,7 @@ pub fn scrollbar(self: *PageList) Scrollbar {
     // it always has SOME extra space (due to the way we allocate by page).
     // So even with no scrollback we have some growth. It is architecturally
     // much simpler to just hide that for no-scrollback cases.
-    if (self.explicit_max_size == 0) return .{
+    if (self.limits.bytes.explicit == 0) return .{
         .total = self.rows,
         .offset = 0,
         .len = self.rows,
@@ -3674,22 +4102,38 @@ fn fixupViewport(
     }
 }
 
-/// Returns the actual max size. This may be greater than the explicit
-/// value if the explicit value is less than the min_max_size.
+/// Change the maximum logical page allocation at runtime. Null removes the
+/// explicit byte limit and zero disables scrollback.
 ///
-/// This value is a HEURISTIC. You cannot assert on this value. We may
-/// exceed this value if required to fit the active area. This may be
-/// required in some cases if the active area has a large number of
-/// graphemes, styles, etc.
-pub fn maxSize(self: *const PageList) usize {
-    return @max(self.explicit_max_size, self.min_max_size);
+/// Lowering the limit immediately removes eligible complete historical pages.
+/// The effective limit may still be raised to fit the active area, and a page
+/// which overlaps the active area is never split solely to satisfy this limit.
+pub fn setMaxBytes(self: *PageList, max: ?usize) void {
+    defer self.assertIntegrity();
+
+    self.limits.set(.bytes, max);
+    self.limits.enforce(self, .bytes);
+    if (self.limits.bytes.explicit == 0) self.viewport = .active;
+}
+
+/// Change the maximum number of physical scrollback rows at runtime. Null
+/// removes the explicit line limit.
+///
+/// Lowering the limit immediately removes eligible complete historical pages.
+/// The effective limit always permits at least one standard page of history,
+/// and a page which overlaps the active area is never split for enforcement.
+pub fn setMaxLines(self: *PageList, max: ?usize) void {
+    defer self.assertIntegrity();
+
+    self.limits.set(.lines, max);
+    self.limits.enforce(self, .lines);
 }
 
 /// Grow the active area by exactly one row.
 ///
 /// This may allocate, but also may not if our current page has more
 /// capacity we can use. This will prune scrollback if necessary to
-/// adhere to max_size.
+/// adhere to max_size and max_lines.
 ///
 /// This returns the newly allocated page node if there is one.
 pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
@@ -3702,10 +4146,10 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     if (last.capacity().rows > last.rows()) {
         // Fast path: we have capacity in the last page. The exposed
         // row requires no clearing work here: rows in unused page
-        // capacity are always in the default state, either because the
-        // page memory was never used (pool buffers are zeroed) or
-        // because whatever retired the row reset it (see Page.resetRow,
-        // which leaves only the dirty bit set).
+        // capacity are always in the default zero state, either
+        // because the page memory was never used (pool buffers are
+        // zeroed) or because whatever retired the row reset it (see
+        // Page.resetRow).
         const page = last.page();
         page.size.rows += 1;
         page.assertIntegrity();
@@ -3713,6 +4157,9 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         // Increase our total rows by one
         self.total_rows += 1;
 
+        // Growing inside the last page moves the active boundary without
+        // allocating; that alone can make the first page wholly historical.
+        self.limits.enforce(self, .lines);
         return null;
     }
 
@@ -3732,7 +4179,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     // initial allocation.
     if (self.pages.first != null and
         self.pages.first != self.pages.last and
-        self.page_size + PagePool.item_size > self.maxSize())
+        self.page_size + PagePool.item_size > self.limits.max(.bytes))
     prune: {
         const first = self.pages.popFirst().?;
         assert(first != last);
@@ -3815,6 +4262,10 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         // we're reusing an existing page so nothing has changed.
 
         page.assertIntegrity();
+
+        // Byte-limit recycling may leave history above the independent line
+        // limit, so enforce it after the recycled page becomes the new tail.
+        self.limits.enforce(self, .lines);
         return first;
     }
 
@@ -3833,6 +4284,9 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     // Record the increased row count
     self.total_rows += 1;
 
+    // Appending a page can cross the line limit and can make the oldest
+    // active-boundary page wholly historical.
+    self.limits.enforce(self, .lines);
     return next_node;
 }
 
@@ -3955,6 +4409,64 @@ pub fn increaseCapacity(
             if (layout.total_size > size.max_page_size) {
                 return error.OutOfSpace;
             }
+
+            // Doubling alone has a really bad behavior in that if you're
+            // in a pathological scenario with only one dimension of cap
+            // increase, you have to pay repeat double costs. Each time you
+            // double we have to reclone the entire page. As the page gets
+            // bigger this gets more expensive.
+            //
+            // Instead, for some dimensions, we do something else: we look
+            // at the current utilization, and project that to every row
+            // in the page capacity (if it fits). We just assume that your
+            // future workload will look the one you're currently filling.
+            // If we're wrong, its some wasted capacity but future growth
+            // still works in other dimensions.
+            //
+            // This only applies to the current page being grown. I previously
+            // tried a high-water-mark style solution to preallocate pages,
+            // which does work really well, but its not clear when you reset
+            // the mark.
+            project: {
+                // The dimensions we project must measure their current
+                // usage in the same units as the capacity field.
+                const used: u64 = switch (comptime tag) {
+                    .grapheme_bytes => page.grapheme_alloc.usedBytes(page.memory),
+
+                    // Living item count. Note the capacity field is a
+                    // requested item count that Layout.init rounds in
+                    // both directions (table to the next power of two,
+                    // items to the load factor of that), so this is an
+                    // approximation in capacity units; the headroom
+                    // below absorbs the error and an undershoot only
+                    // costs one more (non-ladder) growth event.
+                    .styles => page.styles.count(),
+
+                    else => break :project,
+                };
+                if (used == 0 or page.size.rows == 0) break :project;
+
+                // Full-page need at current density, plus 25% headroom
+                // for chunk rounding and fragmentation.
+                const density = used * @as(u64, cap.rows) / page.size.rows;
+                const projected_raw = density + density / 4;
+
+                // Bound the jump to 32× the pre-growth capacity. Arbitrary
+                // choice until we can show otherwise.
+                const projected = @min(
+                    projected_raw,
+                    @as(u64, old) * 32,
+                    std.math.maxInt(Int),
+                );
+                if (projected <= @field(cap, field_name)) break :project;
+
+                // Only take the projection if the resulting page still fits.
+                var proj_cap = cap;
+                @field(proj_cap, field_name) = @intCast(projected);
+                if (Page.layout(proj_cap).total_size > size.max_page_size)
+                    break :project;
+                cap = proj_cap;
+            }
         },
     };
 
@@ -4005,6 +4517,162 @@ pub fn increaseCapacity(
     return new_node;
 }
 
+/// Allocate a new page using the PageList's memory pools.
+///
+/// The page is detached: it doesn't contribute to the memory limits or
+/// row counts or anything in the PageList. The caller must call `finalize`
+/// to add it to the PageList at the appropriate place, or `deinit` to
+/// throw it away.
+pub fn allocatePage(
+    self: *PageList,
+    capacity: Capacity,
+) Allocator.Error!PageAllocation {
+    return .{
+        .destination = self,
+        .node = try createPageExt(
+            &self.pool,
+            .{ .cap = capacity },
+            &self.page_serial,
+            null,
+        ),
+    };
+}
+
+/// One PageList-pooled page which has not yet joined the live page sequence.
+pub const PageAllocation = struct {
+    destination: *PageList,
+    node: ?*List.Node,
+
+    /// Return the fresh page storage for the caller to populate.
+    pub fn page(self: *PageAllocation) *Page {
+        return self.node.?.pageAssumeResident();
+    }
+
+    /// Release an uncommitted page back to its PageList's pools.
+    ///
+    /// This is safe to call after `finalize` succeeds, so callers can defer
+    /// it unconditionally.
+    pub fn deinit(self: *PageAllocation) void {
+        const node = self.node orelse return;
+        destroyNodeExt(
+            &self.destination.pool,
+            node,
+            null,
+        );
+        self.node = null;
+    }
+
+    pub const Location = union(enum) {
+        /// Prepend the page to the start of the list (oldest history).
+        prepend,
+    };
+
+    /// Options for `finalize`.
+    pub const FinalizeOptions = struct {
+        /// Compress the page after it is added, unless it is visible in the
+        /// viewport.
+        ///
+        /// Use this when adding many pages of old history one at a time,
+        /// such as when restoring a snapshot, so that the full history is
+        /// never held uncompressed in memory. Compression is best effort.
+        /// A page that does not compress well, or a platform that does not
+        /// support compression, leaves the page uncompressed without an
+        /// error. Accessing a compressed page later uncompresses it
+        /// automatically.
+        compress: bool = false,
+    };
+
+    /// Finalize this complete page and transfer its ownership to the PageList.
+    /// The location determines where it goes into the PageList.
+    ///
+    /// Existing pages and tracked pins keep their identity. A pinned viewport
+    /// keeps showing the same content while its cached absolute row offset
+    /// moves down by the number of newly inserted rows.
+    ///
+    /// ```zig
+    /// var allocation = try pages.allocatePage(capacity);
+    /// defer allocation.deinit();
+    /// // ... fill in allocation.page() ...
+    /// try allocation.finalize(.prepend, .{ .compress = true });
+    /// ```
+    pub fn finalize(
+        self: *PageAllocation,
+        location: Location,
+        options: FinalizeOptions,
+    ) FinalizeError!void {
+        switch (location) {
+            .prepend => return try self.prepend(options),
+        }
+    }
+
+    pub const FinalizeError = error{
+        InvalidPageDimensions,
+        RowCountOverflow,
+        PageSizeOverflow,
+        MaxSizeExceeded,
+        MaxLinesExceeded,
+    };
+
+    fn prepend(self: *PageAllocation, options: FinalizeOptions) FinalizeError!void {
+        const destination = self.destination;
+        const node = self.node.?;
+
+        // Validate the populated page and all resulting accounting before
+        // publishing the detached node into the live list.
+        if (node.cols() == 0 or node.rows() == 0) return error.InvalidPageDimensions;
+        const total_rows = std.math.add(
+            usize,
+            destination.total_rows,
+            node.rows(),
+        ) catch return error.RowCountOverflow;
+        const node_size: usize = switch (node.owned) {
+            .pool => PagePool.item_size,
+            .heap => node.pageAssumeResident().memory.len,
+        };
+        const page_size = std.math.add(
+            usize,
+            destination.page_size,
+            node_size,
+        ) catch return error.PageSizeOverflow;
+
+        // Restored history is exact data, so reject a page which cannot
+        // coexist with the receiving PageList's configured limits.
+        if (page_size > destination.limits.max(.bytes)) {
+            return error.MaxSizeExceeded;
+        }
+        if (total_rows - destination.rows > destination.limits.max(.lines)) {
+            return error.MaxLinesExceeded;
+        }
+
+        // No fallible work remains. Publish the page and update every cached
+        // quantity affected by inserting rows above the existing first page.
+        errdefer comptime unreachable;
+        destination.pages.prepend(node);
+        destination.page_size = page_size;
+        destination.total_rows = total_rows;
+        if (destination.viewport == .pin) {
+            if (destination.viewport_pin_row_offset) |*offset| {
+                offset.* += node.rows();
+            }
+        }
+        destination.page_compression.markActivity();
+
+        destination.assertIntegrity();
+        self.node = null;
+
+        // A prepended page is above every existing page, so it is never part
+        // of the active area. It is visible only when the viewport is at the
+        // top of the scrollback, which makes it the first visible page. A
+        // failed compression leaves the page uncompressed and is not an error.
+        if (options.compress and
+            terminal_mem.canReclaim(.strict) and
+            destination.getTopLeft(.viewport).node != node)
+        {
+            _ = destination.compressPage(node);
+        }
+    }
+};
+
 /// Options for createPage and createPageExt.
 const CreatePage = struct {
     /// The capacity to allocate the page with.
@@ -4025,6 +4693,45 @@ inline fn createPage(
     opts: CreatePage,
 ) Allocator.Error!*List.Node {
     // log.debug("create page cap={}", .{opts.cap});
+
+    // If we have a node available for recycling (only during reflow,
+    // see recycle_node), reuse it directly rather than going through
+    // the memory pool.
+    if (self.recycle_node) |node| recycle: {
+        // Only a standard pool-owned resident node can be rebuilt
+        // in place for a standard-size layout.
+        if (opts.exact_size) break :recycle;
+        if (node.owned != .pool) break :recycle;
+        if (node.data != .resident) break :recycle;
+        const layout = Page.layout(opts.cap);
+        if (layout.total_size > std_size) break :recycle;
+
+        self.recycle_node = null;
+
+        // The pool guarantees that buffers it hands out are zeroed.
+        // A pool-owned page dirties only its Page.memory prefix of
+        // the underlying standard-size item, so zeroing that prefix
+        // re-establishes the guarantee (this mirrors destroyNodeExt,
+        // minus the decommit).
+        const page = &node.data.resident;
+        const item: *align(std.heap.page_size_min) [std_size]u8 =
+            @ptrCast(@alignCast(page.memory.ptr));
+        @memset(page.memory, 0);
+
+        // Accounting: a pool-owned node always accounts for a full
+        // pool item in page_size, so destroying the node and
+        // creating a new pooled one is a net zero.
+
+        node.* = .{
+            .data = .{ .resident = .initBuf(.init(item), layout) },
+            .serial = self.page_serial,
+            .owned = .pool,
+        };
+        node.page().size.rows = 0;
+        self.page_serial += 1;
+        return node;
+    }
+
     return try createPageExt(
         &self.pool,
         opts,
@@ -4044,7 +4751,7 @@ inline fn createPageExt(
 
     const layout = Page.layout(opts.cap);
     const pooled = !opts.exact_size and layout.total_size <= std_size;
-    const page_alloc = pool.pages.arena.child_allocator;
+    const page_alloc = pool.pages.allocator;
 
     // It would be better to encode this into the Zig error handling
     // system but that is a big undertaking and we only have a few
@@ -4072,13 +4779,10 @@ inline fn createPageExt(
     // (WASM), the WasmAllocator reuses freed slots without zeroing.
     //
     // Otherwise, we rely on pool item buffers being zeroed: fresh items
-    // come from the OS page allocator (zeroed pages) and destroyNodeExt
-    // zeroes buffers before returning them to the pool. The one
-    // exception is the first pointer-size bytes, which hold the pool's
-    // free list node while a buffer is in the free list; initBuf below
-    // always overwrites those since the page rows start at offset 0
-    // (comptime-asserted in Page).
-    if (comptime std.debug.runtime_safety or builtin.os.tag == .freestanding)
+    // come from the OS page allocator (zeroed pages), destroyNodeExt
+    // zeroes buffers before returning them to the pool, and the pool
+    // never writes into its items (see PagePool).
+    if (comptime std.debug.runtime_safety or builtin.target.os.tag == .freestanding)
         @memset(page_buf, 0);
 
     page.* = .{
@@ -4104,6 +4808,10 @@ inline fn createPageExt(
 /// Standard-sized output borrows a page-pool item so repeated compression can
 /// reuse the same virtual mapping. Oversized pages use a temporary allocation
 /// from the page allocator and release it immediately after compression.
+///
+/// A borrowed item goes back to the pool through zero-mode decommit, which
+/// only has to clear the bytes the encoder wrote. Callers therefore pass the
+/// dirty length to `deinit` rather than paying to clear the whole item.
 const CompressionScratch = union(enum) {
     pooled: *align(std.heap.page_size_min) [std_size]u8,
     allocated: []align(std.heap.page_size_min) u8,
@@ -4121,7 +4829,7 @@ const CompressionScratch = union(enum) {
             return .{ .pooled = memory };
         }
 
-        const page_alloc = pool.pages.arena.child_allocator;
+        const page_alloc = pool.pages.allocator;
         return .{ .allocated = try page_alloc.alignedAlloc(
             u8,
             .fromByteUnits(std.heap.page_size_min),
@@ -4136,14 +4844,18 @@ const CompressionScratch = union(enum) {
         };
     }
 
-    fn deinit(self: *CompressionScratch, pool: *MemoryPool) void {
+    fn deinit(
+        self: *CompressionScratch,
+        pool: *MemoryPool,
+        dirty_len: usize,
+    ) void {
         switch (self.*) {
             .pooled => |memory| {
-                _ = terminal_mem.decommit(.zero, memory, memory.len);
+                _ = terminal_mem.decommit(.zero, memory, dirty_len);
                 pool.pages.destroy(memory);
             },
             .allocated => |memory| {
-                const page_alloc = pool.pages.arena.child_allocator;
+                const page_alloc = pool.pages.allocator;
                 page_alloc.free(memory);
             },
         }
@@ -4459,10 +5171,15 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
         ) catch |err| switch (err) {
             error.OutOfMemory => return false,
         };
-        defer scratch.deinit(&self.pool);
+
+        // The encoder writes at most `required` bytes and reports exactly
+        // how many on success. Track that so returning the scratch only
+        // clears the prefix it dirtied instead of the whole item.
+        var dirty_len: usize = required;
+        defer scratch.deinit(&self.pool, dirty_len);
 
         var table: compression.lz4.HashTable = undefined;
-        break :candidate compression.Page.init(
+        const result = compression.Page.init(
             self.pool.alloc,
             page,
             scratch.bytes()[0..required],
@@ -4473,6 +5190,8 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
             error.OutputTooSmall,
             => return false,
         };
+        if (result) |compressed| dirty_len = compressed.encoded.len;
+        break :candidate result;
     };
 
     // Null means compression crossed the break-even point. The node and its
@@ -4548,7 +5267,7 @@ fn destroyNodeExt(
         },
 
         .heap => {
-            const page_alloc = pool.pages.arena.child_allocator;
+            const page_alloc = pool.pages.allocator;
             page_alloc.free(page.memory);
         },
     }
@@ -5165,7 +5884,7 @@ pub fn trackPin(self: *PageList, p: Pin) Allocator.Error!*Pin {
     if (build_options.slow_runtime_safety) assert(self.pinIsValid(p));
 
     // Create our tracked pin
-    const tracked = try self.pool.pins.create();
+    const tracked = try self.pool.pins.create(self.pool.alloc);
     errdefer self.pool.pins.destroy(tracked);
     tracked.* = p;
 
@@ -6374,6 +7093,51 @@ pub fn memoryStats(self: *const PageList) MemoryStats {
     return result;
 }
 
+/// The memory held by a page list. Returned by `memoryUsage`.
+pub const MemoryUsage = struct {
+    /// Number of pages in the list, including compressed pages.
+    pages: usize = 0,
+
+    /// Bytes of address space reserved for page memory. This counts every
+    /// page in the list at its full allocated size, whether it is resident
+    /// or compressed, plus the unused items held by the page pool. Unused
+    /// pool items have had their physical memory released, so they add to
+    /// this figure but never to `resident_bytes`.
+    virtual_bytes: usize = 0,
+
+    /// Bytes of physical memory used by pages. A resident page counts its
+    /// full allocated size. A compressed page counts its encoded data plus
+    /// any unused tail of its pool item, which compression doesn't release.
+    /// This is the same as `MemoryStats.estimatedResidentBytes`.
+    resident_bytes: usize = 0,
+
+    /// Number of pages stored compressed.
+    compressed_pages: usize = 0,
+
+    /// Total size of the encoded data of compressed pages. This is already
+    /// part of `resident_bytes`.
+    compressed_bytes: usize = 0,
+};
+
+/// Return the memory held by this page list, summarized for callers that
+/// budget memory across many terminals. See `memoryStats` for a more
+/// detailed breakdown.
+///
+/// This never restores a compressed page. It does visit every page, so its
+/// cost grows with the scrollback. Call it periodically rather than after
+/// every write.
+pub fn memoryUsage(self: *const PageList) MemoryUsage {
+    const stats = self.memoryStats();
+    return .{
+        .pages = stats.resident_pages + stats.compressed_pages,
+        .virtual_bytes = self.page_size +
+            self.pool.pages.freeCount() * PagePool.item_size,
+        .resident_bytes = stats.estimatedResidentBytes(),
+        .compressed_pages = stats.compressed_pages,
+        .compressed_bytes = stats.encoded_bytes,
+    };
+}
+
 /// Grow the number of rows available in the page list by n.
 /// This is only used for testing so it isn't optimized in any way.
 fn growRows(self: *PageList, n: usize) Allocator.Error!void {
@@ -6402,6 +7166,190 @@ pub fn isDirty(self: *const PageList, pt: point.Point) bool {
 fn markDirty(self: *PageList, pt: point.Point) void {
     self.pin(pt).?.markDirty();
 }
+
+/// Runtime-configurable byte and line limits for a PageList.
+const Limits = struct {
+    bytes: Limit,
+    lines: Limit,
+
+    /// The limit keys.
+    pub const Key = std.meta.FieldEnum(Limits);
+
+    pub const Limit = struct {
+        /// Explicit is the specified maximum value for this limit
+        /// by the user or maxInt otherwise.
+        explicit: usize = std.math.maxInt(usize),
+
+        /// Min is the minimum valid maximum for this entry, so if
+        /// explicit is lower than this then min wins.
+        min: usize,
+    };
+
+    /// Return unlimited limits with minimums for the given PageList size.
+    pub fn init(cols: size.CellCountInt, rows: size.CellCountInt) Limits {
+        return .{
+            .bytes = .{ .min = minMaxSize(cols, rows) },
+            .lines = .{ .min = minMaxLines(cols) },
+        };
+    }
+
+    /// Set an explicit limit. Null means unlimited. This does not enforce the
+    /// new value automatically; the caller must still call `enforce`.
+    pub fn set(
+        self: *Limits,
+        comptime key: Key,
+        value: ?usize,
+    ) void {
+        switch (key) {
+            .bytes => self.bytes.explicit = value orelse std.math.maxInt(usize),
+            .lines => self.lines.explicit = value orelse std.math.maxInt(usize),
+        }
+    }
+
+    /// Recalculate the effective minimums for a new PageList size.
+    ///
+    /// This must be called whenever either PageList dimension changes so the
+    /// effective byte and line limits remain valid for the new size.
+    pub fn resize(
+        self: *Limits,
+        cols: size.CellCountInt,
+        rows: size.CellCountInt,
+    ) void {
+        self.bytes.min = minMaxSize(cols, rows);
+        self.lines.min = minMaxLines(cols);
+    }
+
+    /// Return the effective maximum for a limit.
+    pub fn max(self: *const Limits, key: Key) usize {
+        return switch (key) {
+            .bytes => @max(self.bytes.explicit, self.bytes.min),
+            .lines => @max(self.lines.explicit, self.lines.min),
+        };
+    }
+
+    /// Whether the given limit is currently exceeded. Both limits are
+    /// heuristics: complete historical pages are the smallest unit that
+    /// enforcement removes.
+    pub fn exceeded(
+        self: *const Limits,
+        pagelist: *const PageList,
+        limit: Key,
+    ) bool {
+        return switch (limit) {
+            .bytes => pagelist.page_size > self.max(.bytes),
+            .lines => pagelist.total_rows > pagelist.rows and
+                pagelist.total_rows - pagelist.rows > self.max(.lines),
+        };
+    }
+
+    /// Prune complete historical pages until the selected limit is satisfied
+    /// or the oldest remaining page overlaps the active area.
+    pub fn enforce(
+        self: *const Limits,
+        pagelist: *PageList,
+        key: Key,
+    ) void {
+        if (!self.exceeded(pagelist, key)) return;
+
+        // A partially constructed clone can temporarily contain fewer rows than
+        // its active area. It has no scrollback to prune.
+        if (pagelist.total_rows <= pagelist.rows) return;
+
+        // Accumulate the row delta so viewport offsets are fixed up once
+        // after all eligible pages have been removed.
+        var removed: usize = 0;
+        while (self.exceeded(pagelist, key)) {
+            const first = pagelist.pages.first.?;
+
+            // The page containing the active top may also contain history. Keep
+            // that boundary page whole even if its history exceeds the heuristic.
+            if (first == pagelist.getTopLeft(.active).node) break;
+
+            if (removed == 0) pagelist.page_compression.markActivity();
+
+            const first_rows = first.rows();
+
+            // Automatic pruning invalidates the content represented by pins in
+            // the removed page. erasePage remaps them to the next page below but
+            // only the enforcing caller knows that their original content is gone,
+            // so mark them as garbage here.
+            for (pagelist.tracked_pins.keys()) |p| {
+                if (p.node == first) p.garbage = true;
+            }
+
+            // erasePage updates the list, pin targets, and byte accounting.
+            // Row accounting belongs to the caller because erasePage is also used
+            // by paths that already adjusted total_rows.
+            pagelist.erasePage(first);
+            pagelist.total_rows -= first_rows;
+            removed += first_rows;
+        }
+
+        // Reconcile viewport mode and cached row offsets with the combined prefix
+        // removal only after every page and pin points into the final list.
+        if (removed > 0) pagelist.fixupViewport(removed);
+    }
+
+    /// Returns the minimum valid "max size" for a given number of rows and cols
+    /// such that we can fit the active area AND at least two pages. Note we
+    /// need the two pages for algorithms to work properly (such as grow) but
+    /// we don't need to fit double the active area.
+    ///
+    /// This min size may not be totally correct in the case that a large
+    /// number of other dimensions makes our row size in a page very small.
+    /// But this gives us a nice fast heuristic for determining min/max size.
+    /// Therefore, if the page size is violated you should always also verify
+    /// that we have enough space for the active area.
+    fn minMaxSize(cols: size.CellCountInt, rows: size.CellCountInt) usize {
+        // Invariant required to ensure our divCeil below cannot overflow.
+        comptime {
+            const max_rows = std.math.maxInt(size.CellCountInt);
+            _ = std.math.divCeil(usize, max_rows, 1) catch unreachable;
+        }
+
+        // Get our capacity to fit our rows. If the cols are too big, it may
+        // force less rows than we want meaning we need more than one page to
+        // represent a viewport.
+        const cap = initialCapacity(cols);
+
+        // Calculate the number of standard sized pages we need to represent
+        // an active area.
+        const pages_exact = if (cap.rows >= rows) 1 else std.math.divCeil(
+            usize,
+            rows,
+            cap.rows,
+        ) catch {
+            // Not possible:
+            // - initialCapacity guarantees at least 1 row
+            // - numerator/denominator can't overflow because of comptime check above
+            unreachable;
+        };
+
+        // We always need at least one page extra so that we
+        // can fit partial pages to spread our active area across two pages.
+        // Even for caps that can't fit all rows in a single page, we add one
+        // because the most extra space we need at any given time is only
+        // the partial amount of one page.
+        const pages = pages_exact + 1;
+        assert(pages >= 2);
+
+        // log.debug("minMaxSize cols={} rows={} cap={} pages={}", .{
+        //     cols,
+        //     rows,
+        //     cap,
+        //     pages,
+        // });
+
+        return PagePool.item_size * pages;
+    }
+
+    /// Returns the minimum line limit for a given column count. Line limits are
+    /// page-granular, so we always permit at least one standard page worth of
+    /// scrollback rows.
+    fn minMaxLines(cols: size.CellCountInt) usize {
+        return initialCapacity(cols).rows;
+    }
+};
 
 /// Represents an exact x/y coordinate within the screen. This is called
 /// a "pin" because it is a fixed point within the pagelist direct to
@@ -6814,8 +7762,580 @@ pub const Pin = struct {
     }
 };
 
+/// Build up a PageList manually from a set of Pages.
+///
+/// This data structure is transactional: `deinit` releases every page
+/// until `finish` is called. This keeps the ownership clear: a complete
+/// PageList either owns all its pages or doesn't.
+///
+/// This was specifically built to help facilitate snapshot decoding
+/// which transfers pages directly, but could be generally useful
+/// for other purposes as well.
+pub const Builder = struct {
+    pool: MemoryPool,
+    pages: List = .{},
+    page_serial: u64 = 0,
+    page_size: usize = 0,
+    options: Options,
+    finished: bool = false,
+
+    /// Initialize an empty builder. The options are the final state
+    /// of the PageList and some validation is done on the finish call
+    /// to ensure you built up a proper PageList according to those options.
+    pub fn init(
+        alloc: Allocator,
+        options: Options,
+    ) Allocator.Error!Builder {
+        return .{
+            .pool = try MemoryPool.init(
+                alloc,
+                pageAllocator(alloc),
+                page_preheat,
+            ),
+            .options = options,
+        };
+    }
+
+    /// Release all pages when restoration does not finish.
+    ///
+    /// This is safe to call after `finish` succeeds, so callers can defer it
+    /// unconditionally.
+    pub fn deinit(self: *Builder) void {
+        if (self.finished) return;
+
+        // Free all our in-progress pages
+        while (self.pages.popFirst()) |node| destroyNodeExt(
+            &self.pool,
+            node,
+            &self.page_size,
+        );
+        // Free memory pool
+        self.pool.deinit();
+        self.* = undefined;
+    }
+
+    /// Allocate a new page into the PageList with the given capacity.
+    ///
+    /// The caller can then take this page and populate it. When `finish`
+    /// is called, ownership is transferred to the resulting PageList.
+    /// Until then, this Builder owns the page.
+    pub fn allocatePage(
+        self: *Builder,
+        capacity: Capacity,
+    ) Allocator.Error!*Page {
+        const node = try createPageExt(
+            &self.pool,
+            .{ .cap = capacity },
+            &self.page_serial,
+            &self.page_size,
+        );
+        self.pages.append(node);
+        return node.pageAssumeResident();
+    }
+
+    pub const FinishError = Allocator.Error || error{
+        InvalidDimensions,
+        InvalidPageDimensions,
+        NoPages,
+        InsufficientRows,
+    };
+
+    /// Validate the decoded pages and transfer them into a live PageList.
+    /// After this succeeds, `deinit` is a no-op because all resources have
+    /// transferred to the PageList.
+    pub fn finish(self: *Builder) FinishError!PageList {
+        // These are basic validations but they're cheap to do and
+        // we want to be careful we don't let corruption from untrusted
+        // sources into our PageList which asserts this.
+        if (self.options.cols == 0 or self.options.rows == 0) {
+            return error.InvalidDimensions;
+        }
+        if (self.pages.first == null) return error.NoPages;
+
+        // Manually count our total rows at this point which we'll
+        // need for our PageList cache as well as a safety check.
+        const total_rows: usize = total_rows: {
+            var total_rows: usize = 0;
+            var node = self.pages.first;
+            while (node) |current| : (node = current.next) {
+                if (current.cols() == 0 or current.rows() == 0) {
+                    return error.InvalidPageDimensions;
+                }
+                total_rows += current.rows();
+            }
+            if (total_rows < self.options.rows) return error.InsufficientRows;
+            break :total_rows total_rows;
+        };
+
+        // Get our active pin
+        const active_top: Pin = active_top: {
+            var rem = self.options.rows;
+            var node = self.pages.last;
+            while (node) |current| : (node = current.prev) {
+                if (rem <= current.rows()) break :active_top .{
+                    .node = current,
+                    .y = current.rows() - rem,
+                };
+                rem -= current.rows();
+            } else unreachable;
+        };
+
+        // Set our viewport up to the active
+        const viewport_pin = try self.pool.pins.create(self.pool.alloc);
+        errdefer self.pool.pins.destroy(viewport_pin);
+        viewport_pin.* = active_top;
+
+        // Setup our one viewport tracked pin
+        var tracked_pins = try initTrackedPins(self.pool.alloc, viewport_pin);
+        errdefer tracked_pins.deinit(self.pool.alloc);
+
+        // Initialize limits
+        var limits: Limits = .init(self.options.cols, self.options.rows);
+        limits.set(.bytes, self.options.max_size);
+        limits.set(.lines, self.options.max_lines);
+
+        const result: PageList = .{
+            .cols = self.options.cols,
+            .rows = self.options.rows,
+            .pool = self.pool,
+            .pages = self.pages,
+            .page_serial = self.page_serial,
+            .page_serial_epoch = 0,
+            .page_size = self.page_size,
+            .limits = limits,
+            .total_rows = total_rows,
+            .tracked_pins = tracked_pins,
+            .viewport = .{ .active = {} },
+            .viewport_pin = viewport_pin,
+            .viewport_pin_row_offset = null,
+        };
+        result.assertIntegrity();
+        self.finished = true;
+        return result;
+    }
+};
+
+test "PageList Builder transfers mixed-width pages" {
+    const testing = std.testing;
+
+    // Build two populated pages whose widths differ from each other and from
+    // the final active-area width. The first page also includes one row of
+    // incidental history above the three-row active area.
+    var result: PageList = result: {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 4,
+            .rows = 3,
+            .max_size = null,
+            .max_lines = null,
+        });
+        defer builder.deinit();
+
+        const first = try builder.allocatePage(.{
+            .cols = 2,
+            .rows = 2,
+        });
+        first.size.rows = 2;
+        first.getRowAndCell(0, 0).cell.* = .init('A');
+
+        const second = try builder.allocatePage(.{
+            .cols = 4,
+            .rows = 2,
+        });
+        second.size.rows = 2;
+        second.getRowAndCell(0, 0).cell.* = .init('B');
+
+        break :result try builder.finish();
+    };
+    defer result.deinit();
+
+    // Successful finish transfers ownership and initializes the PageList's
+    // desired geometry, viewport, and required tracked viewport pin.
+    try testing.expectEqual(@as(size.CellCountInt, 4), result.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 3), result.rows);
+    try testing.expectEqual(@as(usize, 2), result.totalPages());
+    try testing.expectEqual(@as(usize, 1), result.countTrackedPins());
+    try testing.expectEqual(Viewport.active, result.viewport);
+
+    // Complete pages and their contents are preserved in insertion order,
+    // including widths which have not yet been reflowed.
+    const screen_top = result.getTopLeft(.screen);
+    try testing.expectEqual(@as(size.CellCountInt, 2), screen_top.node.cols());
+    try testing.expectEqual(@as(u21, 'A'), screen_top
+        .node.page().getRowAndCell(0, 0).cell.codepoint());
+
+    // The active area is calculated backward from the newest page, so it
+    // begins at row one of the oldest page and leaves row zero as history.
+    const active_top = result.getTopLeft(.active);
+    try testing.expectEqual(screen_top.node, active_top.node);
+    try testing.expectEqual(@as(size.CellCountInt, 1), active_top.y);
+    try testing.expectEqual(@as(size.CellCountInt, 4), active_top
+        .node.next.?.cols());
+    try testing.expectEqual(@as(u21, 'B'), active_top
+        .node.next.?.page().getRowAndCell(0, 0).cell.codepoint());
+
+    result.assertIntegrity();
+}
+
+test "PageList Builder validates the finished list" {
+    const testing = std.testing;
+
+    // The desired PageList geometry must describe a non-empty screen.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 0,
+            .rows = 1,
+        });
+        defer builder.deinit();
+        try testing.expectError(error.InvalidDimensions, builder.finish());
+    }
+
+    // A PageList cannot be finished without any backing pages.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 1,
+            .rows = 1,
+        });
+        defer builder.deinit();
+        try testing.expectError(error.NoPages, builder.finish());
+    }
+
+    // Allocated capacity alone is insufficient: callers must populate a
+    // nonzero logical page size before transferring ownership.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 1,
+            .rows = 1,
+        });
+        defer builder.deinit();
+        const page = try builder.allocatePage(.{ .cols = 1, .rows = 1 });
+        page.size.rows = 0;
+        try testing.expectError(
+            error.InvalidPageDimensions,
+            builder.finish(),
+        );
+    }
+
+    // The populated pages must contain enough rows to cover the active area.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 1,
+            .rows = 2,
+        });
+        defer builder.deinit();
+        const page = try builder.allocatePage(.{ .cols = 1, .rows = 1 });
+        page.size.rows = 1;
+        try testing.expectError(error.InsufficientRows, builder.finish());
+    }
+}
+
+test "PageList Builder finish is transactional on allocation failure" {
+    const testing = std.testing;
+
+    // Construct a valid builder so finish reaches its fallible bookkeeping
+    // allocations after all page and geometry validation succeeds.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var builder = try Builder.init(failing.allocator(), .{
+        .cols = 1,
+        .rows = 1,
+    });
+    defer builder.deinit();
+    const page = try builder.allocatePage(.{ .cols = 1, .rows = 1 });
+    page.size.rows = 1;
+
+    // The pools are preheated, so the next general allocation is the tracked
+    // viewport pin map created by finish.
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, builder.finish());
+    try testing.expect(failing.has_induced_failure);
+
+    // Failed finish leaves page ownership with the builder so its normal
+    // deinit path can release the still-linked page.
+    try testing.expect(builder.pages.first != null);
+    try testing.expectEqual(builder.pages.first, builder.pages.last);
+}
+
+test "PageList PageAllocation finalizes pages and preserves live state" {
+    const testing = std.testing;
+
+    // Build an existing list with history, a two-row active area, an external
+    // active pin, and a pinned viewport whose absolute offset is cached.
+    var result: PageList = result: {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 4,
+            .rows = 2,
+            .max_size = null,
+            .max_lines = null,
+        });
+        defer builder.deinit();
+
+        const first = try builder.allocatePage(.{ .cols = 3, .rows = 2 });
+        first.size.rows = 2;
+        first.getRowAndCell(0, 0).cell.* = .init('C');
+
+        const second = try builder.allocatePage(.{ .cols = 4, .rows = 2 });
+        second.size.rows = 2;
+        second.getRowAndCell(0, 0).cell.* = .init('D');
+
+        break :result try builder.finish();
+    };
+    defer result.deinit();
+
+    const old_first = result.pages.first.?;
+    const old_last = result.pages.last.?;
+    const active_top = result.getTopLeft(.active);
+    const tracked_active = try result.trackPin(active_top);
+    result.scroll(.{ .row = 1 });
+    try testing.expectEqual(Viewport.pin, result.viewport);
+    try testing.expectEqual(@as(usize, 1), result.scrollbar().offset);
+
+    // Prepend differently sized historical pages newest-first. Each page is
+    // populated while detached and joins the live list only on success.
+    {
+        var allocation = try result.allocatePage(.{ .cols = 4, .rows = 1 });
+        defer allocation.deinit();
+        const page = allocation.page();
+        page.size.rows = 1;
+        page.getRowAndCell(0, 0).cell.* = .init('B');
+        try allocation.finalize(.prepend, .{});
+    }
+    {
+        var allocation = try result.allocatePage(.{ .cols = 2, .rows = 2 });
+        defer allocation.deinit();
+        const page = allocation.page();
+        page.size.rows = 2;
+        page.getRowAndCell(0, 0).cell.* = .init('A');
+        try allocation.finalize(.prepend, .{});
+    }
+
+    // Repeated prepends reconstruct oldest-to-newest order without replacing
+    // any existing nodes or tracked pins.
+    try testing.expectEqual(@as(usize, 4), result.totalPages());
+    try testing.expectEqual(@as(usize, 7), result.total_rows);
+    try testing.expectEqual(old_last, result.pages.last.?);
+    try testing.expectEqual(old_first, result.pages.first.?.next.?.next.?);
+    try testing.expectEqual(
+        @as(u21, 'A'),
+        result.pages.first.?.page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expectEqual(
+        @as(u21, 'B'),
+        result.pages.first.?.next.?
+            .page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expect(active_top.eql(result.getTopLeft(.active)));
+    try testing.expect(active_top.eql(tracked_active.*));
+
+    // The viewport remains pinned to the same content, while its cached row
+    // offset and the scrollbar total include the three new historical rows.
+    try testing.expectEqual(Viewport.pin, result.viewport);
+    try testing.expectEqual(old_first, result.viewport_pin.node);
+    try testing.expectEqual(@as(size.CellCountInt, 1), result.viewport_pin.y);
+    const scrollbar_state = result.scrollbar();
+    try testing.expectEqual(@as(usize, 7), scrollbar_state.total);
+    try testing.expectEqual(@as(usize, 4), scrollbar_state.offset);
+    try testing.expectEqual(@as(usize, 2), scrollbar_state.len);
+
+    result.assertIntegrity();
+}
+
+test "PageList PageAllocation compresses prepended pages unless visible" {
+    const testing = std.testing;
+
+    const Case = struct {
+        /// How to position the viewport before prepending.
+        viewport: enum { active, pin, top },
+
+        /// Whether the prepended page should end up compressed.
+        compressed: bool,
+    };
+    const cases = [_]Case{
+        // The viewport shows the active area, far below the new page.
+        .{ .viewport = .active, .compressed = true },
+
+        // The viewport is pinned to existing history, which is still below
+        // the new page.
+        .{ .viewport = .pin, .compressed = true },
+
+        // The viewport follows the top of the scrollback, so the new page
+        // becomes the first visible page.
+        .{ .viewport = .top, .compressed = false },
+    };
+
+    for (cases) |case| {
+        var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+        defer s.deinit();
+        try s.growColdPagesForTest(1);
+        switch (case.viewport) {
+            .active => {},
+            .pin => s.scroll(.{ .row = 1 }),
+            .top => s.scroll(.{ .top = {} }),
+        }
+        try testing.expectEqual(
+            @as(Viewport, switch (case.viewport) {
+                .active => .active,
+                .pin => .pin,
+                .top => .top,
+            }),
+            s.viewport,
+        );
+
+        // A full-size page so compression is worthwhile.
+        const capacity = s.pages.first.?.capacity();
+        var allocation = try s.allocatePage(capacity);
+        defer allocation.deinit();
+        const page = allocation.page();
+        page.size.rows = capacity.rows;
+        page.getRowAndCell(0, 0).cell.* = .init('X');
+        try allocation.finalize(.prepend, .{ .compress = true });
+
+        const node = s.pages.first.?;
+        try testing.expectEqual(case.compressed, node.isCompressed());
+        try testing.expectEqual(
+            @as(usize, if (case.compressed) 1 else 0),
+            s.memoryStats().compressed_pages,
+        );
+
+        // Reading the page uncompresses it with its contents intact.
+        try testing.expectEqual(
+            @as(u21, 'X'),
+            node.page().getRowAndCell(0, 0).cell.codepoint(),
+        );
+        s.assertIntegrity();
+    }
+}
+
+test "PageList PageAllocation stays detached until finalize" {
+    const testing = std.testing;
+
+    var result = try init(testing.allocator, .{
+        .cols = 1,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer result.deinit();
+
+    const initial_first = result.pages.first.?;
+    const initial_last = result.pages.last.?;
+    const initial_total_rows = result.total_rows;
+    const initial_page_size = result.page_size;
+
+    // Allocating and populating a detached page does not alter any live list
+    // links or accounting. Deinit returns it to the same PageList pools.
+    var detached = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+    detached.page().size.rows = 1;
+    try testing.expectEqual(initial_first, result.pages.first.?);
+    try testing.expectEqual(initial_last, result.pages.last.?);
+    try testing.expectEqual(initial_total_rows, result.total_rows);
+    try testing.expectEqual(initial_page_size, result.page_size);
+    result.assertIntegrity();
+    detached.deinit();
+    result.assertIntegrity();
+
+    // Invalid populated dimensions leave ownership with the allocation so it
+    // can still be released normally.
+    var invalid = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+    defer invalid.deinit();
+    try testing.expectError(
+        error.InvalidPageDimensions,
+        invalid.finalize(.prepend, .{}),
+    );
+
+    try testing.expectEqual(initial_first, result.pages.first.?);
+    try testing.expectEqual(initial_last, result.pages.last.?);
+    try testing.expectEqual(initial_total_rows, result.total_rows);
+    try testing.expectEqual(initial_page_size, result.page_size);
+    result.assertIntegrity();
+}
+
+test "PageList PageAllocation rejects limits before modifying the destination" {
+    const testing = std.testing;
+
+    var result = try init(testing.allocator, .{
+        .cols = 1,
+        .rows = 1,
+        .max_size = 0,
+        .max_lines = null,
+    });
+    defer result.deinit();
+
+    // The effective minimum permits one complete page beyond the active page.
+    // Fill that allowance so the following allocation exceeds the byte limit.
+    {
+        var allocation = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+        defer allocation.deinit();
+        allocation.page().size.rows = 1;
+        try allocation.finalize(.prepend, .{});
+    }
+
+    const before_first = result.pages.first.?;
+    const before_total_rows = result.total_rows;
+    const before_page_size = result.page_size;
+
+    var allocation = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+    defer allocation.deinit();
+    allocation.page().size.rows = 1;
+    try testing.expectError(
+        error.MaxSizeExceeded,
+        allocation.finalize(.prepend, .{}),
+    );
+
+    try testing.expectEqual(before_first, result.pages.first.?);
+    try testing.expectEqual(before_total_rows, result.total_rows);
+    try testing.expectEqual(before_page_size, result.page_size);
+    result.assertIntegrity();
+}
+
+test "PageList PageAllocation allocation failure leaves list unchanged" {
+    const testing = std.testing;
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var result = try init(failing.allocator(), .{
+        .cols = 1,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer result.deinit();
+
+    const initial_first = result.pages.first.?;
+    const initial_total_rows = result.total_rows;
+    const initial_page_size = result.page_size;
+
+    // Existing pool capacity is deliberately an implementation detail. Allow
+    // preheated slots to succeed until allocation reaches node-pool growth.
+    failing.fail_index = failing.alloc_index;
+    var allocations: [64]PageAllocation = undefined;
+    var allocation_count: usize = 0;
+    defer for (allocations[0..allocation_count]) |*allocation| {
+        allocation.deinit();
+    };
+
+    var failed = false;
+    for (0..64) |_| {
+        allocations[allocation_count] = result.allocatePage(.{
+            .cols = 1,
+            .rows = 1,
+        }) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            failed = true;
+            break;
+        };
+        allocation_count += 1;
+    }
+    try testing.expect(failed);
+    try testing.expect(failing.has_induced_failure);
+
+    // Detached allocations and failed pool growth never publish into the live
+    // list; the deferred cleanup returns every successful allocation.
+    try testing.expectEqual(initial_first, result.pages.first.?);
+    try testing.expectEqual(initial_total_rows, result.total_rows);
+    try testing.expectEqual(initial_page_size, result.page_size);
+    result.assertIntegrity();
+}
+
 fn mixedWidthPinListForTest(alloc: Allocator) !PageList {
-    var result = try init(alloc, 2, 1, null);
+    var result = try init(alloc, .{ .cols = 2, .rows = 1 });
     errdefer result.deinit();
 
     // This deliberately constructs a layout that normal PageList operations
@@ -6991,7 +8511,7 @@ fn expectLivePageSerialsValidForTest(self: *const PageList) !void {
 test "PageList Pin rightWrap exact row multiple" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 10, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 10, .rows = 3 });
     defer s.deinit();
 
     const start = s.pin(.{ .active = .{ .x = 5, .y = 0 } }).?;
@@ -7007,7 +8527,7 @@ test "PageList Pin rightWrap exact row multiple" {
 test "PageList Pin leftWrap exact row multiple" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 10, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 10, .rows = 3 });
     defer s.deinit();
 
     const start = s.pin(.{ .active = .{ .x = 5, .y = 2 } }).?;
@@ -7023,7 +8543,7 @@ test "PageList Pin leftWrap exact row multiple" {
 test "PageList Pin rightWrap maximum distance" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 1, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 1, .rows = 3 });
     defer s.deinit();
 
     const start = s.pin(.{ .active = .{ .y = 0 } }).?;
@@ -7033,7 +8553,7 @@ test "PageList Pin rightWrap maximum distance" {
 test "PageList Pin leftWrap maximum distance" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 1, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 1, .rows = 3 });
     defer s.deinit();
 
     const start = s.pin(.{ .active = .{ .y = 2 } }).?;
@@ -7043,7 +8563,7 @@ test "PageList Pin leftWrap maximum distance" {
 test "PageList incremental compression skips visible history" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(3);
 
@@ -7096,7 +8616,7 @@ test "PageList incremental compression skips visible history" {
 test "PageList owns incremental compression state" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const state: IncrementalCompressionState = .{
@@ -7170,7 +8690,7 @@ test "PageList owns incremental compression state" {
 test "PageList replacements preserve compression continuation and mark activity" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const state: IncrementalCompressionState = .{
@@ -7198,7 +8718,7 @@ test "PageList replacements preserve compression continuation and mark activity"
 test "PageList incremental compression bounds inspected pages" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(incremental_compression_max_inspected + 1);
 
@@ -7242,7 +8762,7 @@ test "PageList incremental compression bounds inspected pages" {
 test "PageList incremental compression advances after failure" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(2);
 
@@ -7267,7 +8787,7 @@ test "PageList incremental compression advances after allocation failure" {
 
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
     const alloc = failing.allocator();
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(2);
     const first = s.pages.first.?;
@@ -7295,7 +8815,7 @@ test "PageList incremental compression advances after decommit failure" {
     const tw = compressPage_tw;
     defer tw.end(.reset) catch unreachable;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(2);
 
@@ -7315,7 +8835,7 @@ test "PageList incremental compression advances after decommit failure" {
 test "PageList incremental compression restarts after replacement" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(1);
 
@@ -7346,7 +8866,7 @@ test "PageList incremental compression restarts after replacement" {
 test "PageList incremental compression restarts after reset" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(1);
 
@@ -7365,7 +8885,7 @@ test "PageList incremental compression restarts after reset" {
 test "PageList incremental compression restarts after active boundary resize" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(1);
 
@@ -7402,12 +8922,11 @@ test "PageList incremental compression restarts after active boundary resize" {
 test "PageList incremental compression restarts after prune reuse" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        2 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 2 * PagePool.item_size,
+    });
     defer s.deinit();
     try s.growColdPagesForTest(1);
 
@@ -7433,12 +8952,11 @@ test "PageList incremental compression restarts after prune reuse" {
 test "PageList bounded pruning after partial erase preserves live serials" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        2 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 2 * PagePool.item_size,
+    });
     defer s.deinit();
 
     while (s.totalPages() < 2) _ = try s.grow();
@@ -7459,7 +8977,7 @@ test "PageList bounded pruning after partial erase preserves live serials" {
 test "PageList partial erase restarts compression before continuation" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(incremental_compression_max_inspected + 1);
     _ = s.compress(.full);
@@ -7492,12 +9010,11 @@ test "PageList partial erase restarts compression before continuation" {
 test "PageList bounded pruning after split invalidation preserves live serials" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        2 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 2 * PagePool.item_size,
+    });
     defer s.deinit();
 
     while (s.totalPages() < 2) _ = try s.grow();
@@ -7521,12 +9038,11 @@ test "PageList bounded pruning after split invalidation preserves live serials" 
 test "PageList repeated bounded pruning after split preserves live serials" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        3 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 3 * PagePool.item_size,
+    });
     defer s.deinit();
 
     const epoch = s.page_serial_epoch;
@@ -7557,12 +9073,11 @@ test "PageList repeated bounded pruning after split preserves live serials" {
 test "PageList bounded pruning after front replacement preserves live serials" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        2 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 2 * PagePool.item_size,
+    });
     defer s.deinit();
 
     while (s.totalPages() < 2) _ = try s.grow();
@@ -7581,12 +9096,11 @@ test "PageList bounded pruning after front replacement preserves live serials" {
 test "PageList bounded pruning after middle replacement preserves live serials" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        3 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 3 * PagePool.item_size,
+    });
     defer s.deinit();
 
     while (s.totalPages() < 3) _ = try s.grow();
@@ -7607,7 +9121,7 @@ test "PageList bounded pruning after middle replacement preserves live serials" 
 test "PageList incremental compression restarts after earlier replacement" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(3);
 
@@ -7635,7 +9149,7 @@ test "PageList incremental compression restarts after earlier replacement" {
 test "PageList incremental compression keeps progress after tail growth" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(incremental_compression_max_inspected + 1);
     _ = s.compress(.full);
@@ -7662,10 +9176,67 @@ test "PageList incremental compression keeps progress after tail growth" {
     try testing.expect(s.page_compression.flags.verifying);
 }
 
+test "PageList memory usage" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer s.deinit();
+
+    // A fresh list holds the preheated pool items, one of which backs
+    // the only page.
+    const fresh = s.memoryUsage();
+    try testing.expectEqual(s.totalPages(), fresh.pages);
+    try testing.expectEqual(page_preheat * PagePool.item_size, fresh.virtual_bytes);
+    try testing.expectEqual(s.page_size, fresh.resident_bytes);
+    try testing.expect(fresh.resident_bytes <= fresh.virtual_bytes);
+    try testing.expectEqual(@as(usize, 0), fresh.compressed_pages);
+    try testing.expectEqual(@as(usize, 0), fresh.compressed_bytes);
+
+    try s.growColdPagesForTest(2);
+    const before = s.memoryUsage();
+    try testing.expectEqual(s.totalPages(), before.pages);
+    try testing.expectEqual(
+        s.page_size + s.pool.pages.freeCount() * PagePool.item_size,
+        before.virtual_bytes,
+    );
+    try testing.expect(before.resident_bytes <= before.virtual_bytes);
+
+    // Compression changes residency but not address space.
+    _ = s.compress(.full);
+    const compressed = s.memoryUsage();
+    try testing.expectEqual(before.pages, compressed.pages);
+    try testing.expectEqual(before.virtual_bytes, compressed.virtual_bytes);
+    try testing.expect(compressed.resident_bytes < before.resident_bytes);
+    try testing.expectEqual(@as(usize, 2), compressed.compressed_pages);
+    try testing.expect(compressed.compressed_bytes > 0);
+    try testing.expectEqual(
+        s.memoryStats().estimatedResidentBytes(),
+        compressed.resident_bytes,
+    );
+
+    // The query itself never restores a page.
+    try testing.expectEqual(compressed, s.memoryUsage());
+
+    // Reading a page restores it.
+    _ = s.pages.first.?.page();
+    const restored = s.memoryUsage();
+    try testing.expectEqual(@as(usize, 1), restored.compressed_pages);
+    try testing.expect(restored.resident_bytes > compressed.resident_bytes);
+    try testing.expectEqual(before.virtual_bytes, restored.virtual_bytes);
+
+    // Destroyed pages go back to the pool: the address space is kept but
+    // the memory is no longer resident.
+    s.eraseRows(.{ .history = .{} }, null);
+    const erased = s.memoryUsage();
+    try testing.expect(erased.pages < restored.pages);
+    try testing.expectEqual(before.virtual_bytes, erased.virtual_bytes);
+    try testing.expect(erased.resident_bytes < restored.resident_bytes);
+}
+
 test "PageList memory stats do not restore compressed pages" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(2);
 
@@ -7738,7 +9309,7 @@ test "PageList preserved page keeps compressed storage" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const node = s.pages.first.?;
@@ -7799,7 +9370,7 @@ test "PageList preserved page keeps compressed storage" {
     try testing.expect(page_.dirty);
     try testing.expectEqual(
         @as(u21, 'X'),
-        page_.getRowAndCell(3, 2).cell.content.codepoint,
+        page_.getRowAndCell(3, 2).cell.content.codepoint.data,
     );
 
     // The node still owns the same compressed representation, and neither its
@@ -7818,7 +9389,7 @@ test "PageList preserved page keeps compressed storage" {
 test "PageList memory stats include unused pool backing" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Pool allocation ownership is based on the requested layout fitting in a
@@ -7860,7 +9431,7 @@ test "PageList memory stats include unused pool backing" {
 test "PageList does not compress the mixed history and active page" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // One additional row creates history, but the history and all active rows
@@ -7882,7 +9453,7 @@ test "PageList compresses only complete cold history pages" {
     // More active rows than one page at these dimensions can hold ensures the
     // active area spans multiple nodes when the pass chooses its boundary.
     const active_rows = initialCapacity(80).rows + 1;
-    var s = try init(alloc, 80, active_rows, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = active_rows });
     defer s.deinit();
     try s.growColdPagesForTest(2);
 
@@ -7942,7 +9513,7 @@ test "PageList compresses only complete cold history pages" {
 test "PageList lazily restores compressed history made active by resize" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(1);
 
@@ -7972,7 +9543,7 @@ test "PageList lazily restores compressed history made active by resize" {
     _ = s.compress(.full);
     try testing.expect(first.isCompressed());
     const cell = s.getCell(.{ .active = .{} }).?;
-    try testing.expectEqual(@as(u21, 'X'), cell.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'X'), cell.cell.content.codepoint.data);
     try testing.expect(!first.isCompressed());
     try testing.expectEqual(memory_ptr, first.page().memory.ptr);
     try testing.expectEqual(memory_len, first.page().memory.len);
@@ -7982,11 +9553,11 @@ test "PageList lazily restores compressed history made active by resize" {
 test "PageList full and incremental compression skip a spanning viewport" {
     const testing = std.testing;
 
-    var full = try init(testing.allocator, 80, 24, null);
+    var full = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer full.deinit();
     try full.growColdPagesForTest(3);
 
-    var incremental = try init(testing.allocator, 80, 24, null);
+    var incremental = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer incremental.deinit();
     try incremental.growColdPagesForTest(3);
 
@@ -8038,7 +9609,7 @@ test "PageList full and incremental compression skip a spanning viewport" {
 test "PageList cold compression continues after an incompressible page" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growColdPagesForTest(2);
 
@@ -8070,7 +9641,7 @@ test "PageList compression restores through page access" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const node = s.pages.first.?;
@@ -8096,7 +9667,7 @@ test "PageList compression restores through page access" {
     const page_pin: Pin = .{ .node = node, .x = 3, .y = 2 };
     try testing.expectEqual(
         @as(u21, 'X'),
-        page_pin.rowAndCell().cell.content.codepoint,
+        page_pin.rowAndCell().cell.content.codepoint.data,
     );
     try testing.expect(!node.isCompressed());
     try testing.expectEqual(memory_ptr, node.page().memory.ptr);
@@ -8121,7 +9692,7 @@ test "PageList compression restores through page access" {
     try testing.expect(!node.isCompressed());
     try testing.expectEqual(
         @as(u21, 'X'),
-        cloned.pages.first.?.page().getRowAndCell(3, 2).cell.content.codepoint,
+        cloned.pages.first.?.page().getRowAndCell(3, 2).cell.content.codepoint.data,
     );
 }
 
@@ -8129,7 +9700,7 @@ test "PageList compression uses temporary scratch for oversized pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     var node = s.pages.first.?;
@@ -8158,7 +9729,7 @@ test "PageList compression leaves incompressible pages resident" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const node = s.pages.first.?;
@@ -8178,7 +9749,7 @@ test "PageList compression leaves incompressible pages resident" {
 test "PageList reset discards malformed compressed data" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const node = s.pages.first.?;
@@ -8193,7 +9764,7 @@ test "PageList reset discards malformed compressed data" {
 test "PageList deinit discards malformed compressed data" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     const node = s.pages.first.?;
     try testing.expect(s.compressPage(node));
     @memset(node.data.compressed.encoded, 0xFF);
@@ -8204,12 +9775,11 @@ test "PageList deinit discards malformed compressed data" {
 test "PageList prune reuses malformed compressed page memory" {
     const testing = std.testing;
 
-    var s = try init(
-        testing.allocator,
-        80,
-        24,
-        2 * PagePool.item_size,
-    );
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = 2 * PagePool.item_size,
+    });
     defer s.deinit();
 
     // Allocate the second page so the first one can be pruned and reused.
@@ -8240,7 +9810,7 @@ test "PageList" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expect(s.viewport == .active);
     try testing.expect(s.pages.first != null);
@@ -8271,7 +9841,7 @@ test "PageList" {
 test "PageList node accessors follow the node's page" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Fill the first page, then grow into a second one.
@@ -8305,12 +9875,10 @@ test "PageList init error" {
         tw.errorAlways(tag, error.OutOfMemory);
         try std.testing.expectError(
             error.OutOfMemory,
-            init(
-                std.testing.allocator,
-                80,
-                24,
-                null,
-            ),
+            init(std.testing.allocator, .{
+                .cols = 80,
+                .rows = 24,
+            }),
         );
     }
 
@@ -8324,12 +9892,10 @@ test "PageList init error" {
         const cols: size.CellCountInt = if (tag == .page_buf_std) 80 else std_capacity.maxCols().? + 1;
         try std.testing.expectError(
             error.OutOfMemory,
-            init(
-                std.testing.allocator,
-                cols,
-                24,
-                null,
-            ),
+            init(std.testing.allocator, .{
+                .cols = cols,
+                .rows = 24,
+            }),
         );
     }
 
@@ -8342,12 +9908,10 @@ test "PageList init error" {
         tw.errorAfter(tag, error.OutOfMemory, 1);
         try std.testing.expectError(
             error.OutOfMemory,
-            init(
-                std.testing.allocator,
-                std_capacity.maxCols().? + 1,
-                std_capacity.rows + 1,
-                null,
-            ),
+            init(std.testing.allocator, .{
+                .cols = std_capacity.maxCols().? + 1,
+                .rows = std_capacity.rows + 1,
+            }),
         );
     }
 
@@ -8359,9 +9923,7 @@ test "PageList init error" {
         tw.errorAlways(.viewport_pin_track, error.OutOfMemory);
         try std.testing.expectError(error.OutOfMemory, init(
             std.testing.allocator,
-            std_capacity.maxCols().? + 1,
-            1,
-            null,
+            .{ .cols = std_capacity.maxCols().? + 1, .rows = 1 },
         ));
     }
 }
@@ -8382,7 +9944,7 @@ test "PageList init rows across two pages" {
     };
 
     // Init
-    var s = try init(alloc, cap.cols, rows, null);
+    var s = try init(alloc, .{ .cols = cap.cols, .rows = rows });
     defer s.deinit();
     try testing.expect(s.viewport == .active);
     try testing.expect(s.pages.first != null);
@@ -8406,12 +9968,10 @@ test "PageList init more than max cols" {
     // Initialize with more columns than we can fit in our standard
     // capacity. This is going to force us to go to a non-standard page
     // immediately.
-    var s = try init(
-        alloc,
-        std_capacity.maxCols().? + 1,
-        80,
-        null,
-    );
+    var s = try init(alloc, .{
+        .cols = std_capacity.maxCols().? + 1,
+        .rows = 80,
+    });
     defer s.deinit();
     try testing.expect(s.viewport == .active);
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
@@ -8435,7 +9995,7 @@ test "PageList pointFromPin active no history" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     {
@@ -8468,7 +10028,7 @@ test "PageList pointFromPin active with history" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(30);
 
@@ -8499,7 +10059,7 @@ test "PageList pointFromPin active from prior page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     // Grow so we take up at least 5 pages.
     const page = s.pages.last.?.page();
@@ -8541,7 +10101,7 @@ test "PageList pointFromPin traverse pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up at least 2 pages.
@@ -8625,7 +10185,7 @@ test "PageList active after grow" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -8669,7 +10229,7 @@ test "PageList grow allows exceeding max size for active area" {
 
     // Setup our initial page so that we fully take up one page.
     const cap = try std_capacity.adjust(.{ .cols = 5 });
-    var s = try init(alloc, 5, cap.rows, 0);
+    var s = try init(alloc, .{ .cols = 5, .rows = cap.rows, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -8702,7 +10262,7 @@ test "PageList grow prune required with a single page" {
     const alloc = testing.allocator;
 
     // Need scrollback > 0 to have a scrollbar to test
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // This block is all test setup. There is nothing required about this
@@ -8747,7 +10307,7 @@ test "PageList scrollbar with max_size 0 after grow" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     // Grow some rows (simulates normal terminal output)
@@ -8766,7 +10326,7 @@ test "PageList scroll with max_size 0 no history" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     try s.growRows(10);
@@ -8788,7 +10348,7 @@ test "PageList scroll top" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -8851,7 +10411,7 @@ test "PageList scroll delta row back" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -8907,7 +10467,7 @@ test "PageList scroll delta row back overflow" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -8954,7 +10514,7 @@ test "PageList scroll delta row back overflow" {
 test "PageList scroll minimum row delta" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 10, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 10, .rows = 3 });
     defer s.deinit();
 
     // Create one row of history so scrolling all the way back has an
@@ -8969,7 +10529,7 @@ test "PageList scroll delta row forward" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -9018,7 +10578,7 @@ test "PageList scroll delta row forward into active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     s.scroll(.{ .delta_row = 2 });
@@ -9042,7 +10602,7 @@ test "PageList scroll delta row back without space preserves active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     s.scroll(.{ .delta_row = -1 });
 
@@ -9067,7 +10627,7 @@ test "PageList scroll to pin" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -9114,7 +10674,7 @@ test "PageList scroll to pin in active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -9142,7 +10702,7 @@ test "PageList scroll to pin at top" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -9172,7 +10732,7 @@ test "PageList scroll to row 0" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -9221,7 +10781,7 @@ test "PageList scroll to row in scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(20);
 
@@ -9272,9 +10832,21 @@ test "PageList scroll to row far from both ends of a long scrollback" {
     // More than 2 * 65535 rows, so a row near the middle is further than a
     // u16 can count from the top and from the bottom. A scrollbar drag lands
     // here, and used to snap the viewport to the active area instead.
-    var s = try init(alloc, 10, 24, null);
+    var s = try init(alloc, .{ .cols = 10, .rows = 24 });
     defer s.deinit();
-    try s.growRows(150_000);
+    // Grown with the list's and each page's integrity walks paused: under
+    // slow_runtime_safety every grow walks the whole last page and the whole
+    // list, which made this setup take 75 s in Debug (over the 120 s test
+    // timeout on CI's runner). The list is checked once after.
+    s.pauseIntegrityChecks(true);
+    for (0..150_000) |_| {
+        const last = s.pages.last.?.page();
+        last.pauseIntegrityChecks(true);
+        _ = try s.grow();
+        last.pauseIntegrityChecks(false);
+    }
+    s.pauseIntegrityChecks(false);
+    s.assertIntegrity();
 
     // 70_000 and 66_000 are past 65535 from the top (the forward walk),
     // 80_000 and the midpoint are past it from the bottom (the backward
@@ -9299,7 +10871,7 @@ test "PageList scroll to row in middle" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(50);
 
@@ -9342,7 +10914,7 @@ test "PageList scroll to row at active boundary" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(20);
 
@@ -9381,7 +10953,7 @@ test "PageList scroll to row beyond active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(10);
 
@@ -9408,7 +10980,7 @@ test "PageList scroll to row without scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     s.scroll(.{ .row = 5 });
@@ -9434,7 +11006,7 @@ test "PageList scroll to row then delta" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(30);
 
@@ -9497,7 +11069,7 @@ test "PageList scroll to row with cache fast path down" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(50);
 
@@ -9560,7 +11132,7 @@ test "PageList scroll to row with cache fast path up" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(50);
 
@@ -9623,21 +11195,21 @@ test "PageList scroll clear" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     {
         const cell = s.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
         cell.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
     {
         const cell = s.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?;
         cell.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -9656,7 +11228,7 @@ test "PageList: jump zero prompts" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, null);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3 });
     defer s.deinit();
     try s.growRows(3);
     try testing.expect(s.pages.first == s.pages.last);
@@ -9683,7 +11255,7 @@ test "PageList: jump zero prompts" {
 test "PageList: jump minimum prompt delta" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 10, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 10, .rows = 3 });
     defer s.deinit();
 
     s.scroll(.{ .delta_prompt = std.math.minInt(isize) });
@@ -9694,7 +11266,7 @@ test "Screen: jump back one prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, null);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3 });
     defer s.deinit();
     try s.growRows(3);
     try testing.expect(s.pages.first == s.pages.last);
@@ -9763,7 +11335,7 @@ test "Screen: jump forward prompt skips multiline continuation" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, null);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3 });
     defer s.deinit();
     try s.growRows(7);
 
@@ -9812,7 +11384,7 @@ test "PageList grow fit in capacity" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // So we know we're using capacity to grow
@@ -9834,7 +11406,7 @@ test "PageList grow allocate" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow to capacity
@@ -9899,12 +11471,427 @@ test "PageList Cell screenPoint supports long scrollback" {
     } }, cell.screenPoint());
 }
 
+test "PageList set max bytes prunes immediately and can be raised" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_size = null,
+    });
+    defer s.deinit();
+
+    // Build four complete pages of history followed by the active row.
+    try s.growRows(4 * page_rows);
+    try testing.expectEqual(@as(usize, 5), s.totalPages());
+
+    const removed = s.pages.first.?;
+    const retained = s.pages.last.?.prev.?;
+    const removed_pin = try s.trackPin(.{ .node = removed });
+    defer s.untrackPin(removed_pin);
+    const retained_pin = try s.trackPin(.{ .node = retained });
+    defer s.untrackPin(retained_pin);
+
+    s.scroll(.{ .pin = retained_pin.* });
+    try testing.expectEqual(3 * page_rows, s.scrollbar().offset);
+
+    // The active-area minimum is two pages. Lowering below that immediately
+    // removes all older complete historical pages.
+    s.setMaxBytes(PagePool.item_size);
+    try testing.expectEqual(PagePool.item_size, s.limits.bytes.explicit);
+    try testing.expectEqual(2 * PagePool.item_size, s.limits.max(.bytes));
+    try testing.expectEqual(s.limits.max(.bytes), s.page_size);
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+    try testing.expectEqual(retained, s.pages.first.?);
+    try testing.expectEqual(retained, removed_pin.node);
+    try testing.expect(removed_pin.garbage);
+    try testing.expectEqual(retained, retained_pin.node);
+    try testing.expect(!retained_pin.garbage);
+    try testing.expectEqual(@as(usize, 0), s.scrollbar().offset);
+
+    // Raising the limit doesn't allocate or otherwise change retained data,
+    // but subsequent growth can exceed the previous effective limit.
+    const limited_size = s.page_size;
+    const limited_rows = s.total_rows;
+    s.setMaxBytes(8 * PagePool.item_size);
+    try testing.expectEqual(limited_size, s.page_size);
+    try testing.expectEqual(limited_rows, s.total_rows);
+    try s.growRows(2 * page_rows);
+    try testing.expect(s.page_size > limited_size);
+
+    // Null restores unlimited growth and likewise preserves current data.
+    const raised_size = s.page_size;
+    const raised_rows = s.total_rows;
+    s.setMaxBytes(null);
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.limits.bytes.explicit,
+    );
+    try testing.expectEqual(raised_size, s.page_size);
+    try testing.expectEqual(raised_rows, s.total_rows);
+    try s.growRows(5 * page_rows);
+    try testing.expect(s.page_size > 8 * PagePool.item_size);
+}
+
+test "PageList set max bytes zero preserves active boundary" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 1,
+        .max_size = null,
+    });
+    defer s.deinit();
+
+    // Make the sole page larger than the effective zero-byte limit. Its first
+    // row will be history, but the same indivisible page also contains active.
+    while (s.page_size <= s.limits.bytes.min) {
+        _ = try s.increaseCapacity(s.pages.first.?, .grapheme_bytes);
+    }
+    _ = try s.grow();
+    try testing.expectEqual(@as(usize, 1), s.totalPages());
+    try testing.expectEqual(s.pages.first.?, s.getTopLeft(.active).node);
+    try testing.expect(s.getTopLeft(.active).y > 0);
+
+    s.scroll(.top);
+    try testing.expect(s.viewport == .top);
+
+    s.setMaxBytes(0);
+    try testing.expectEqual(@as(usize, 0), s.limits.bytes.explicit);
+    try testing.expect(s.page_size > s.limits.max(.bytes));
+    try testing.expectEqual(@as(usize, 1), s.totalPages());
+    try testing.expect(s.viewport == .active);
+    try testing.expectEqual(Scrollbar{
+        .total = s.rows,
+        .offset = 0,
+        .len = s.rows,
+    }, s.scrollbar());
+
+    // No-scrollback mode cannot be moved back into the retained boundary row.
+    s.scroll(.top);
+    try testing.expect(s.viewport == .active);
+}
+
+test "PageList set max lines prunes immediately and can be raised" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+    const lowered_lines = page_rows + page_rows / 2;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer s.deinit();
+
+    try s.growRows(4 * page_rows);
+    try testing.expectEqual(@as(usize, 5), s.totalPages());
+
+    const removed = s.pages.first.?;
+    const retained = s.pages.last.?.prev.?;
+    const removed_pin = try s.trackPin(.{ .node = removed });
+    defer s.untrackPin(removed_pin);
+    const retained_pin = try s.trackPin(.{ .node = retained });
+    defer s.untrackPin(retained_pin);
+
+    s.scroll(.{ .pin = retained_pin.* });
+    try testing.expectEqual(3 * page_rows, s.scrollbar().offset);
+
+    // Whole-page enforcement undershoots a non-page-aligned line limit.
+    s.setMaxLines(lowered_lines);
+    try testing.expectEqual(lowered_lines, s.limits.lines.explicit);
+    try testing.expectEqual(lowered_lines, s.limits.max(.lines));
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+    try testing.expectEqual(retained, s.pages.first.?);
+    try testing.expectEqual(retained, removed_pin.node);
+    try testing.expect(removed_pin.garbage);
+    try testing.expectEqual(retained, retained_pin.node);
+    try testing.expect(!retained_pin.garbage);
+    try testing.expectEqual(@as(usize, 0), s.scrollbar().offset);
+
+    const limited_size = s.page_size;
+    const limited_rows = s.total_rows;
+    s.setMaxLines(4 * page_rows);
+    try testing.expectEqual(limited_size, s.page_size);
+    try testing.expectEqual(limited_rows, s.total_rows);
+    try s.growRows(2 * page_rows);
+    try testing.expect(s.total_rows - s.rows > lowered_lines);
+
+    const raised_size = s.page_size;
+    const raised_rows = s.total_rows;
+    s.setMaxLines(null);
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.limits.lines.explicit,
+    );
+    try testing.expectEqual(raised_size, s.page_size);
+    try testing.expectEqual(raised_rows, s.total_rows);
+    try s.growRows(3 * page_rows);
+    try testing.expect(s.total_rows - s.rows > 4 * page_rows);
+}
+
+test "PageList set max limits remain independent" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+    const byte_limit = 3 * PagePool.item_size;
+    const line_limit = page_rows / 2;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer s.deinit();
+
+    try s.growRows(4 * page_rows);
+
+    // The byte setter leaves the line limit unlimited.
+    s.setMaxBytes(byte_limit);
+    try testing.expectEqual(byte_limit, s.limits.bytes.explicit);
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.limits.lines.explicit,
+    );
+    try testing.expectEqual(@as(usize, 3), s.totalPages());
+    try testing.expectEqual(2 * page_rows, s.total_rows - s.rows);
+
+    // The smaller runtime line limit prunes one more complete page without
+    // changing the configured byte limit. Its effective value is raised to
+    // the existing one-page minimum.
+    s.setMaxLines(line_limit);
+    try testing.expectEqual(byte_limit, s.limits.bytes.explicit);
+    try testing.expectEqual(line_limit, s.limits.lines.explicit);
+    try testing.expectEqual(page_rows, s.limits.max(.lines));
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+
+    // Removing only the line limit leaves byte enforcement in effect.
+    s.setMaxLines(null);
+    try s.growRows(3 * page_rows);
+    try testing.expectEqual(byte_limit, s.page_size);
+    try testing.expectEqual(@as(usize, 3), s.totalPages());
+    try testing.expect(s.total_rows - s.rows > page_rows);
+}
+
+test "PageList max lines uses one-page minimum" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_lines = page_rows / 2,
+    });
+    defer s.deinit();
+
+    try testing.expectEqual(page_rows, s.limits.max(.lines));
+
+    // The requested limit is below one page, so a complete page of history
+    // remains valid.
+    try s.growRows(page_rows);
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+
+    const first = s.pages.first.?;
+    const old_page_size = s.page_size;
+
+    // One more row puts us over the effective limit. The now-complete
+    // historical page is removed rather than partially trimmed.
+    _ = try s.grow();
+    try testing.expectEqual(@as(usize, 1), s.total_rows - s.rows);
+    try testing.expectEqual(@as(usize, 1), s.totalPages());
+    try testing.expect(s.pages.first.? != first);
+    try testing.expectEqual(
+        old_page_size - PagePool.item_size,
+        s.page_size,
+    );
+}
+
+test "PageList max lines does not round larger limits" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+    const max_lines = page_rows + page_rows / 2;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_lines = max_lines,
+    });
+    defer s.deinit();
+
+    try testing.expectEqual(max_lines, s.limits.max(.lines));
+    try s.growRows(max_lines);
+    try testing.expectEqual(max_lines, s.total_rows - s.rows);
+
+    const first = s.pages.first.?;
+    const retained = first.next.?;
+    const removed_pin = try s.trackPin(.{ .node = first });
+    defer s.untrackPin(removed_pin);
+    const retained_pin = try s.trackPin(.{ .node = retained });
+    defer s.untrackPin(retained_pin);
+
+    s.scroll(.{ .pin = retained_pin.* });
+    try testing.expectEqual(page_rows, s.scrollbar().offset);
+
+    const old_page_size = s.page_size;
+    _ = try s.grow();
+
+    // Whole-page pruning undershoots the requested limit without rounding it.
+    try testing.expectEqual(
+        max_lines + 1 - page_rows,
+        s.total_rows - s.rows,
+    );
+    try testing.expectEqual(retained, s.pages.first.?);
+    try testing.expectEqual(retained, removed_pin.node);
+    try testing.expect(removed_pin.garbage);
+    try testing.expectEqual(retained, retained_pin.node);
+    try testing.expect(!retained_pin.garbage);
+    try testing.expectEqual(@as(usize, 0), s.scrollbar().offset);
+    try testing.expectEqual(
+        old_page_size - PagePool.item_size,
+        s.page_size,
+    );
+}
+
+test "PageList max lines and max size enforce the smaller limit" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+
+    // A line limit of one page keeps the logical allocation below a much
+    // larger byte limit.
+    {
+        var s = try init(testing.allocator, .{
+            .cols = cols,
+            .rows = 1,
+            .max_size = 8 * PagePool.item_size,
+            .max_lines = page_rows,
+        });
+        defer s.deinit();
+
+        try s.growRows(4 * page_rows);
+        try testing.expect(
+            s.total_rows - s.rows <= s.limits.max(.lines),
+        );
+        try testing.expect(s.totalPages() <= 2);
+        try testing.expect(s.page_size < s.limits.max(.bytes));
+    }
+
+    // A two-page byte limit prunes before the larger line limit is reached.
+    {
+        var s = try init(testing.allocator, .{
+            .cols = cols,
+            .rows = 1,
+            .max_size = PagePool.item_size,
+            .max_lines = 4 * page_rows,
+        });
+        defer s.deinit();
+
+        try s.growRows(2 * page_rows);
+        try testing.expect(
+            s.total_rows - s.rows < s.limits.max(.lines),
+        );
+        try testing.expectEqual(s.limits.max(.bytes), s.page_size);
+    }
+}
+
+test "PageList max lines applies to resize and clone" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 2,
+        .max_lines = page_rows,
+    });
+    defer s.deinit();
+
+    try s.growRows(page_rows);
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+
+    // Prevent row shrinking from trimming the trailing active row instead of
+    // turning it into history.
+    const cell = s.getCell(.{ .active = .{ .y = 1 } }).?;
+    cell.cell.* = .{
+        .content_tag = .codepoint,
+        .content = .{ .codepoint = .{ .data = 'A' } },
+    };
+
+    try s.resize(.{ .rows = 1, .reflow = false });
+    try testing.expectEqual(@as(usize, 1), s.total_rows - s.rows);
+
+    const new_cols: size.CellCountInt = cols + 1;
+    try s.resize(.{ .cols = new_cols, .reflow = true });
+    try testing.expectEqual(
+        Limits.minMaxLines(new_cols),
+        s.limits.lines.min,
+    );
+
+    // Exercise the same active-row shrink through the reflow path. Reflow
+    // completes before the newly historical complete page is pruned.
+    {
+        var reflowed = try init(testing.allocator, .{
+            .cols = cols,
+            .rows = 2,
+            .max_lines = page_rows,
+        });
+        defer reflowed.deinit();
+
+        try reflowed.growRows(page_rows);
+        const active_cell = reflowed.getCell(.{ .active = .{ .y = 1 } }).?;
+        active_cell.cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = .{ .data = 'A' } },
+        };
+
+        try reflowed.resize(.{
+            .cols = new_cols,
+            .rows = 1,
+            .reflow = true,
+        });
+        try testing.expectEqual(
+            Limits.minMaxLines(new_cols),
+            reflowed.limits.lines.min,
+        );
+        try testing.expect(
+            reflowed.total_rows - reflowed.rows <=
+                reflowed.limits.max(.lines) or
+                reflowed.pages.first.? ==
+                    reflowed.getTopLeft(.active).node,
+        );
+    }
+
+    var cloned = try s.clone(testing.allocator, .{
+        .top = .{ .screen = .{} },
+    });
+    defer cloned.deinit();
+
+    try testing.expectEqual(s.limits, cloned.limits);
+
+    try cloned.growRows(2 * cloned.limits.max(.lines));
+    try testing.expect(
+        cloned.total_rows - cloned.rows <= cloned.limits.max(.lines) or
+            cloned.pages.first.? == cloned.getTopLeft(.active).node,
+    );
+}
+
 test "PageList grow prune scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     // Use std_size to limit scrollback so pruning is triggered.
-    var s = try init(alloc, 80, 24, std_size);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = std_size });
     defer s.deinit();
 
     // Grow to capacity
@@ -9973,7 +11960,7 @@ test "PageList grow prune scrollback with viewport pin not in pruned page" {
     const alloc = testing.allocator;
 
     // Use std_size to limit scrollback so pruning is triggered.
-    var s = try init(alloc, 80, 24, std_size);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = std_size });
     defer s.deinit();
 
     // Grow to capacity of first page
@@ -10032,7 +12019,7 @@ test "PageList eraseRows invalidates viewport offset cache" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
@@ -10072,7 +12059,7 @@ test "PageList eraseRow invalidates viewport offset cache" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
@@ -10111,7 +12098,7 @@ test "PageList eraseRowBounded invalidates viewport offset cache" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
@@ -10150,7 +12137,7 @@ test "PageList eraseRowBounded invalidates viewport offset cache" {
 test "PageList row erasure renews affected page generations" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     while (s.totalPages() < 2) _ = try s.grow();
 
@@ -10180,7 +12167,7 @@ test "PageList row erasure renews affected page generations" {
 test "PageList trailing row truncation renews page generation" {
     const testing = std.testing;
 
-    var s = try init(testing.allocator, 80, 24, null);
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const node = s.pages.last.?;
@@ -10198,7 +12185,7 @@ test "PageList eraseRowBounded multi-page invalidates viewport offset cache" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
@@ -10239,7 +12226,7 @@ test "PageList eraseRowBounded full page shift invalidates viewport offset cache
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
@@ -10282,7 +12269,7 @@ test "PageList eraseRowBounded exhausts pages invalidates viewport offset cache"
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up several pages worth of history
@@ -10327,7 +12314,7 @@ test "PageList increaseCapacity to increase styles" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     const original_styles_cap = s.pages.first.?.capacity().styles;
@@ -10342,7 +12329,7 @@ test "PageList increaseCapacity to increase styles" {
                 const rac = page.getRowAndCell(x, y);
                 rac.cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = @intCast(x) },
+                    .content = .{ .codepoint = .{ .data = @intCast(x) } },
                 };
             }
         }
@@ -10367,8 +12354,70 @@ test "PageList increaseCapacity to increase styles" {
                 const rac = page.getRowAndCell(x, y);
                 try testing.expectEqual(
                     @as(u21, @intCast(x)),
-                    rac.cell.content.codepoint,
+                    rac.cell.content.codepoint.data,
                 );
+            }
+        }
+    }
+}
+
+test "PageList increaseCapacity styles projects capacity from page density" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
+    defer s.deinit();
+
+    const original_cap = s.pages.first.?.capacity().styles;
+
+    // Write styled cells so the page has a measurable per-row style
+    // density (unlike the plain doubling test above, which grows a
+    // page with no styles in use).
+    const bold: stylepkg.Style = .{ .flags = .{ .bold = true } };
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        for (0..s.rows) |y| {
+            for (0..s.cols) |x| {
+                const rac = page.getRowAndCell(x, y);
+                const style_id = try page.styles.add(page.memory, bold);
+                rac.row.styled = true;
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = @intCast(x + 1) } },
+                    .style_id = style_id,
+                };
+            }
+        }
+    }
+
+    _ = try s.increaseCapacity(s.pages.first.?, .styles);
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        // The page uses only two active rows out of thousands of rows
+        // of capacity, so the projected full-page need saturates the
+        // 32x-per-event growth bound instead of merely doubling.
+        try testing.expectEqual(
+            original_cap * 32,
+            page.capacity.styles,
+        );
+
+        // All cell content and styles are preserved by the growth.
+        for (0..s.rows) |y| {
+            for (0..s.cols) |x| {
+                const rac = page.getRowAndCell(x, y);
+                try testing.expectEqual(
+                    @as(u21, @intCast(x + 1)),
+                    rac.cell.content.codepoint.data,
+                );
+                try testing.expect(rac.cell.style_id != stylepkg.default_id);
+                try testing.expect(bold.eql(
+                    page.styles.get(page.memory, rac.cell.style_id).*,
+                ));
             }
         }
     }
@@ -10378,7 +12427,7 @@ test "PageList increaseCapacity to increase graphemes" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     const original_cap = s.pages.first.?.capacity().grapheme_bytes;
@@ -10392,7 +12441,7 @@ test "PageList increaseCapacity to increase graphemes" {
                 const rac = page.getRowAndCell(x, y);
                 rac.cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = @intCast(x) },
+                    .content = .{ .codepoint = .{ .data = @intCast(x) } },
                 };
             }
         }
@@ -10411,8 +12460,72 @@ test "PageList increaseCapacity to increase graphemes" {
                 const rac = page.getRowAndCell(x, y);
                 try testing.expectEqual(
                     @as(u21, @intCast(x)),
-                    rac.cell.content.codepoint,
+                    rac.cell.content.codepoint.data,
                 );
+            }
+        }
+    }
+}
+
+test "PageList increaseCapacity graphemes projects capacity from page density" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
+    defer s.deinit();
+
+    const original_cap = s.pages.first.?.capacity().grapheme_bytes;
+
+    // Write cells with grapheme data so the page has a measurable
+    // per-row grapheme density (unlike the plain doubling test above,
+    // which grows a page with no grapheme usage).
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        for (0..s.rows) |y| {
+            for (0..s.cols) |x| {
+                const rac = page.getRowAndCell(x, y);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = @intCast(x + 1) } },
+                };
+                try page.appendGrapheme(rac.row, rac.cell, 0x0301);
+                try page.appendGrapheme(rac.row, rac.cell, 0x0302);
+            }
+        }
+    }
+
+    _ = try s.increaseCapacity(s.pages.first.?, .grapheme_bytes);
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        // The page uses only two active rows out of thousands of rows
+        // of capacity, so the projected full-page need saturates the
+        // 32x-per-event growth bound instead of merely doubling.
+        try testing.expectEqual(
+            original_cap * 32,
+            page.capacity.grapheme_bytes,
+        );
+
+        // All cell and grapheme content is preserved by the growth.
+        try testing.expectEqual(
+            @as(usize, s.rows * s.cols),
+            page.graphemeCount(),
+        );
+        for (0..s.rows) |y| {
+            for (0..s.cols) |x| {
+                const rac = page.getRowAndCell(x, y);
+                try testing.expectEqual(
+                    @as(u21, @intCast(x + 1)),
+                    rac.cell.content.codepoint.data,
+                );
+                const cps = page.lookupGrapheme(rac.cell).?;
+                try testing.expectEqual(@as(usize, 2), cps.len);
+                try testing.expectEqual(@as(u21, 0x0301), cps[0]);
+                try testing.expectEqual(@as(u21, 0x0302), cps[1]);
             }
         }
     }
@@ -10422,7 +12535,7 @@ test "PageList increaseCapacity to increase hyperlinks" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     const original_cap = s.pages.first.?.capacity().hyperlink_bytes;
@@ -10436,7 +12549,7 @@ test "PageList increaseCapacity to increase hyperlinks" {
                 const rac = page.getRowAndCell(x, y);
                 rac.cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = @intCast(x) },
+                    .content = .{ .codepoint = .{ .data = @intCast(x) } },
                 };
             }
         }
@@ -10455,7 +12568,7 @@ test "PageList increaseCapacity to increase hyperlinks" {
                 const rac = page.getRowAndCell(x, y);
                 try testing.expectEqual(
                     @as(u21, @intCast(x)),
-                    rac.cell.content.codepoint,
+                    rac.cell.content.codepoint.data,
                 );
             }
         }
@@ -10466,7 +12579,7 @@ test "PageList increaseCapacity to increase string_bytes" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     const original_cap = s.pages.first.?.capacity().string_bytes;
@@ -10480,7 +12593,7 @@ test "PageList increaseCapacity to increase string_bytes" {
                 const rac = page.getRowAndCell(x, y);
                 rac.cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = @intCast(x) },
+                    .content = .{ .codepoint = .{ .data = @intCast(x) } },
                 };
             }
         }
@@ -10499,7 +12612,7 @@ test "PageList increaseCapacity to increase string_bytes" {
                 const rac = page.getRowAndCell(x, y);
                 try testing.expectEqual(
                     @as(u21, @intCast(x)),
-                    rac.cell.content.codepoint,
+                    rac.cell.content.codepoint.data,
                 );
             }
         }
@@ -10510,7 +12623,7 @@ test "PageList increaseCapacity tracked pins" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     // Create a tracked pin on the first page
@@ -10533,7 +12646,7 @@ test "PageList increaseCapacity returns OutOfSpace at max capacity" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     // Keep increasing styles capacity until we get OutOfSpace
@@ -10555,7 +12668,7 @@ test "PageList increaseCapacity after col shrink" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 2, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 2, .max_size = 0 });
     defer s.deinit();
 
     // Shrink columns
@@ -10583,7 +12696,7 @@ test "PageList increaseCapacity multi-page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow to create a second page
@@ -10622,7 +12735,7 @@ test "PageList increaseCapacity preserves dirty flag" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4, .max_size = 0 });
     defer s.deinit();
 
     // Set page dirty flag and mark some rows as dirty
@@ -10653,7 +12766,7 @@ test "PageList pageIterator single page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // The viewport should be within a single page
@@ -10676,7 +12789,7 @@ test "PageList pageIterator two pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow to capacity
@@ -10712,7 +12825,7 @@ test "PageList pageIterator history two pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow to capacity
@@ -10742,7 +12855,7 @@ test "PageList pageIterator reverse single page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // The viewport should be within a single page
@@ -10765,7 +12878,7 @@ test "PageList pageIterator reverse two pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow to capacity
@@ -10805,7 +12918,7 @@ test "PageList pageIterator reverse history two pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow to capacity
@@ -10835,7 +12948,7 @@ test "PageList PageIterator reverse count includes row zero" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, null);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2 });
     defer s.deinit();
 
     var it: PageIterator = .{
@@ -10853,7 +12966,7 @@ test "PageList PageIterator count crosses page boundaries" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     const first = s.pages.first.?;
@@ -10905,7 +13018,7 @@ test "PageList cellIterator" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -10914,7 +13027,7 @@ test "PageList cellIterator" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -10955,7 +13068,7 @@ test "PageList cellIterator reverse" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -10964,7 +13077,7 @@ test "PageList cellIterator reverse" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -11005,7 +13118,7 @@ test "PageList promptIterator left_up" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 20, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11062,7 +13175,7 @@ test "PageList promptIterator right_down" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 20, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11119,7 +13232,7 @@ test "PageList promptIterator right_down continuation at start" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 20, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11162,7 +13275,7 @@ test "PageList promptIterator right_down with prompt before continuation" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 20, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11201,7 +13314,7 @@ test "PageList promptIterator right_down limit inclusive" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 20, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11233,7 +13346,7 @@ test "PageList promptIterator left_up limit inclusive" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 20, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11266,7 +13379,7 @@ test "PageList highlightSemanticContent prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11281,7 +13394,7 @@ test "PageList highlightSemanticContent prompt" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11291,7 +13404,7 @@ test "PageList highlightSemanticContent prompt" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'B' },
+                .content = .{ .codepoint = .{ .data = 'B' } },
                 .semantic_content = .input,
             };
         }
@@ -11320,7 +13433,7 @@ test "PageList highlightSemanticContent prompt with output" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11335,7 +13448,7 @@ test "PageList highlightSemanticContent prompt with output" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11345,7 +13458,7 @@ test "PageList highlightSemanticContent prompt with output" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'l' },
+                .content = .{ .codepoint = .{ .data = 'l' } },
                 .semantic_content = .input,
             };
         }
@@ -11355,7 +13468,7 @@ test "PageList highlightSemanticContent prompt with output" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -11385,7 +13498,7 @@ test "PageList highlightSemanticContent prompt multiline" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11400,7 +13513,7 @@ test "PageList highlightSemanticContent prompt multiline" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11411,7 +13524,7 @@ test "PageList highlightSemanticContent prompt multiline" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -11441,7 +13554,7 @@ test "PageList highlightSemanticContent prompt only" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11455,7 +13568,7 @@ test "PageList highlightSemanticContent prompt only" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11485,7 +13598,7 @@ test "PageList highlightSemanticContent prompt to end of screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11499,7 +13612,7 @@ test "PageList highlightSemanticContent prompt to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11508,7 +13621,7 @@ test "PageList highlightSemanticContent prompt to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -11533,7 +13646,7 @@ test "PageList highlightSemanticContent input basic" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11548,7 +13661,7 @@ test "PageList highlightSemanticContent input basic" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11558,7 +13671,7 @@ test "PageList highlightSemanticContent input basic" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'l' },
+                .content = .{ .codepoint = .{ .data = 'l' } },
                 .semantic_content = .input,
             };
         }
@@ -11588,7 +13701,7 @@ test "PageList highlightSemanticContent input with output" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11603,7 +13716,7 @@ test "PageList highlightSemanticContent input with output" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11613,7 +13726,7 @@ test "PageList highlightSemanticContent input with output" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -11623,7 +13736,7 @@ test "PageList highlightSemanticContent input with output" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -11653,7 +13766,7 @@ test "PageList highlightSemanticContent input multiline with continuation" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11668,7 +13781,7 @@ test "PageList highlightSemanticContent input multiline with continuation" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11678,7 +13791,7 @@ test "PageList highlightSemanticContent input multiline with continuation" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -11690,7 +13803,7 @@ test "PageList highlightSemanticContent input multiline with continuation" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '>' },
+                .content = .{ .codepoint = .{ .data = '>' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11700,7 +13813,7 @@ test "PageList highlightSemanticContent input multiline with continuation" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'd' },
+                .content = .{ .codepoint = .{ .data = 'd' } },
                 .semantic_content = .input,
             };
         }
@@ -11730,7 +13843,7 @@ test "PageList highlightSemanticContent input no input returns null" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11745,7 +13858,7 @@ test "PageList highlightSemanticContent input no input returns null" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11755,7 +13868,7 @@ test "PageList highlightSemanticContent input no input returns null" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -11778,7 +13891,7 @@ test "PageList highlightSemanticContent input to end of screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11792,7 +13905,7 @@ test "PageList highlightSemanticContent input to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11801,7 +13914,7 @@ test "PageList highlightSemanticContent input to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -11826,7 +13939,7 @@ test "PageList highlightSemanticContent input prompt only returns null" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11841,7 +13954,7 @@ test "PageList highlightSemanticContent input prompt only returns null" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11873,7 +13986,7 @@ test "PageList highlightSemanticContent output basic" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11888,7 +14001,7 @@ test "PageList highlightSemanticContent output basic" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11898,7 +14011,7 @@ test "PageList highlightSemanticContent output basic" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'l' },
+                .content = .{ .codepoint = .{ .data = 'l' } },
                 .semantic_content = .input,
             };
         }
@@ -11908,7 +14021,7 @@ test "PageList highlightSemanticContent output basic" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -11944,7 +14057,7 @@ test "PageList highlightSemanticContent output multiline" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -11959,7 +14072,7 @@ test "PageList highlightSemanticContent output multiline" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -11969,7 +14082,7 @@ test "PageList highlightSemanticContent output multiline" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'l' },
+                .content = .{ .codepoint = .{ .data = 'l' } },
                 .semantic_content = .input,
             };
         }
@@ -11979,7 +14092,7 @@ test "PageList highlightSemanticContent output multiline" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -11990,7 +14103,7 @@ test "PageList highlightSemanticContent output multiline" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -12001,7 +14114,7 @@ test "PageList highlightSemanticContent output multiline" {
             const cell = page.getRowAndCell(x, 7).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -12035,7 +14148,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -12050,7 +14163,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -12060,7 +14173,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'l' },
+                .content = .{ .codepoint = .{ .data = 'l' } },
                 .semantic_content = .input,
             };
         }
@@ -12070,7 +14183,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -12081,7 +14194,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -12090,7 +14203,7 @@ test "PageList highlightSemanticContent output stops at next prompt" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -12120,7 +14233,7 @@ test "PageList highlightSemanticContent output to end of screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -12134,7 +14247,7 @@ test "PageList highlightSemanticContent output to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -12143,7 +14256,7 @@ test "PageList highlightSemanticContent output to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -12152,7 +14265,7 @@ test "PageList highlightSemanticContent output to end of screen" {
             const cell = page.getRowAndCell(x, 15).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -12163,7 +14276,7 @@ test "PageList highlightSemanticContent output to end of screen" {
             const cell = page.getRowAndCell(x, 16).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'o' },
+                .content = .{ .codepoint = .{ .data = 'o' } },
                 .semantic_content = .output,
             };
         }
@@ -12192,7 +14305,7 @@ test "PageList highlightSemanticContent output no output returns null" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -12207,7 +14320,7 @@ test "PageList highlightSemanticContent output no output returns null" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -12217,7 +14330,7 @@ test "PageList highlightSemanticContent output no output returns null" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'c' },
+                .content = .{ .codepoint = .{ .data = 'c' } },
                 .semantic_content = .input,
             };
         }
@@ -12252,7 +14365,7 @@ test "PageList highlightSemanticContent output skips empty cells" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 20, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 20, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -12267,7 +14380,7 @@ test "PageList highlightSemanticContent output skips empty cells" {
             const cell = page.getRowAndCell(x, 5).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '$' },
+                .content = .{ .codepoint = .{ .data = '$' } },
                 .semantic_content = .prompt,
             };
         }
@@ -12281,7 +14394,7 @@ test "PageList highlightSemanticContent output skips empty cells" {
             const cell = page.getRowAndCell(x, 6).cell;
             cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'l' },
+                .content = .{ .codepoint = .{ .data = 'l' } },
                 .semantic_content = .input,
             };
         }
@@ -12295,7 +14408,7 @@ test "PageList highlightSemanticContent output skips empty cells" {
                 const cell = page.getRowAndCell(x, y).cell;
                 cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = 'o' },
+                    .content = .{ .codepoint = .{ .data = 'o' } },
                     .semantic_content = .output,
                 };
             }
@@ -12329,7 +14442,7 @@ test "PageList erase" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -12363,7 +14476,7 @@ test "PageList erase reaccounts page size" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     const start_size = s.page_size;
 
@@ -12390,7 +14503,7 @@ test "PageList erase row with tracked pin resets to top-left" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
@@ -12430,7 +14543,7 @@ test "PageList eraseHistory marks pins in erased rows as garbage" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // A few rows of history on the same page as the active area.
@@ -12455,7 +14568,7 @@ test "PageList erase row with tracked pin shifts" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Put a tracked pin in the history
@@ -12476,7 +14589,7 @@ test "PageList erase row with tracked pin is erased" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Put a tracked pin in the history
@@ -12497,7 +14610,7 @@ test "PageList erase resets viewport to active if moves within active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
@@ -12526,7 +14639,7 @@ test "PageList erase resets viewport if inside erased page but not active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
@@ -12555,7 +14668,7 @@ test "PageList erase resets viewport to active if top is inside active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow so we take up at least 5 pages.
@@ -12583,7 +14696,7 @@ test "PageList erase active regrows automatically" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expect(s.totalRows() == s.rows);
     s.eraseActive(10);
@@ -12594,7 +14707,7 @@ test "PageList erase a one-row active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 1, null);
+    var s = try init(alloc, .{ .cols = 10, .rows = 1 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -12604,7 +14717,7 @@ test "PageList erase a one-row active" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -12614,7 +14727,7 @@ test "PageList erase a one-row active" {
     // The row should be empty
     {
         const get = s.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
-        try testing.expectEqual(@as(u21, 0), get.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 0), get.cell.content.codepoint.data);
     }
 }
 
@@ -12622,7 +14735,7 @@ test "PageList eraseRowBounded less than full row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 10, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 10 });
     defer s.deinit();
 
     // Pins
@@ -12659,7 +14772,7 @@ test "PageList eraseRowBounded with pin at top" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 10, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 10 });
     defer s.deinit();
 
     // Pins
@@ -12684,7 +14797,7 @@ test "PageList eraseRowBounded full rows single page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 10, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 10 });
     defer s.deinit();
 
     // Pins
@@ -12717,7 +14830,7 @@ test "PageList eraseRowBounded full rows two pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 10, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 10 });
     defer s.deinit();
 
     // Grow to two pages so our active area straddles
@@ -12789,161 +14902,6 @@ test "PageList eraseRowBounded full rows two pages" {
     try testing.expectEqual(@as(usize, 0), p_out.x);
 }
 
-test "PageList eraseRow recycled row has default metadata" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(alloc, 5, 3, 0);
-    defer s.deinit();
-
-    // Simulate the top row being part of a soft-wrapped, prompt-marked
-    // line. Erasing it recycles its Row storage as the new blank
-    // bottom row, which must not retain any of this metadata.
-    {
-        const rac = s.getCell(.{ .active = .{} }).?;
-        rac.row.wrap = true;
-        rac.row.wrap_continuation = true;
-        rac.row.semantic_prompt = .prompt;
-    }
-
-    try s.eraseRow(.{ .active = .{} });
-
-    {
-        const rac = s.getCell(.{ .active = .{ .y = 2 } }).?;
-        try testing.expect(!rac.row.wrap);
-        try testing.expect(!rac.row.wrap_continuation);
-        try testing.expectEqual(.none, rac.row.semantic_prompt);
-    }
-}
-
-test "PageList eraseRowBounded recycled row has default metadata" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    // A limit smaller than the remaining rows in the page exercises
-    // the bounded-rotate branch; a larger limit exercises the fallback
-    // branch that clears the final row after a full rotation.
-    for ([_]usize{ 1, 10 }) |limit| {
-        var s = try init(alloc, 5, 3, 0);
-        defer s.deinit();
-
-        {
-            const rac = s.getCell(.{ .active = .{} }).?;
-            rac.row.wrap = true;
-            rac.row.wrap_continuation = true;
-            rac.row.semantic_prompt = .prompt;
-        }
-
-        try s.eraseRowBounded(.{ .active = .{} }, limit);
-
-        const recycled_y = @min(limit, 2);
-        const rac = s.getCell(.{ .active = .{ .y = @intCast(recycled_y) } }).?;
-        try testing.expect(!rac.row.wrap);
-        try testing.expect(!rac.row.wrap_continuation);
-        try testing.expectEqual(.none, rac.row.semantic_prompt);
-    }
-}
-
-test "PageList eraseActive regrown rows have default metadata" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(alloc, 5, 3, 0);
-    defer s.deinit();
-
-    // Mark the rows that will be erased. eraseActive retires their
-    // storage into unused page capacity and then regrows the active
-    // area, re-exposing the same Row storage via the grow() fast path.
-    for (0..2) |y| {
-        const rac = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
-        rac.row.wrap = true;
-        rac.row.wrap_continuation = true;
-        rac.row.semantic_prompt = .prompt;
-    }
-
-    s.eraseActive(1);
-
-    for (0..3) |y| {
-        const rac = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
-        try testing.expect(!rac.row.wrap);
-        try testing.expect(!rac.row.wrap_continuation);
-        try testing.expectEqual(.none, rac.row.semantic_prompt);
-    }
-}
-
-test "PageList split retired rows have default state" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(alloc, 5, 10, 0);
-    defer s.deinit();
-
-    // Put metadata and a background-colored (non-zero, but text-free)
-    // cell on a row that the split will move to the new page. The
-    // retired Row storage on the source page goes back into unused
-    // capacity that grow() re-exposes without clearing.
-    {
-        const rac = s.getCell(.{ .active = .{ .y = 7 } }).?;
-        rac.row.wrap = true;
-        rac.row.semantic_prompt = .prompt;
-        rac.cell.* = .{
-            .content_tag = .bg_color_palette,
-            .content = .{ .color_palette = 42 },
-        };
-    }
-
-    const node = s.pages.first.?;
-    try s.split(s.pin(.{ .active = .{ .y = 5 } }).?);
-
-    // The source page was truncated to 5 rows; peek at the retired
-    // storage beyond size.rows.
-    const page = node.page();
-    try testing.expectEqual(@as(usize, 5), page.size.rows);
-    const rows = page.rows.ptr(page.memory.ptr);
-    for (5..10) |y| {
-        const row = rows[y];
-        try testing.expect(!row.wrap);
-        try testing.expect(!row.wrap_continuation);
-        try testing.expectEqual(.none, row.semantic_prompt);
-        const cells = row.cells.ptr(page.memory.ptr)[0..page.size.cols];
-        for (cells) |cell| try testing.expect(cell.isZero());
-    }
-}
-
-test "PageList resize trimmed rows have default state" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    var s = try init(alloc, 5, 5, 0);
-    defer s.deinit();
-
-    // A trailing blank row has no text, so shrinking rows trims it,
-    // but it can still carry metadata (e.g. a blank prompt
-    // continuation line) and background-colored cells. Trimming
-    // retires the storage into unused capacity that grow()
-    // re-exposes without clearing.
-    {
-        const rac = s.getCell(.{ .active = .{ .y = 4 } }).?;
-        rac.row.wrap_continuation = true;
-        rac.row.semantic_prompt = .prompt_continuation;
-        rac.cell.* = .{
-            .content_tag = .bg_color_palette,
-            .content = .{ .color_palette = 42 },
-        };
-    }
-
-    try s.resize(.{ .rows = 4, .reflow = false });
-    try s.resize(.{ .rows = 5, .reflow = false });
-
-    {
-        const rac = s.getCell(.{ .active = .{ .y = 4 } }).?;
-        try testing.expect(!rac.row.wrap);
-        try testing.expect(!rac.row.wrap_continuation);
-        try testing.expectEqual(.none, rac.row.semantic_prompt);
-        try testing.expect(rac.cell.isZero());
-    }
-}
-
 test "PageList eraseRow hyperlink-dense row crosses page boundary" {
     // Regression test: when eraseRow shifts rows up across a page
     // boundary, the top row of the next page is cloned into the last
@@ -12959,7 +14917,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 10, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 10 });
     defer s.deinit();
 
     // Grow to two pages so our active area straddles them: the first
@@ -12981,7 +14939,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
         const row_pin = s.pin(.{ .active = .{ .y = @intCast(y) } }).?;
         row_pin.rowAndCell().cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast('0' + y) },
+            .content = .{ .codepoint = .{ .data = @intCast('0' + y) } },
         };
     }
 
@@ -12999,7 +14957,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
         const page = s.pages.last.?.page();
         for (0..link_count) |x| {
             var buf: [64]u8 = undefined;
-            const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+            const uri = try std.mem.print(&buf, "http://example.com/{d}", .{x});
             const id = try page.insertHyperlink(.{
                 .id = .{ .implicit = @intCast(x) },
                 .uri = uri,
@@ -13007,7 +14965,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast('A' + x) },
+                .content = .{ .codepoint = .{ .data = @intCast('A' + x) } },
             };
             try page.setHyperlink(rac.row, rac.cell, id);
             page.hyperlink_set.use(page.memory, id);
@@ -13030,7 +14988,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
     const expected = [10]u21{ '1', '2', '3', '4', 'A', '6', '7', '8', '9', 0 };
     for (expected, 0..) |cp, y| {
         const list_cell = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
-        try testing.expectEqual(cp, list_cell.cell.content.codepoint);
+        try testing.expectEqual(cp, list_cell.cell.content.codepoint.data);
     }
 
     // Every cell of the dense row must still resolve to a real
@@ -13047,7 +15005,7 @@ test "PageList eraseRow hyperlink-dense row crosses page boundary" {
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{x});
         try testing.expectEqualStrings(uri, link.uri.slice(page.memory));
     }
 
@@ -13071,7 +15029,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 10, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 10 });
     defer s.deinit();
 
     // Grow to two pages so our active area straddles them: the first
@@ -13093,7 +15051,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
         const row_pin = s.pin(.{ .active = .{ .y = @intCast(y) } }).?;
         row_pin.rowAndCell().cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast('0' + y) },
+            .content = .{ .codepoint = .{ .data = @intCast('0' + y) } },
         };
     }
 
@@ -13111,7 +15069,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
         const page = s.pages.last.?.page();
         for (0..link_count) |x| {
             var buf: [64]u8 = undefined;
-            const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+            const uri = try std.mem.print(&buf, "http://example.com/{d}", .{x});
             const id = try page.insertHyperlink(.{
                 .id = .{ .implicit = @intCast(x) },
                 .uri = uri,
@@ -13119,7 +15077,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast('A' + x) },
+                .content = .{ .codepoint = .{ .data = @intCast('A' + x) } },
             };
             try page.setHyperlink(rac.row, rac.cell, id);
             page.hyperlink_set.use(page.memory, id);
@@ -13139,7 +15097,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
     const expected = [10]u21{ '1', '2', '3', '4', 'A', '6', 0, '7', '8', '9' };
     for (expected, 0..) |cp, y| {
         const list_cell = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
-        try testing.expectEqual(cp, list_cell.cell.content.codepoint);
+        try testing.expectEqual(cp, list_cell.cell.content.codepoint.data);
     }
 
     // Every cell of the dense row must still resolve to a real
@@ -13156,7 +15114,7 @@ test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{x});
         try testing.expectEqualStrings(uri, link.uri.slice(page.memory));
     }
 
@@ -13169,7 +15127,7 @@ test "PageList clone" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -13184,7 +15142,7 @@ test "PageList clone partial trimmed right" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 20, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 20 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
     try s.growRows(30);
@@ -13201,7 +15159,7 @@ test "PageList clone partial trimmed left" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 20, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 20 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
     try s.growRows(30);
@@ -13217,7 +15175,7 @@ test "PageList clone partial trimmed left reclaims styles" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 20, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 20 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
     try s.growRows(30);
@@ -13236,7 +15194,7 @@ test "PageList clone partial trimmed left reclaims styles" {
             rac.row.styled = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
                 .style_id = style_id,
             };
             page.styles.use(page.memory, style_id);
@@ -13266,7 +15224,7 @@ test "PageList clone partial trimmed both" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 20, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 20 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
     try s.growRows(30);
@@ -13283,7 +15241,7 @@ test "PageList clone less than active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -13296,7 +15254,7 @@ test "PageList clone less than active" {
 
 test "PageList clone less than active on a narrower page" {
     const alloc = std.testing.allocator;
-    var s = try init(alloc, 4, 3, null);
+    var s = try init(alloc, .{ .cols = 4, .rows = 3 });
     defer s.deinit();
     s.pages.first.?.page().size.cols = 2;
 
@@ -13310,7 +15268,7 @@ test "PageList clone remap tracked pin" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -13338,7 +15296,7 @@ test "PageList clone remap tracked pin not in cloned area" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -13362,7 +15320,7 @@ test "PageList clone full dirty" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, s.rows), s.totalRows());
 
@@ -13389,7 +15347,7 @@ test "PageList resize (no reflow) more rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 3, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 3), s.totalRows());
 
@@ -13422,7 +15380,7 @@ test "PageList resize (no reflow) more rows with history" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 3, null);
+    var s = try init(alloc, .{ .cols = 10, .rows = 3 });
     defer s.deinit();
     try s.growRows(50);
     {
@@ -13461,7 +15419,7 @@ test "PageList resize (no reflow) less rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 10), s.totalRows());
 
@@ -13474,7 +15432,7 @@ test "PageList resize (no reflow) less rows" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -13495,7 +15453,7 @@ test "PageList resize (no reflow) one rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 10), s.totalRows());
 
@@ -13508,7 +15466,7 @@ test "PageList resize (no reflow) one rows" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -13529,7 +15487,7 @@ test "PageList resize (no reflow) less rows cursor on bottom" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 10), s.totalRows());
 
@@ -13542,7 +15500,7 @@ test "PageList resize (no reflow) less rows cursor on bottom" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast(y) },
+            .content = .{ .codepoint = .{ .data = @intCast(y) } },
         };
     }
 
@@ -13555,7 +15513,7 @@ test "PageList resize (no reflow) less rows cursor on bottom" {
             .x = cursor.x,
             .y = cursor.y,
         } }).?;
-        try testing.expectEqual(@as(u21, 9), get.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 9), get.cell.content.codepoint.data);
     }
 
     // Resize
@@ -13581,7 +15539,7 @@ test "PageList resize (no reflow) less rows cursor in scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 10), s.totalRows());
 
@@ -13594,7 +15552,7 @@ test "PageList resize (no reflow) less rows cursor in scrollback" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast(y) },
+            .content = .{ .codepoint = .{ .data = @intCast(y) } },
         };
     }
 
@@ -13607,7 +15565,7 @@ test "PageList resize (no reflow) less rows cursor in scrollback" {
             .x = cursor.x,
             .y = cursor.y,
         } }).?;
-        try testing.expectEqual(@as(u21, 2), get.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 2), get.cell.content.codepoint.data);
     }
 
     // Resize
@@ -13635,7 +15593,7 @@ test "PageList resize (no reflow) less rows trims blank lines" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 5, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -13645,7 +15603,7 @@ test "PageList resize (no reflow) less rows trims blank lines" {
         const rac = page.getRowAndCell(0, 0);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -13667,7 +15625,7 @@ test "PageList resize (no reflow) less rows trims blank lines" {
             .x = cursor.x,
             .y = cursor.y,
         } }).?;
-        try testing.expectEqual(@as(u21, 'A'), get.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 'A'), get.cell.content.codepoint.data);
     }
 
     // Resize
@@ -13694,7 +15652,7 @@ test "PageList resize (no reflow) less rows trims blank lines cursor in blank li
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 5, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -13704,7 +15662,7 @@ test "PageList resize (no reflow) less rows trims blank lines cursor in blank li
         const rac = page.getRowAndCell(0, 0);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -13737,7 +15695,7 @@ test "PageList resize (no reflow) less rows trims blank lines erases pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 100, 5, 0);
+    var s = try init(alloc, .{ .cols = 100, .rows = 5, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -13754,7 +15712,7 @@ test "PageList resize (no reflow) less rows trims blank lines erases pages" {
         const rac = page.getRowAndCell(0, 0);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -13770,7 +15728,7 @@ test "PageList resize (no reflow) more rows extends blank lines" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 3, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -13780,7 +15738,7 @@ test "PageList resize (no reflow) more rows extends blank lines" {
         const rac = page.getRowAndCell(0, 0);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
 
@@ -13813,7 +15771,7 @@ test "PageList resize (no reflow) more rows contains viewport" {
     // When the rows are increased we need to make sure that the viewport
     // doesn't end up below the active area if it's currently in pin mode.
 
-    var s = try init(alloc, 5, 5, 1);
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_size = 1 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
 
@@ -13842,7 +15800,7 @@ test "PageList resize (no reflow) less cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Resize
@@ -13862,7 +15820,7 @@ test "PageList resize (no reflow) less cols pin in trimmed cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Put a tracked pin in the history
@@ -13891,7 +15849,7 @@ test "PageList resize (no reflow) less cols clears graphemes" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Add a grapheme.
@@ -13900,7 +15858,7 @@ test "PageList resize (no reflow) less cols clears graphemes" {
         const rac = page.getRowAndCell(9, 0);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
         try page.appendGrapheme(rac.row, rac.cell, 'A');
     }
@@ -13921,7 +15879,7 @@ test "PageList resize (no reflow) more cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, 0);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3, .max_size = 0 });
     defer s.deinit();
 
     // Resize
@@ -13941,7 +15899,7 @@ test "PageList resize (no reflow) more cols with spacer head" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 3, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 3, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -13952,14 +15910,14 @@ test "PageList resize (no reflow) more cols with spacer head" {
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_head,
             };
         }
@@ -13967,7 +15925,7 @@ test "PageList resize (no reflow) more cols with spacer head" {
             const rac = page.getRowAndCell(0, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -13975,7 +15933,7 @@ test "PageList resize (no reflow) more cols with spacer head" {
             const rac = page.getRowAndCell(1, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -13992,18 +15950,18 @@ test "PageList resize (no reflow) more cols with spacer head" {
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
             // try testing.expect(!rac.row.wrap);
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(2, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
     }
@@ -14018,7 +15976,7 @@ test "PageList resize (no reflow) grow cols fast path with spacer head" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 3, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 3, .max_size = 0 });
     defer s.deinit();
 
     // Shrink to 5 cols. The page keeps capacity for 10 cols.
@@ -14035,14 +15993,14 @@ test "PageList resize (no reflow) grow cols fast path with spacer head" {
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(4, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_head,
             };
             rac.row.wrap = true;
@@ -14053,7 +16011,7 @@ test "PageList resize (no reflow) grow cols fast path with spacer head" {
             const rac = page.getRowAndCell(4, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_head,
             };
             rac.row.wrap = true;
@@ -14097,7 +16055,7 @@ test "PageList resize (no reflow) more cols forces less rows per page" {
     const cols: size.CellCountInt = 5;
     const rows: size.CellCountInt = 150;
     try testing.expect((try std_capacity.adjust(.{ .cols = cols })).rows >= rows);
-    var s = try init(alloc, cols, rows, 0);
+    var s = try init(alloc, .{ .cols = cols, .rows = rows, .max_size = 0 });
     defer s.deinit();
 
     // Then we need to resize our cols so that our rows per page shrinks.
@@ -14162,7 +16120,7 @@ test "PageList resize (no reflow) less cols then more cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, 0);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3, .max_size = 0 });
     defer s.deinit();
 
     // Resize less
@@ -14186,7 +16144,7 @@ test "PageList resize (no reflow) less rows and cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Resize less
@@ -14206,7 +16164,7 @@ test "PageList resize less rows and cols cursor at bottom" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     const cursor_pin = try s.trackPin(s.pin(.{ .active = .{
@@ -14237,7 +16195,7 @@ test "PageList resize less rows and cols cursor near top pushed to scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Fill every active row with non-blank content so that shrinking rows
@@ -14250,7 +16208,7 @@ test "PageList resize less rows and cols cursor near top pushed to scrollback" {
             const cells = p.node.page().getCells(rac.row);
             for (cells, 0..) |*cell, x| cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast('A' + (x % 26)) },
+                .content = .{ .codepoint = .{ .data = @intCast('A' + (x % 26)) } },
             };
         }
     }
@@ -14289,7 +16247,7 @@ test "PageList resize (no reflow) more rows and less cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Resize less
@@ -14310,7 +16268,7 @@ test "PageList resize more rows and cols doesn't fit in single std page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Resize to a size that requires more than one page to fit our rows.
@@ -14329,7 +16287,7 @@ test "PageList resize (no reflow) empty screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 5, 0);
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_size = 0 });
     defer s.deinit();
 
     // Resize
@@ -14357,7 +16315,7 @@ test "PageList resize (no reflow) more cols forces smaller cap" {
     try testing.expect(cap2.rows < cap.rows);
 
     // Create initial cap, fits in one page
-    var s = try init(alloc, cap.cols, cap.rows, null);
+    var s = try init(alloc, .{ .cols = cap.cols, .rows = cap.rows });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -14366,7 +16324,7 @@ test "PageList resize (no reflow) more cols forces smaller cap" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
             };
         }
     }
@@ -14382,7 +16340,7 @@ test "PageList resize (no reflow) more cols forces smaller cap" {
         const rac = offset.rowAndCell();
         const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, cap2.cols), cells.len);
-        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint.data);
     }
 }
 
@@ -14390,7 +16348,7 @@ test "PageList resize (no reflow) more rows adds blank rows if cursor at bottom"
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, null);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3 });
     defer s.deinit();
 
     // Grow to 5 total rows, simulating 3 active + 2 scrollback
@@ -14401,7 +16359,7 @@ test "PageList resize (no reflow) more rows adds blank rows if cursor at bottom"
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast(y) },
+            .content = .{ .codepoint = .{ .data = @intCast(y) } },
         };
     }
 
@@ -14423,7 +16381,7 @@ test "PageList resize (no reflow) more rows adds blank rows if cursor at bottom"
             .x = original_cursor.x,
             .y = original_cursor.y,
         } }).?;
-        try testing.expectEqual(@as(u21, 3), get.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 3), get.cell.content.codepoint.data);
     }
 
     // Resize
@@ -14455,7 +16413,7 @@ test "PageList resize (no reflow) more rows adds blank rows if cursor at bottom"
     for (0..3) |y| {
         const get = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
         const expected: u21 = @intCast(y + 2);
-        try testing.expectEqual(expected, get.cell.content.codepoint);
+        try testing.expectEqual(expected, get.cell.content.codepoint.data);
     }
 }
 
@@ -14466,7 +16424,11 @@ test "PageList resize reflow from max cols to narrow" {
     // A max-width page is large enough that narrowing it to 2 columns
     // frees memory for more rows than a page can hold. The resize must
     // cap the row count instead of overflowing it.
-    var s = try init(alloc, std.math.maxInt(size.CellCountInt), 1, 0);
+    var s = try init(alloc, .{
+        .cols = std.math.maxInt(size.CellCountInt),
+        .rows = 1,
+        .max_size = 0,
+    });
     defer s.deinit();
 
     try s.resize(.{ .cols = 2, .reflow = true });
@@ -14478,7 +16440,7 @@ test "PageList resize reflow more cols no wrapped rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, 0);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -14487,7 +16449,7 @@ test "PageList resize reflow more cols no wrapped rows" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
             };
         }
     }
@@ -14502,7 +16464,7 @@ test "PageList resize reflow more cols no wrapped rows" {
         const rac = offset.rowAndCell();
         const cells = offset.node.page().getCells(rac.row);
         try testing.expectEqual(@as(usize, 10), cells.len);
-        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint.data);
     }
 }
 
@@ -14510,7 +16472,7 @@ test "PageList resize reflow more cols wrapped rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -14527,7 +16489,7 @@ test "PageList resize reflow more cols wrapped rows" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
             };
         }
     }
@@ -14554,8 +16516,8 @@ test "PageList resize reflow more cols wrapped rows" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 4), cells.len);
-        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
-        try testing.expectEqual(@as(u21, 'A'), cells[2].content.codepoint);
+        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 'A'), cells[2].content.codepoint.data);
     }
 }
 
@@ -14563,7 +16525,7 @@ test "PageList resize reflow invalidates viewport offset cache" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, null);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4 });
     defer s.deinit();
     try s.growRows(20);
 
@@ -14581,7 +16543,7 @@ test "PageList resize reflow invalidates viewport offset cache" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
             };
         }
     }
@@ -14623,7 +16585,7 @@ test "PageList resize reflow more cols creates multiple pages" {
         unreachable;
     };
 
-    var s = try init(alloc, cap.cols, cap.rows, null);
+    var s = try init(alloc, .{ .cols = cap.cols, .rows = cap.rows });
     defer s.deinit();
 
     // Wrap every other row so every line is wrapped for reflow
@@ -14642,7 +16604,7 @@ test "PageList resize reflow more cols creates multiple pages" {
             const rac = page.getRowAndCell(0, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
             };
         }
     }
@@ -14676,7 +16638,7 @@ test "PageList resize reflow more cols wrap across page boundary" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 10, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -14706,7 +16668,7 @@ test "PageList resize reflow more cols wrap across page boundary" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -14721,7 +16683,7 @@ test "PageList resize reflow more cols wrap across page boundary" {
             const rac = page2.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -14796,10 +16758,10 @@ test "PageList resize reflow more cols wrap across page boundary" {
         try testing.expect(!row.wrap_continuation);
 
         const cells = p.cells(.all);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
-        try testing.expectEqual(@as(u21, 1), cells[1].content.codepoint);
-        try testing.expectEqual(@as(u21, 0), cells[2].content.codepoint);
-        try testing.expectEqual(@as(u21, 1), cells[3].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 1), cells[1].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 0), cells[2].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 1), cells[3].content.codepoint.data);
     }
 }
 
@@ -14807,7 +16769,7 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 10, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -14837,7 +16799,7 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -14852,7 +16814,7 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
             const rac = page2.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -14882,10 +16844,10 @@ test "PageList resize reflow more cols wrap across page boundary cursor in secon
         try testing.expect(!row.wrap);
 
         const cells = p2.cells(.all);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
-        try testing.expectEqual(@as(u21, 1), cells[1].content.codepoint);
-        try testing.expectEqual(@as(u21, 0), cells[2].content.codepoint);
-        try testing.expectEqual(@as(u21, 1), cells[3].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 1), cells[1].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 0), cells[2].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 1), cells[3].content.codepoint.data);
     }
 }
 
@@ -14893,7 +16855,7 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 10, null);
+    var s = try init(alloc, .{ .cols = 5, .rows = 10 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -14923,7 +16885,7 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -14938,7 +16900,7 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
             const rac = page2.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15024,10 +16986,10 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
         try testing.expect(!row.wrap_continuation);
 
         const cells = p2.cells(.all);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
-        try testing.expectEqual(@as(u21, 1), cells[1].content.codepoint);
-        try testing.expectEqual(@as(u21, 2), cells[2].content.codepoint);
-        try testing.expectEqual(@as(u21, 3), cells[3].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 1), cells[1].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 2), cells[2].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 3), cells[3].content.codepoint.data);
     }
     {
         // PAGE 0 ROW 7897, ACTIVE 5
@@ -15037,10 +16999,10 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
         try testing.expect(row.wrap_continuation);
 
         const cells = p2.cells(.all);
-        try testing.expectEqual(@as(u21, 4), cells[0].content.codepoint);
-        try testing.expectEqual(@as(u21, 0), cells[1].content.codepoint);
-        try testing.expectEqual(@as(u21, 1), cells[2].content.codepoint);
-        try testing.expectEqual(@as(u21, 2), cells[3].content.codepoint);
+        try testing.expectEqual(@as(u21, 4), cells[0].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 0), cells[1].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 1), cells[2].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 2), cells[3].content.codepoint.data);
     }
     {
         // PAGE 0 ROW 7898, ACTIVE 6
@@ -15050,8 +17012,8 @@ test "PageList resize reflow less cols wrap across page boundary cursor in secon
         try testing.expect(row.wrap_continuation);
 
         const cells = p2.cells(.all);
-        try testing.expectEqual(@as(u21, 3), cells[0].content.codepoint);
-        try testing.expectEqual(@as(u21, 4), cells[1].content.codepoint);
+        try testing.expectEqual(@as(u21, 3), cells[0].content.codepoint.data);
+        try testing.expectEqual(@as(u21, 4), cells[1].content.codepoint.data);
     }
     {
         // PAGE 0 ROW 7899, ACTIVE 7
@@ -15072,7 +17034,7 @@ test "PageList resize reflow more cols cursor in wrapped row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -15085,7 +17047,7 @@ test "PageList resize reflow more cols cursor in wrapped row" {
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15098,7 +17060,7 @@ test "PageList resize reflow more cols cursor in wrapped row" {
             const rac = page.getRowAndCell(x, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15123,7 +17085,7 @@ test "PageList resize reflow more cols cursor in not wrapped row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -15136,7 +17098,7 @@ test "PageList resize reflow more cols cursor in not wrapped row" {
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15149,7 +17111,7 @@ test "PageList resize reflow more cols cursor in not wrapped row" {
             const rac = page.getRowAndCell(x, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15174,7 +17136,7 @@ test "PageList resize reflow more cols cursor in wrapped row that isn't unwrappe
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -15187,7 +17149,7 @@ test "PageList resize reflow more cols cursor in wrapped row that isn't unwrappe
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15201,7 +17163,7 @@ test "PageList resize reflow more cols cursor in wrapped row that isn't unwrappe
             const rac = page.getRowAndCell(x, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15214,7 +17176,7 @@ test "PageList resize reflow more cols cursor in wrapped row that isn't unwrappe
             const rac = page.getRowAndCell(x, 2);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -15239,7 +17201,7 @@ test "PageList resize reflow more cols no reflow preserves semantic prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 4, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 4, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -15265,7 +17227,7 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 10, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -15307,15 +17269,16 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
     // Mark the final row as wrapped.
     {
         const page = s.pages.first.?.page();
+        const uri: [pagepkg.string_bytes_default - 1]u8 = @splat('a');
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 0 },
-            .uri = "a" ** (pagepkg.string_bytes_default - 1),
+            .uri = &uri,
         });
         const rac = page.getRowAndCell(page.size.cols - 1, page.size.rows - 1);
         rac.row.wrap = true;
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'X' },
+            .content = .{ .codepoint = .{ .data = 'X' } },
         };
         try page.setHyperlink(rac.row, rac.cell, id);
         try std.testing.expectError(
@@ -15331,15 +17294,16 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
     // Mark the first row as a wrap continuation.
     {
         const page = s.pages.last.?.page();
+        const uri: [pagepkg.string_bytes_default - 1]u8 = @splat('a');
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 1 },
-            .uri = "a" ** (pagepkg.string_bytes_default - 1),
+            .uri = &uri,
         });
         const rac = page.getRowAndCell(0, 0);
         rac.row.wrap_continuation = true;
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'X' },
+            .content = .{ .codepoint = .{ .data = 'X' } },
         };
         try page.setHyperlink(rac.row, rac.cell, id);
         try std.testing.expectError(
@@ -15359,7 +17323,7 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 10, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -15405,9 +17369,9 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     //  …B | <- B is hyperlinked with a 33-byte URI and 31-byte ID.
     //  +--+
 
-    const uri_a = "a" ** (pagepkg.string_bytes_default - 64);
-    const uri_b = "b" ** 33;
-    const id_b = "i" ** 31;
+    const uri_a: [pagepkg.string_bytes_default - 64]u8 = @splat('a');
+    const uri_b: [33]u8 = @splat('b');
+    const id_b: [31]u8 = @splat('i');
 
     // Hyperlink A in the bottom right of the first page. Mark the final
     // row as wrapped.
@@ -15415,13 +17379,13 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
         const page = s.pages.first.?.page();
         const id = try page.insertHyperlink(.{
             .id = .{ .implicit = 0 },
-            .uri = uri_a,
+            .uri = &uri_a,
         });
         const rac = page.getRowAndCell(page.size.cols - 1, page.size.rows - 1);
         rac.row.wrap = true;
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
         try page.setHyperlink(rac.row, rac.cell, id);
 
@@ -15433,8 +17397,8 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
         try std.testing.expectError(
             error.StringsOutOfMemory,
             page.insertHyperlink(.{
-                .id = .{ .explicit = id_b },
-                .uri = uri_b,
+                .id = .{ .explicit = &id_b },
+                .uri = &uri_b,
             }),
         );
     }
@@ -15444,14 +17408,14 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
     {
         const page = s.pages.last.?.page();
         const id = try page.insertHyperlink(.{
-            .id = .{ .explicit = id_b },
-            .uri = uri_b,
+            .id = .{ .explicit = &id_b },
+            .uri = &uri_b,
         });
         const rac = page.getRowAndCell(0, 0);
         rac.row.wrap_continuation = true;
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'B' },
+            .content = .{ .codepoint = .{ .data = 'B' } },
         };
         try page.setHyperlink(rac.row, rac.cell, id);
     }
@@ -15474,11 +17438,11 @@ test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
                 const entry = page.hyperlink_set.get(page.memory, link_id);
                 const uri = entry.uri.slice(page.memory);
                 switch (entry.id) {
-                    .implicit => try testing.expectEqualStrings(uri_a, uri),
+                    .implicit => try testing.expectEqualStrings(&uri_a, uri),
                     .explicit => |slice| {
-                        try testing.expectEqualStrings(uri_b, uri);
+                        try testing.expectEqualStrings(&uri_b, uri);
                         try testing.expectEqualStrings(
-                            id_b,
+                            &id_b,
                             slice.slice(page.memory),
                         );
                     },
@@ -15493,7 +17457,7 @@ test "PageList resize reflow exceeds grapheme memory forcing capacity increase" 
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 10, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -15587,7 +17551,7 @@ test "PageList resize reflow exceeds style memory forcing capacity increase" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, pagepkg.std_capacity.styles - 1, 10, 0);
+    var s = try init(alloc, .{ .cols = pagepkg.std_capacity.styles - 1, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -15630,7 +17594,7 @@ test "PageList resize reflow exceeds style memory forcing capacity increase" {
             rac.row.styled = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'X' },
+                .content = .{ .codepoint = .{ .data = 'X' } },
                 .style_id = id,
             };
         }
@@ -15657,7 +17621,7 @@ test "PageList resize reflow exceeds style memory forcing capacity increase" {
             rac.row.styled = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'X' },
+                .content = .{ .codepoint = .{ .data = 'X' } },
                 .style_id = id,
             };
         }
@@ -15671,7 +17635,7 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -15682,14 +17646,14 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_head,
             };
         }
@@ -15698,7 +17662,7 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
             rac.row.wrap_continuation = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -15706,7 +17670,7 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
             const rac = page.getRowAndCell(1, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -15723,18 +17687,18 @@ test "PageList resize reflow more cols unwrap wide spacer head" {
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
             try testing.expect(!rac.row.wrap);
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(2, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
         }
     }
@@ -15744,7 +17708,7 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 3, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 3, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -15755,14 +17719,14 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
@@ -15771,14 +17735,14 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_head,
             };
         }
@@ -15787,7 +17751,7 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
             rac.row.wrap_continuation = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -15795,7 +17759,7 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
             const rac = page.getRowAndCell(1, 2);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -15812,33 +17776,33 @@ test "PageList resize reflow more cols unwrap wide spacer head across two rows" 
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
             try testing.expect(rac.row.wrap);
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(2, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(3, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_head, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(0, 1);
-            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(1, 1);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
         }
     }
@@ -15848,7 +17812,7 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 2, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -15859,14 +17823,14 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
@@ -15874,7 +17838,7 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
             rac.row.wrap_continuation = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -15882,7 +17846,7 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
             const rac = page.getRowAndCell(1, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -15899,28 +17863,28 @@ test "PageList resize reflow more cols unwrap still requires wide spacer head" {
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
             try testing.expect(rac.row.wrap);
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(2, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_head, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(0, 1);
-            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(1, 1);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
         }
     }
@@ -15929,7 +17893,7 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 4, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 4, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -15942,7 +17906,7 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt" {
             const rac = page.getRowAndCell(x, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16083,7 +18047,7 @@ test "PageList resize reflow semantic prompt marks" {
     };
 
     for (cases) |case| {
-        var s = try init(alloc, case.cols, 4, 0);
+        var s = try init(alloc, .{ .cols = case.cols, .rows = 4, .max_size = 0 });
         defer s.deinit();
         const page = s.pages.first.?.page();
         for (case.rows, 0..) |src, y| {
@@ -16109,7 +18073,7 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt on fi
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 4, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 4, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -16135,7 +18099,7 @@ test "PageList resize reflow less cols wrap preserves semantic prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 4, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 4, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -16161,7 +18125,7 @@ test "PageList resize reflow less cols no wrapped rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 3, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16172,7 +18136,7 @@ test "PageList resize reflow less cols no wrapped rows" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16190,7 +18154,7 @@ test "PageList resize reflow less cols no wrapped rows" {
             const rac = offset_copy.rowAndCell();
             const cells = offset.node.page().getCells(rac.row);
             try testing.expectEqual(@as(usize, 5), cells.len);
-            try testing.expectEqual(@as(u21, @intCast(x)), cells[x].content.codepoint);
+            try testing.expectEqual(@as(u21, @intCast(x)), cells[x].content.codepoint.data);
         }
     }
 }
@@ -16199,7 +18163,7 @@ test "PageList resize reflow less cols wrapped rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, null);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16208,7 +18172,7 @@ test "PageList resize reflow less cols wrapped rows" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16235,7 +18199,7 @@ test "PageList resize reflow less cols wrapped rows" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16243,7 +18207,7 @@ test "PageList resize reflow less cols wrapped rows" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint.data);
     }
     {
         // First row should be wrapped
@@ -16252,7 +18216,7 @@ test "PageList resize reflow less cols wrapped rows" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16260,7 +18224,7 @@ test "PageList resize reflow less cols wrapped rows" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint.data);
     }
 }
 
@@ -16268,7 +18232,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, null);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -16278,7 +18242,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
                 const rac = page.getRowAndCell(x, y);
                 rac.cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = @intCast(x) },
+                    .content = .{ .codepoint = .{ .data = @intCast(x) } },
                 };
             }
 
@@ -16311,7 +18275,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16320,7 +18284,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
         try testing.expect(!rac.row.wrap);
         try testing.expect(rac.row.grapheme);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint.data);
 
         const cps = page.lookupGrapheme(rac.cell).?;
         try testing.expectEqual(@as(usize, 1), cps.len);
@@ -16333,7 +18297,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16342,7 +18306,7 @@ test "PageList resize reflow less cols wrapped rows with graphemes" {
         try testing.expect(!rac.row.wrap);
         try testing.expect(rac.row.grapheme);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint.data);
 
         const cps = page.lookupGrapheme(rac.cell).?;
         try testing.expectEqual(@as(usize, 1), cps.len);
@@ -16354,7 +18318,7 @@ test "PageList resize reflow less cols cursor in wrapped row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, null);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16363,7 +18327,7 @@ test "PageList resize reflow less cols cursor in wrapped row" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16388,7 +18352,7 @@ test "PageList resize reflow less cols wraps spacer head" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 3, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 3, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -16399,28 +18363,28 @@ test "PageList resize reflow less cols wraps spacer head" {
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(2, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(3, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_head,
             };
         }
@@ -16429,7 +18393,7 @@ test "PageList resize reflow less cols wraps spacer head" {
             rac.row.wrap_continuation = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -16437,7 +18401,7 @@ test "PageList resize reflow less cols wraps spacer head" {
             const rac = page.getRowAndCell(1, 1);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -16454,28 +18418,28 @@ test "PageList resize reflow less cols wraps spacer head" {
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
             try testing.expect(rac.row.wrap);
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(2, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(0, 1);
-            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(1, 1);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
         }
     }
@@ -16484,7 +18448,7 @@ test "PageList resize reflow less cols cursor goes to scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, null);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16493,7 +18457,7 @@ test "PageList resize reflow less cols cursor goes to scrollback" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16515,7 +18479,7 @@ test "PageList resize reflow less cols cursor in unchanged row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, null);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16524,7 +18488,7 @@ test "PageList resize reflow less cols cursor in unchanged row" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16549,7 +18513,7 @@ test "PageList resize reflow less cols cursor in blank cell" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 6, 2, null);
+    var s = try init(alloc, .{ .cols = 6, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16558,7 +18522,7 @@ test "PageList resize reflow less cols cursor in blank cell" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16583,7 +18547,7 @@ test "PageList resize reflow less cols cursor in final blank cell" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 6, 2, null);
+    var s = try init(alloc, .{ .cols = 6, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16592,7 +18556,7 @@ test "PageList resize reflow less cols cursor in final blank cell" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16633,21 +18597,21 @@ test "PageList resize reflow pin in blank cells after line break" {
     };
 
     for (cases) |case| {
-        var s = try init(alloc, 6, 4, null);
+        var s = try init(alloc, .{ .cols = 6, .rows = 4 });
         defer s.deinit();
         const page = s.pages.first.?.page();
         page.getRow(0).wrap = case.wrap;
         for (case.first, 0..) |cp, x| {
             page.getRowAndCell(x, 0).cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = cp },
+                .content = .{ .codepoint = .{ .data = cp } },
             };
         }
         const rac = page.getRowAndCell(0, 1);
         rac.row.wrap_continuation = case.wrap;
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'g' },
+            .content = .{ .codepoint = .{ .data = 'g' } },
         };
 
         const p = try s.trackPin(s.pin(.{ .active = .{
@@ -16669,7 +18633,7 @@ test "PageList resize reflow less cols cursor in wrapped blank cell" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 6, 2, null);
+    var s = try init(alloc, .{ .cols = 6, .rows = 2 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16678,7 +18642,7 @@ test "PageList resize reflow less cols cursor in wrapped blank cell" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16703,7 +18667,7 @@ test "PageList resize reflow less cols blank lines" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 3, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16712,7 +18676,7 @@ test "PageList resize reflow less cols blank lines" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16730,7 +18694,7 @@ test "PageList resize reflow less cols blank lines" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16738,7 +18702,7 @@ test "PageList resize reflow less cols blank lines" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint.data);
     }
 }
 
@@ -16746,7 +18710,7 @@ test "PageList resize reflow less cols blank lines between" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 3, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16755,7 +18719,7 @@ test "PageList resize reflow less cols blank lines between" {
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16764,7 +18728,7 @@ test "PageList resize reflow less cols blank lines between" {
             const rac = page.getRowAndCell(x, 2);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16786,7 +18750,7 @@ test "PageList resize reflow less cols blank lines between" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16794,7 +18758,7 @@ test "PageList resize reflow less cols blank lines between" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 2), cells[0].content.codepoint.data);
     }
 }
 
@@ -16802,7 +18766,7 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 3, 0);
+    var s = try init(alloc, .{ .cols = 5, .rows = 3, .max_size = 0 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16810,14 +18774,14 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
         const rac = page.getRowAndCell(0, 0);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'A' },
+            .content = .{ .codepoint = .{ .data = 'A' } },
         };
     }
     {
         const rac = page.getRowAndCell(0, 2);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'C' },
+            .content = .{ .codepoint = .{ .data = 'C' } },
         };
     }
 
@@ -16833,13 +18797,13 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 'A'), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
         const rac = offset.rowAndCell();
         const cells = offset.node.page().getCells(rac.row);
-        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 0), cells[0].content.codepoint.data);
     }
     {
         const offset = it.next().?;
@@ -16847,7 +18811,7 @@ test "PageList resize reflow less cols blank lines between no scrollback" {
         const cells = offset.node.page().getCells(rac.row);
         try testing.expect(!rac.row.wrap);
         try testing.expectEqual(@as(usize, 2), cells.len);
-        try testing.expectEqual(@as(u21, 'C'), cells[0].content.codepoint);
+        try testing.expectEqual(@as(u21, 'C'), cells[0].content.codepoint.data);
     }
 }
 
@@ -16855,7 +18819,7 @@ test "PageList resize reflow less cols cursor not on last line preserves locatio
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 5, 1);
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_size = 1 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -16864,7 +18828,7 @@ test "PageList resize reflow less cols cursor not on last line preserves locatio
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -16899,7 +18863,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 4, null);
+    var s = try init(alloc, .{ .cols = 10, .rows = 4 });
     defer s.deinit();
 
     // Enough rows for a second page, the last of them styled and wrapped
@@ -16917,7 +18881,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
             rac.row.wrap = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
                 .style_id = id,
             };
             page.styles.use(page.memory, id);
@@ -16934,7 +18898,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
         doomed_rac.row.styled = true;
         doomed_rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'y' },
+            .content = .{ .codepoint = .{ .data = 'y' } },
             .style_id = first_id,
         };
         const end_row = first.getRow(first.size.rows - 2);
@@ -16975,7 +18939,7 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
 
 test "PageList resize preserves populated rows when shrinking with a coordinate-only cursor" {
     const testing = std.testing;
-    var s = try init(testing.allocator, 4, 3, null);
+    var s = try init(testing.allocator, .{ .cols = 4, .rows = 3 });
     defer s.deinit();
 
     for ("ABC", 0..) |mark, y| {
@@ -16989,9 +18953,9 @@ test "PageList resize preserves populated rows when shrinking with a coordinate-
         .cursor = .{ .x = 0, .y = 0 },
     });
 
-    try testing.expectEqual(@as(u21, 'A'), s.getCell(.{ .history = .{} }).?.cell.content.codepoint);
-    try testing.expectEqual(@as(u21, 'B'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint);
-    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{ .y = 1 } }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'A'), s.getCell(.{ .history = .{} }).?.cell.content.codepoint.data);
+    try testing.expectEqual(@as(u21, 'B'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint.data);
+    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{ .y = 1 } }).?.cell.content.codepoint.data);
 }
 
 test "PageList resize keeps a coordinate-only cursor when height growth prunes history" {
@@ -16999,7 +18963,7 @@ test "PageList resize keeps a coordinate-only cursor when height growth prunes h
 
     // Fill two pages, so adding a row at the byte limit recycles the
     // first history page and changes the cursor's screen-relative row.
-    var s = try init(testing.allocator, 8, 4, 2 * std_size);
+    var s = try init(testing.allocator, .{ .cols = 8, .rows = 4, .max_size = 2 * std_size });
     defer s.deinit();
     const page_rows = s.pages.first.?.capacity().rows;
     try s.growRows(2 * @as(usize, page_rows) - s.rows);
@@ -17026,7 +18990,7 @@ test "PageList resize keeps a coordinate-only cursor when height growth prunes h
         .cursor = .{ .x = 0, .y = 0 },
     });
     try testing.expect(history.garbage);
-    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint.data);
     try testing.expectEqual(@as(usize, 2), s.countTrackedPins());
 }
 
@@ -17034,7 +18998,7 @@ test "PageList resize reflow less cols no scrollback pull blank active" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 5, 5, 1);
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_size = 1 });
     defer s.deinit();
     try testing.expect(s.pages.first == s.pages.last);
     const page = s.pages.first.?.page();
@@ -17043,7 +19007,7 @@ test "PageList resize reflow less cols no scrollback pull blank active" {
             const rac = page.getRowAndCell(x, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
             };
         }
     }
@@ -17076,7 +19040,7 @@ test "PageList resize reflow less cols copy style" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17090,7 +19054,7 @@ test "PageList resize reflow less cols copy style" {
             const rac = page.getRowAndCell(x, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = @intCast(x) },
+                .content = .{ .codepoint = .{ .data = @intCast(x) } },
                 .style_id = style_id,
             };
             page.styles.use(page.memory, style_id);
@@ -17130,7 +19094,7 @@ test "PageList resize reflow less cols to eliminate a wide char" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 1, 0);
+    var s = try init(alloc, .{ .cols = 2, .rows = 1, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17140,7 +19104,7 @@ test "PageList resize reflow less cols to eliminate a wide char" {
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -17148,7 +19112,7 @@ test "PageList resize reflow less cols to eliminate a wide char" {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -17165,7 +19129,7 @@ test "PageList resize reflow less cols to eliminate a wide char" {
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
     }
@@ -17175,7 +19139,7 @@ test "PageList resize reflow less cols to wrap a wide char" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 3, 1, 0);
+    var s = try init(alloc, .{ .cols = 3, .rows = 1, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17185,14 +19149,14 @@ test "PageList resize reflow less cols to wrap a wide char" {
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'x' },
+                .content = .{ .codepoint = .{ .data = 'x' } },
             };
         }
         {
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = '😀' },
+                .content = .{ .codepoint = .{ .data = '😀' } },
                 .wide = .wide,
             };
         }
@@ -17200,7 +19164,7 @@ test "PageList resize reflow less cols to wrap a wide char" {
             const rac = page.getRowAndCell(2, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -17217,24 +19181,388 @@ test "PageList resize reflow less cols to wrap a wide char" {
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
             try testing.expect(rac.row.wrap);
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_head, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(0, 1);
-            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, '😀'), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(1, 1);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
+        }
+    }
+}
+
+test "PageList resize reflow less cols wide char bulk run" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 8, .rows = 1, .max_size = 0 });
+    defer s.deinit();
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        // A full row of wide character pairs so the reflow takes
+        // the bulk run path.
+        for (0..4) |i| {
+            {
+                const rac = page.getRowAndCell(i * 2, 0);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = @intCast(0x4E00 + i) } },
+                    .wide = .wide,
+                };
+            }
+            {
+                const rac = page.getRowAndCell(i * 2 + 1, 0);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = 0 } },
+                    .wide = .spacer_tail,
+                };
+            }
+        }
+    }
+
+    // Resize to exactly two pairs per row: runs end on the row
+    // boundary with no spacer heads needed.
+    try s.resize(.{ .cols = 4, .reflow = true });
+    try testing.expectEqual(@as(usize, 4), s.cols);
+    try testing.expectEqual(@as(usize, 2), s.totalRows());
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        for (0..4) |i| {
+            const y = i / 2;
+            const x = (i % 2) * 2;
+            {
+                const rac = page.getRowAndCell(x, y);
+                try testing.expectEqual(
+                    @as(u21, @intCast(0x4E00 + i)),
+                    rac.cell.content.codepoint.data,
+                );
+                try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
+            }
+            {
+                const rac = page.getRowAndCell(x + 1, y);
+                try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
+                try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
+            }
+        }
+
+        {
+            const rac = page.getRowAndCell(0, 0);
+            try testing.expect(rac.row.wrap);
+            try testing.expect(!rac.row.wrap_continuation);
+        }
+        {
+            const rac = page.getRowAndCell(0, 1);
+            try testing.expect(!rac.row.wrap);
+            try testing.expect(rac.row.wrap_continuation);
+        }
+    }
+}
+
+test "PageList resize reflow less cols wide char bulk run odd cols spacer head" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 8, .rows = 1, .max_size = 0 });
+    defer s.deinit();
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        for (0..4) |i| {
+            {
+                const rac = page.getRowAndCell(i * 2, 0);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = @intCast(0x4E00 + i) } },
+                    .wide = .wide,
+                };
+            }
+            {
+                const rac = page.getRowAndCell(i * 2 + 1, 0);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = 0 } },
+                    .wide = .spacer_tail,
+                };
+            }
+        }
+    }
+
+    // Resize to an odd number of columns: the bulk run must stop a
+    // pair short of the row boundary and the slow path inserts a
+    // spacer head in the final column.
+    try s.resize(.{ .cols = 5, .reflow = true });
+    try testing.expectEqual(@as(usize, 5), s.cols);
+    try testing.expectEqual(@as(usize, 2), s.totalRows());
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        for (0..4) |i| {
+            const y = i / 2;
+            const x = (i % 2) * 2;
+            {
+                const rac = page.getRowAndCell(x, y);
+                try testing.expectEqual(
+                    @as(u21, @intCast(0x4E00 + i)),
+                    rac.cell.content.codepoint.data,
+                );
+                try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
+            }
+            {
+                const rac = page.getRowAndCell(x + 1, y);
+                try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
+                try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
+            }
+        }
+
+        {
+            const rac = page.getRowAndCell(4, 0);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
+            try testing.expectEqual(pagepkg.Cell.Wide.spacer_head, rac.cell.wide);
+            try testing.expect(rac.row.wrap);
+        }
+        {
+            const rac = page.getRowAndCell(4, 1);
+            try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
+            try testing.expect(rac.row.wrap_continuation);
+        }
+    }
+}
+
+test "PageList resize reflow less cols wide char bulk run mixed narrow round trip" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The emoji-in-prose shape: single wide pairs separated by
+    // narrow cells, which must all share a single bulk run.
+    const Shape = struct { cp: u21, wide: pagepkg.Cell.Wide };
+    const shape: []const Shape = &.{
+        .{ .cp = 0x4E00, .wide = .wide },
+        .{ .cp = 0, .wide = .spacer_tail },
+        .{ .cp = 'x', .wide = .narrow },
+        .{ .cp = 0x4E01, .wide = .wide },
+        .{ .cp = 0, .wide = .spacer_tail },
+        .{ .cp = 'y', .wide = .narrow },
+        .{ .cp = 0x4E02, .wide = .wide },
+        .{ .cp = 0, .wide = .spacer_tail },
+        .{ .cp = 'z', .wide = .narrow },
+    };
+
+    var s = try init(alloc, .{ .cols = 9, .rows = 1, .max_size = 0 });
+    defer s.deinit();
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+        for (shape, 0..) |c, x| {
+            const rac = page.getRowAndCell(x, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = c.cp } },
+                .wide = c.wide,
+            };
+        }
+    }
+
+    // Shrink: the run ends exactly on the row boundary after the
+    // second narrow cell.
+    try s.resize(.{ .cols = 6, .reflow = true });
+    try testing.expectEqual(@as(usize, 6), s.cols);
+    try testing.expectEqual(@as(usize, 2), s.totalRows());
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+        for (shape[0..6], 0..) |c, x| {
+            const rac = page.getRowAndCell(x, 0);
+            try testing.expectEqual(c.cp, rac.cell.content.codepoint.data);
+            try testing.expectEqual(c.wide, rac.cell.wide);
+        }
+        for (shape[6..], 0..) |c, x| {
+            const rac = page.getRowAndCell(x, 1);
+            try testing.expectEqual(c.cp, rac.cell.content.codepoint.data);
+            try testing.expectEqual(c.wide, rac.cell.wide);
+        }
+        try testing.expect(page.getRowAndCell(0, 0).row.wrap);
+        try testing.expect(page.getRowAndCell(0, 1).row.wrap_continuation);
+    }
+
+    // Grow back: the wrapped rows must rejoin into the original
+    // single-row layout.
+    try s.resize(.{ .cols = 9, .reflow = true });
+    try testing.expectEqual(@as(usize, 9), s.cols);
+    try testing.expectEqual(@as(usize, 1), s.totalRows());
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+        for (shape, 0..) |c, x| {
+            const rac = page.getRowAndCell(x, 0);
+            try testing.expectEqual(c.cp, rac.cell.content.codepoint.data);
+            try testing.expectEqual(c.wide, rac.cell.wide);
+        }
+        try testing.expect(!page.getRowAndCell(0, 0).row.wrap);
+    }
+}
+
+test "PageList resize reflow less cols wide char bulk run styled" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 8, .rows = 1, .max_size = 0 });
+    defer s.deinit();
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        // Create a style
+        const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
+        const style_id = try page.styles.add(page.memory, style);
+
+        // Styled pairs: the tail shares the wide cell's style, as
+        // the print path writes them.
+        for (0..4) |i| {
+            {
+                const rac = page.getRowAndCell(i * 2, 0);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = @intCast(0x4E00 + i) } },
+                    .wide = .wide,
+                    .style_id = style_id,
+                };
+                page.styles.use(page.memory, style_id);
+            }
+            {
+                const rac = page.getRowAndCell(i * 2 + 1, 0);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = .{ .data = 0 } },
+                    .wide = .spacer_tail,
+                    .style_id = style_id,
+                };
+                page.styles.use(page.memory, style_id);
+            }
+        }
+
+        // We're over-counted by 1 because `add` implies `use`.
+        page.styles.release(page.memory, style_id);
+    }
+
+    // Resize
+    try s.resize(.{ .cols = 4, .reflow = true });
+    try testing.expectEqual(@as(usize, 4), s.cols);
+    try testing.expectEqual(@as(usize, 2), s.totalRows());
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        for (0..2) |y| {
+            for (0..4) |x| {
+                const rac = page.getRowAndCell(x, y);
+                const style_id = rac.cell.style_id;
+                try testing.expect(style_id != 0);
+
+                const style = page.styles.get(page.memory, style_id);
+                try testing.expect(style.flags.bold);
+                try testing.expect(rac.row.styled);
+                try testing.expectEqual(
+                    if (x % 2 == 0) pagepkg.Cell.Wide.wide else pagepkg.Cell.Wide.spacer_tail,
+                    rac.cell.wide,
+                );
+            }
+        }
+    }
+}
+
+test "PageList resize reflow less cols wide char bulk run degenerate spacer tail style" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 4, .rows = 1, .max_size = 0 });
+    defer s.deinit();
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        // A styled wide cell whose tail does NOT share its style.
+        // This can't come from the print path, but the run scan must
+        // reject the pair (slow path) rather than rewrite the tail
+        // to the wide cell's style.
+        const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
+        const style_id = try page.styles.add(page.memory, style);
+
+        {
+            const rac = page.getRowAndCell(0, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = 0x4E00 } },
+                .wide = .wide,
+                .style_id = style_id,
+            };
+        }
+        {
+            const rac = page.getRowAndCell(1, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = 0 } },
+                .wide = .spacer_tail,
+            };
+        }
+        {
+            const rac = page.getRowAndCell(2, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = .{ .data = 'x' } },
+            };
+        }
+    }
+
+    // Resize
+    try s.resize(.{ .cols = 3, .reflow = true });
+    try testing.expectEqual(@as(usize, 3), s.cols);
+    try testing.expectEqual(@as(usize, 1), s.totalRows());
+
+    {
+        try testing.expect(s.pages.first == s.pages.last);
+        const page = s.pages.first.?.page();
+
+        {
+            const rac = page.getRowAndCell(0, 0);
+            try testing.expectEqual(@as(u21, 0x4E00), rac.cell.content.codepoint.data);
+            try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
+            try testing.expect(rac.cell.style_id != 0);
+            const style = page.styles.get(page.memory, rac.cell.style_id);
+            try testing.expect(style.flags.bold);
+        }
+        {
+            const rac = page.getRowAndCell(1, 0);
+            try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
+            try testing.expectEqual(stylepkg.default_id, rac.cell.style_id);
+        }
+        {
+            const rac = page.getRowAndCell(2, 0);
+            try testing.expectEqual(@as(u21, 'x'), rac.cell.content.codepoint.data);
+            try testing.expectEqual(pagepkg.Cell.Wide.narrow, rac.cell.wide);
         }
     }
 }
@@ -17243,7 +19571,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17258,7 +19586,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0x1F468 }, // First codepoint of the grapheme
+                .content = .{ .codepoint = .{ .data = 0x1F468 } }, // First codepoint of the grapheme
                 .wide = .wide,
             };
             try page.setGraphemes(rac.row, rac.cell, &.{
@@ -17271,7 +19599,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
             const rac = page.getRowAndCell(1, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -17280,7 +19608,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
             const rac = page.getRowAndCell(2, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0x1F468 }, // First codepoint of the grapheme
+                .content = .{ .codepoint = .{ .data = 0x1F468 } }, // First codepoint of the grapheme
                 .wide = .wide,
             };
             try page.setGraphemes(rac.row, rac.cell, &.{
@@ -17293,7 +19621,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
             const rac = page.getRowAndCell(3, 0);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 0 },
+                .content = .{ .codepoint = .{ .data = 0 } },
                 .wide = .spacer_tail,
             };
         }
@@ -17310,7 +19638,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 0x1F468), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0x1F468), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
 
             const cps = page.lookupGrapheme(rac.cell).?;
@@ -17327,18 +19655,18 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
         }
         {
             const rac = page.getRowAndCell(1, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
         }
         {
             const rac = page.getRowAndCell(2, 0);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_head, rac.cell.wide);
         }
 
         {
             const rac = page.getRowAndCell(0, 0);
-            try testing.expectEqual(@as(u21, 0x1F468), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0x1F468), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.wide, rac.cell.wide);
 
             const cps = page.lookupGrapheme(rac.cell).?;
@@ -17352,7 +19680,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
         }
         {
             const rac = page.getRowAndCell(1, 1);
-            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint);
+            try testing.expectEqual(@as(u21, 0), rac.cell.content.codepoint.data);
             try testing.expectEqual(pagepkg.Cell.Wide.spacer_tail, rac.cell.wide);
         }
     }
@@ -17364,7 +19692,7 @@ test "PageList resize reflow less cols copy kitty placeholder" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17376,7 +19704,7 @@ test "PageList resize reflow less cols copy kitty placeholder" {
             rac.row.kitty_virtual_placeholder = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = kitty.graphics.unicode.placeholder },
+                .content = .{ .codepoint = .{ .data = kitty.graphics.unicode.placeholder } },
             };
         }
     }
@@ -17405,7 +19733,7 @@ test "PageList resize reflow more cols clears kitty placeholder" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17417,7 +19745,7 @@ test "PageList resize reflow more cols clears kitty placeholder" {
             rac.row.kitty_virtual_placeholder = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = kitty.graphics.unicode.placeholder },
+                .content = .{ .codepoint = .{ .data = kitty.graphics.unicode.placeholder } },
             };
         }
     }
@@ -17448,7 +19776,7 @@ test "PageList resize reflow wrap moves kitty placeholder" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 2, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 2, .max_size = 0 });
     defer s.deinit();
     {
         try testing.expect(s.pages.first == s.pages.last);
@@ -17460,7 +19788,7 @@ test "PageList resize reflow wrap moves kitty placeholder" {
             rac.row.kitty_virtual_placeholder = true;
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = kitty.graphics.unicode.placeholder },
+                .content = .{ .codepoint = .{ .data = kitty.graphics.unicode.placeholder } },
             };
         }
     }
@@ -17487,7 +19815,7 @@ test "PageList reset" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     s.reset();
     try testing.expect(s.viewport == .active);
@@ -17506,7 +19834,7 @@ test "PageList reset invalidates stale untracked refs even if node memory is reu
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     var stale_nodes: [page_preheat * 4]*List.Node = undefined;
@@ -17566,7 +19894,7 @@ test "PageList reset across two pages" {
     };
 
     // Init
-    var s = try init(alloc, cap.cols, rows, null);
+    var s = try init(alloc, .{ .cols = cap.cols, .rows = rows });
     defer s.deinit();
     s.reset();
     try testing.expect(s.viewport == .active);
@@ -17578,7 +19906,7 @@ test "PageList reset moves tracked pins and marks them as garbage" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Create a tracked pin into the active area
@@ -17601,7 +19929,7 @@ test "PageList clears history" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
     try s.growRows(30);
     s.reset();
@@ -17623,7 +19951,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 4, 10, 0);
+    var s = try init(alloc, .{ .cols = 4, .rows = 10, .max_size = 0 });
     defer s.deinit();
     try testing.expectEqual(@as(usize, 1), s.totalPages());
 
@@ -17669,7 +19997,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
             const rac = page.getRowAndCell(0, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'A' },
+                .content = .{ .codepoint = .{ .data = 'A' } },
             };
             try page.appendGrapheme(rac.row, rac.cell, @as(u21, @intCast(0x0301)));
         }
@@ -17683,7 +20011,7 @@ test "PageList resize reflow grapheme map capacity exceeded" {
             const rac = page.getRowAndCell(0, y);
             rac.cell.* = .{
                 .content_tag = .codepoint,
-                .content = .{ .codepoint = 'B' },
+                .content = .{ .codepoint = .{ .data = 'B' } },
             };
             try page.appendGrapheme(rac.row, rac.cell, @as(u21, @intCast(0x0302)));
         }
@@ -17710,7 +20038,7 @@ test "PageList resize grow cols with unwrap fixes viewport pin" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 2, 10, null);
+    var s = try init(alloc, .{ .cols = 2, .rows = 10 });
     defer s.deinit();
 
     // Make sure we have some history, in this case we have 30 rows of history
@@ -17731,7 +20059,7 @@ test "PageList resize grow cols with unwrap fixes viewport pin" {
             for (0..s.cols) |x| {
                 page.getRowAndCell(x, y).cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = 'A' },
+                    .content = .{ .codepoint = .{ .data = 'A' } },
                 };
             }
         }
@@ -17760,7 +20088,7 @@ test "PageList grow reuses non-standard page without leak" {
 
     // Create a PageList with 3 * std_size max so we can fit multiple pages
     // but will still trigger reuse.
-    var s = try init(alloc, 80, 24, 3 * std_size);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 3 * std_size });
     defer s.deinit();
 
     // Increase the first page capacity to make it non-standard (larger than std_size).
@@ -17782,7 +20110,7 @@ test "PageList grow reuses non-standard page without leak" {
     try testing.expect(s.pages.first != s.pages.last);
 
     // Continue growing until we exceed max_size AND the last page is full
-    while (s.page_size + PagePool.item_size <= s.maxSize() or
+    while (s.page_size + PagePool.item_size <= s.limits.max(.bytes) or
         s.pages.last.?.rows() < s.pages.last.?.capacity().rows)
     {
         _ = try s.grow();
@@ -17843,7 +20171,7 @@ test "PageList grow non-standard page prune protection" {
 
     // This is kind of magic and likely depends on std_size.
     const rows_count = 600;
-    var s = try init(alloc, 80, rows_count, std_size);
+    var s = try init(alloc, .{ .cols = 80, .rows = rows_count, .max_size = std_size });
     defer s.deinit();
 
     // Make the first page non-standard
@@ -17882,7 +20210,9 @@ test "PageList grow non-standard page prune protection" {
 
     // Verify prune path conditions are met
     try testing.expect(s.pages.first != s.pages.last);
-    try testing.expect(s.page_size + PagePool.item_size > s.maxSize());
+    try testing.expect(
+        s.page_size + PagePool.item_size > s.limits.max(.bytes),
+    );
     try testing.expect(s.totalRows() >= s.rows);
 
     // Verify last page is at capacity (so grow must prune or allocate new)
@@ -17906,7 +20236,7 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
 
     const cols: size.CellCountInt = 5;
     const cap = try std_capacity.adjust(.{ .cols = cols });
-    var s = try init(alloc, cols, cap.rows, null);
+    var s = try init(alloc, .{ .cols = cols, .rows = cap.rows });
     defer s.deinit();
 
     // Grow until we have two pages.
@@ -17937,7 +20267,7 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
     const marker: u21 = 'X';
     tracked.rowAndCell().cell.* = .{
         .content_tag = .codepoint,
-        .content = .{ .codepoint = marker },
+        .content = .{ .codepoint = .{ .data = marker } },
     };
 
     try s.resize(.{ .cols = new_cols, .reflow = false });
@@ -17957,7 +20287,7 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
     // Verify the pin still points to the cell with our marker content.
     const cell = tracked.rowAndCell().cell;
     try testing.expectEqual(.codepoint, cell.content_tag);
-    try testing.expectEqual(marker, cell.content.codepoint);
+    try testing.expectEqual(marker, cell.content.codepoint.data);
 }
 
 test "PageList resize (no reflow) more cols remaps viewport pin when backfill stops early" {
@@ -17973,7 +20303,7 @@ test "PageList resize (no reflow) more cols remaps viewport pin when backfill st
     const new_cols: size.CellCountInt = cols + 1;
     const new_cap = try std_capacity.adjust(.{ .cols = new_cols });
 
-    var s = try init(alloc, cols, 10, null);
+    var s = try init(alloc, .{ .cols = cols, .rows = 10 });
     defer s.deinit();
 
     // Three pages with the active area entirely in the last one.
@@ -18027,7 +20357,7 @@ test "PageList resize (no reflow) more cols remaps viewport pin when backfill st
     try testing.expectEqual(offset, s.scrollbar().offset);
     {
         const cell = s.viewport_pin.rowAndCell().cell;
-        try testing.expectEqual('X', cell.content.codepoint);
+        try testing.expectEqual('X', cell.content.codepoint.data);
     }
 
     // The backfilled page ends at the viewport row. The row that didn't
@@ -18047,7 +20377,7 @@ test "PageList resize (no reflow) more cols remaps viewport pin when backfill st
         const p = s.viewport_pin.down(1).?;
         try testing.expect(p.node != s.viewport_pin.node);
         const rac = p.rowAndCell();
-        try testing.expectEqual('G', rac.cell.content.codepoint);
+        try testing.expectEqual('G', rac.cell.content.codepoint.data);
         try testing.expectEqual(
             cps.len,
             p.node.page().lookupGrapheme(rac.cell).?.len,
@@ -18062,7 +20392,7 @@ test "PageList resize backfill keeps source pins when a replacement allocation f
 
     // Make a full page that can widen in place, followed by a full page
     // that has to split when widened. Free one row for backfill.
-    var s = try init(testing.allocator, new_cols, initialCapacity(new_cols).rows, null);
+    var s = try init(testing.allocator, .{ .cols = new_cols, .rows = initialCapacity(new_cols).rows });
     defer s.deinit();
     try s.resize(.{ .cols = cols, .reflow = false });
     const previous = s.pages.first.?;
@@ -18087,10 +20417,10 @@ test "PageList resize backfill keeps source pins when a replacement allocation f
 
     const serial = s.page_serial;
     const page_size = s.page_size;
-    const page_alloc = s.pool.pages.arena.child_allocator;
+    const page_alloc = s.pool.pages.allocator;
     var failing = testing.FailingAllocator.init(page_alloc, .{ .fail_index = 1 });
-    s.pool.pages.arena.child_allocator = failing.allocator();
-    defer s.pool.pages.arena.child_allocator = page_alloc;
+    s.pool.pages.allocator = failing.allocator();
+    defer s.pool.pages.allocator = page_alloc;
 
     // Check the pins ourselves before any integrity check can dereference
     // a stale one. Restore the pins for teardown if an assertion fails.
@@ -18121,7 +20451,7 @@ test "PageList compact pool page produces exact-size heap page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     // A freshly created page is pool-owned at std_size.
@@ -18150,7 +20480,7 @@ test "PageList compact then grow allocates new page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Compact the only page. It now has no spare row capacity.
@@ -18169,7 +20499,7 @@ test "PageList compact then reset frees heap pages" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     // Compact the only page so the list contains a sub-std_size
@@ -18189,7 +20519,7 @@ test "PageList compact then clone" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Write a marker so we can verify contents survive.
@@ -18198,7 +20528,7 @@ test "PageList compact then clone" {
         const rac = node.page().getRowAndCell(1, 2);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'X' },
+            .content = .{ .codepoint = .{ .data = 'X' } },
         };
     }
 
@@ -18217,7 +20547,7 @@ test "PageList compact then clone" {
     {
         const node2 = s2.pages.first.?;
         const rac = node2.page().getRowAndCell(1, 2);
-        try testing.expectEqual(@as(u21, 'X'), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 'X'), rac.cell.content.codepoint.data);
     }
 }
 
@@ -18225,7 +20555,7 @@ test "PageList compact oversized page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Grow until we have multiple pages
@@ -18248,7 +20578,7 @@ test "PageList compact oversized page" {
                 const rac = page.getRowAndCell(x, y);
                 rac.cell.* = .{
                     .content_tag = .codepoint,
-                    .content = .{ .codepoint = @intCast(x + y * s.cols) },
+                    .content = .{ .codepoint = .{ .data = @intCast(x + y * s.cols) } },
                 };
             }
         }
@@ -18302,7 +20632,7 @@ test "PageList compact oversized page" {
             const rac = page.getRowAndCell(x, y);
             try testing.expectEqual(
                 @as(u21, @intCast(x + y * s.cols)),
-                rac.cell.content.codepoint,
+                rac.cell.content.codepoint.data,
             );
         }
     }
@@ -18312,7 +20642,7 @@ test "PageList destroyed pool page reuse is zeroed" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24 });
     defer s.deinit();
 
     // Create a page and scribble over its entire backing memory,
@@ -18344,7 +20674,7 @@ test "PageList increaseCapacity from zero-capacity dimensions" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     // Compact the only page. A plain page has no styled, grapheme,
@@ -18378,7 +20708,7 @@ test "PageList compact after increaseCapacity" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, 0);
+    var s = try init(alloc, .{ .cols = 80, .rows = 24, .max_size = 0 });
     defer s.deinit();
 
     var node = s.pages.first.?;
@@ -18398,7 +20728,7 @@ test "PageList split at middle row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18408,7 +20738,7 @@ test "PageList split at middle row" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast(y) },
+            .content = .{ .codepoint = .{ .data = @intCast(y) } },
         };
     }
 
@@ -18431,13 +20761,13 @@ test "PageList split at middle row" {
     // Verify content in first page is preserved (rows 0-4 have codepoints 0-4)
     for (0..5) |y| {
         const rac = first_page.getRowAndCell(0, y);
-        try testing.expectEqual(@as(u21, @intCast(y)), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, @intCast(y)), rac.cell.content.codepoint.data);
     }
 
     // Verify content in second page (original rows 5-9, now at y=0-4)
     for (0..5) |y| {
         const rac = second_page.getRowAndCell(0, y);
-        try testing.expectEqual(@as(u21, @intCast(y + 5)), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, @intCast(y + 5)), rac.cell.content.codepoint.data);
     }
 }
 
@@ -18445,7 +20775,7 @@ test "PageList split at row 0 is no-op" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18455,7 +20785,7 @@ test "PageList split at row 0 is no-op" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast(y) },
+            .content = .{ .codepoint = .{ .data = @intCast(y) } },
         };
     }
 
@@ -18471,7 +20801,7 @@ test "PageList split at row 0 is no-op" {
     try testing.expectEqual(@as(usize, 10), page.size.rows);
     for (0..10) |y| {
         const rac = page.getRowAndCell(0, y);
-        try testing.expectEqual(@as(u21, @intCast(y)), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, @intCast(y)), rac.cell.content.codepoint.data);
     }
 }
 
@@ -18479,7 +20809,7 @@ test "PageList split at last row" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18489,7 +20819,7 @@ test "PageList split at last row" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = @intCast(y) },
+            .content = .{ .codepoint = .{ .data = @intCast(y) } },
         };
     }
 
@@ -18511,7 +20841,7 @@ test "PageList split at last row" {
 
     // Verify content in second page (original row 9, now at y=0)
     const rac = second_page.getRowAndCell(0, 0);
-    try testing.expectEqual(@as(u21, 9), rac.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 9), rac.cell.content.codepoint.data);
 }
 
 test "PageList split single row page returns OutOfSpace" {
@@ -18519,7 +20849,7 @@ test "PageList split single row page returns OutOfSpace" {
     const alloc = testing.allocator;
 
     // Initialize with 1 row
-    var s = try init(alloc, 10, 1, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 1, .max_size = 0 });
     defer s.deinit();
 
     const split_pin: Pin = .{ .node = s.pages.first.?, .y = 0, .x = 0 };
@@ -18532,7 +20862,7 @@ test "PageList split moves tracked pins" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Track a pin at row 7
@@ -18555,7 +20885,7 @@ test "PageList split tracked pin before split point unchanged" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const original_node = s.pages.first.?;
@@ -18579,7 +20909,7 @@ test "PageList split tracked pin at split point moves to new page" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const original_node = s.pages.first.?;
@@ -18604,7 +20934,7 @@ test "PageList split multiple tracked pins across regions" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const original_node = s.pages.first.?;
@@ -18650,7 +20980,7 @@ test "PageList split tracked viewport_pin in split region moves correctly" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const original_node = s.pages.first.?;
@@ -18677,7 +21007,7 @@ test "PageList split middle page preserves linked list order" {
     const alloc = testing.allocator;
 
     // Create a single page with 12 rows
-    var s = try init(alloc, 10, 12, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 12, .max_size = 0 });
     defer s.deinit();
 
     // Split at row 4 to create: page1 (rows 0-3), page2 (rows 4-11)
@@ -18726,7 +21056,7 @@ test "PageList split last page makes new page the last" {
     const alloc = testing.allocator;
 
     // Create a single page with 10 rows
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     // Split to create 2 pages first
@@ -18757,7 +21087,7 @@ test "PageList split first page keeps original as first" {
     const alloc = testing.allocator;
 
     // Create 2 pages by splitting
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const original_first = s.pages.first.?;
@@ -18790,7 +21120,7 @@ test "PageList split preserves wrap flags" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18844,7 +21174,7 @@ test "PageList split preserves styled cells" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18857,7 +21187,7 @@ test "PageList split preserves styled cells" {
         const rac = page.getRowAndCell(0, y);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'S' },
+            .content = .{ .codepoint = .{ .data = 'S' } },
             .style_id = style_id,
         };
         rac.row.styled = true;
@@ -18882,7 +21212,7 @@ test "PageList split preserves styled cells" {
     // Verify styled cells are preserved in new page
     for (0..3) |y| {
         const rac = second_page.getRowAndCell(0, y);
-        try testing.expectEqual(@as(u21, 'S'), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 'S'), rac.cell.content.codepoint.data);
         try testing.expect(rac.cell.style_id != 0);
 
         const got_style = second_page.styles.get(second_page.memory, rac.cell.style_id);
@@ -18895,7 +21225,7 @@ test "PageList split preserves grapheme clusters" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18905,7 +21235,7 @@ test "PageList split preserves grapheme clusters" {
         const rac = page.getRowAndCell(0, 6);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 0x1F468 }, // Man emoji
+            .content = .{ .codepoint = .{ .data = 0x1F468 } }, // Man emoji
         };
         try page.setGraphemes(rac.row, rac.cell, &.{
             0x200D, // ZWJ
@@ -18929,7 +21259,7 @@ test "PageList split preserves grapheme clusters" {
     // Verify grapheme is preserved in new page (original row 6 is now row 1)
     {
         const rac = second_page.getRowAndCell(0, 1);
-        try testing.expectEqual(@as(u21, 0x1F468), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 0x1F468), rac.cell.content.codepoint.data);
         try testing.expect(rac.row.grapheme);
 
         const cps = second_page.lookupGrapheme(rac.cell).?;
@@ -18943,7 +21273,7 @@ test "PageList split preserves hyperlinks" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 10, 10, 0);
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_size = 0 });
     defer s.deinit();
 
     const page = s.pages.first.?.page();
@@ -18957,7 +21287,7 @@ test "PageList split preserves hyperlinks" {
         const rac = page.getRowAndCell(0, 7);
         rac.cell.* = .{
             .content_tag = .codepoint,
-            .content = .{ .codepoint = 'L' },
+            .content = .{ .codepoint = .{ .data = 'L' } },
         };
         try page.setHyperlink(rac.row, rac.cell, hyperlink_id);
     }
@@ -18978,11 +21308,238 @@ test "PageList split preserves hyperlinks" {
     // Verify hyperlink is preserved in new page (original row 7 is now row 2)
     {
         const rac = second_page.getRowAndCell(0, 2);
-        try testing.expectEqual(@as(u21, 'L'), rac.cell.content.codepoint);
+        try testing.expectEqual(@as(u21, 'L'), rac.cell.content.codepoint.data);
         try testing.expect(rac.cell.hyperlink);
 
         const link_id = second_page.lookupHyperlink(rac.cell).?;
         const link = second_page.hyperlink_set.get(second_page.memory, link_id);
         try testing.expectEqualStrings("https://example.com", link.uri.slice(second_page.memory));
     }
+}
+
+test "PageList eraseRow recycled row has default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 3 });
+    defer s.deinit();
+
+    // Simulate the top row being part of a soft-wrapped, prompt-marked
+    // line. Erasing it recycles its Row storage as the new blank
+    // bottom row, which must not retain any of this metadata.
+    {
+        const rac = s.getCell(.{ .active = .{} }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    try s.eraseRow(.{ .active = .{} });
+
+    {
+        const rac = s.getCell(.{ .active = .{ .y = 2 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "PageList eraseRowBounded recycled row has default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A limit smaller than the remaining rows in the page exercises
+    // the bounded-rotate branch; a larger limit exercises the fallback
+    // branch that clears the final row after a full rotation.
+    for ([_]usize{ 1, 10 }) |limit| {
+        var s = try init(alloc, .{ .cols = 5, .rows = 3 });
+        defer s.deinit();
+
+        {
+            const rac = s.getCell(.{ .active = .{} }).?;
+            rac.row.wrap = true;
+            rac.row.wrap_continuation = true;
+            rac.row.semantic_prompt = .prompt;
+        }
+
+        try s.eraseRowBounded(.{ .active = .{} }, limit);
+
+        const recycled_y = @min(limit, 2);
+        const rac = s.getCell(.{ .active = .{ .y = @intCast(recycled_y) } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "PageList eraseActive regrown rows have default metadata" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 3 });
+    defer s.deinit();
+
+    // Mark the rows that will be erased. eraseActive retires their
+    // storage into unused page capacity and then regrows the active
+    // area, re-exposing the same Row storage via the grow() fast path.
+    for (0..2) |y| {
+        const rac = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
+        rac.row.wrap = true;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt;
+    }
+
+    s.eraseActive(1);
+
+    for (0..3) |y| {
+        const rac = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "PageList split retired rows have default state" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 10 });
+    defer s.deinit();
+
+    // Put metadata and a background-colored (non-zero, but text-free)
+    // cell on a row that the split will move to the new page. The
+    // retired Row storage on the source page goes back into unused
+    // capacity that grow() re-exposes without clearing.
+    {
+        const rac = s.getCell(.{ .active = .{ .y = 7 } }).?;
+        rac.row.wrap = true;
+        rac.row.semantic_prompt = .prompt;
+        rac.cell.* = .{
+            .content_tag = .bg_color_palette,
+            .content = .{ .color_palette = .{ .data = 42 } },
+        };
+    }
+
+    const node = s.pages.first.?;
+    try s.split(s.pin(.{ .active = .{ .y = 5 } }).?);
+
+    // The source page was truncated to 5 rows; peek at the retired
+    // storage beyond size.rows.
+    const page = node.page();
+    try testing.expectEqual(@as(usize, 5), page.size.rows);
+    const rows = page.rows.ptr(page.memory.ptr);
+    for (5..10) |y| {
+        const row = rows[y];
+        try testing.expect(!row.wrap);
+        try testing.expect(!row.wrap_continuation);
+        try testing.expectEqual(.none, row.semantic_prompt);
+        const cells = row.cells.ptr(page.memory.ptr)[0..page.size.cols];
+        for (cells) |cell| try testing.expect(cell.isZero());
+    }
+}
+
+test "PageList resize trimmed rows have default state" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 5 });
+    defer s.deinit();
+
+    // A trailing blank row has no text, so shrinking rows trims it,
+    // but it can still carry metadata (e.g. a blank prompt
+    // continuation line) and background-colored cells. Trimming
+    // retires the storage into unused capacity that grow()
+    // re-exposes without clearing.
+    {
+        const rac = s.getCell(.{ .active = .{ .y = 4 } }).?;
+        rac.row.wrap_continuation = true;
+        rac.row.semantic_prompt = .prompt_continuation;
+        rac.cell.* = .{
+            .content_tag = .bg_color_palette,
+            .content = .{ .color_palette = .{ .data = 42 } },
+        };
+    }
+
+    try s.resize(.{ .rows = 4, .reflow = false });
+    try s.resize(.{ .rows = 5, .reflow = false });
+
+    {
+        const rac = s.getCell(.{ .active = .{ .y = 4 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+        try testing.expect(rac.cell.isZero());
+    }
+}
+
+test "PageList memory pool never touches idle page memory" {
+    const testing = std.testing;
+    const preheat = page_preheat;
+
+    // Back the page allocator with memory we can inspect.
+    const backing = try testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(std.heap.page_size_min),
+        preheat * std_size,
+    );
+    defer testing.allocator.free(backing);
+    var fba: std.heap.FixedBufferAllocator = .init(backing);
+
+    var pool: MemoryPool = try .init(testing.allocator, fba.allocator(), preheat);
+    defer pool.deinit();
+
+    // Preheat allocated exactly the items.
+    try testing.expectEqual(preheat * std_size, fba.end_index);
+
+    // Lay the sentinel down after preheat: allocation itself may write
+    // (the Allocator interface fills fresh memory with undefined in
+    // safe builds, which valgrind also tracks). The sentinel must differ
+    // from Zig's 0xAA undefined pattern so that any write is visible.
+    const sentinel: u8 = 0x5A;
+    @memset(backing, sentinel);
+
+    // Every preheated item is handed out untouched and without going
+    // back to the page allocator, and destroying it doesn't touch it.
+    var items: [preheat]PagePool.ItemPtr = undefined;
+    for (&items) |*item| {
+        item.* = try pool.pages.create();
+        try testing.expectEqual(preheat * std_size, fba.end_index);
+        try testing.expect(std.mem.allEqual(u8, item.*, sentinel));
+    }
+    for (items) |item| pool.pages.destroy(item);
+    try testing.expect(std.mem.allEqual(u8, backing, sentinel));
+}
+
+test "PageList memory pool fast path does not allocate" {
+    const testing = std.testing;
+    var counting: std.testing.FailingAllocator = .init(testing.allocator, .{});
+
+    var pool: MemoryPool = try .init(
+        testing.allocator,
+        counting.allocator(),
+        page_preheat,
+    );
+    defer pool.deinit();
+    try testing.expectEqual(page_preheat, counting.allocations);
+
+    // Cycle a few thousand pages through the preheated items. As long
+    // as no more than the preheat are live at once, create is a
+    // free-list pop and never touches the page allocator.
+    var items: [page_preheat]PagePool.ItemPtr = undefined;
+    for (0..1024) |_| {
+        for (&items) |*item| item.* = try pool.pages.create();
+        for (items) |item| pool.pages.destroy(item);
+    }
+    try testing.expectEqual(page_preheat, counting.allocations);
+    try testing.expectEqual(0, counting.deallocations);
+
+    // Going past the preheat allocates the extra items once; they are
+    // recycled from then on.
+    var extra: [page_preheat + 2]PagePool.ItemPtr = undefined;
+    for (0..1024) |_| {
+        for (&extra) |*item| item.* = try pool.pages.create();
+        for (extra) |item| pool.pages.destroy(item);
+    }
+    try testing.expectEqual(extra.len, counting.allocations);
+    try testing.expectEqual(0, counting.deallocations);
 }

@@ -49,14 +49,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = std.os.windows;
+const global = @import("../global.zig");
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const consts = @import("win32/consts.zig");
 const win32_elevation = @import("win32_elevation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
 const os_windows = @import("../os/windows.zig");
+const windows_ext = @import("../os/windows_ext.zig");
 
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const LPCWSTR = win32_types.LPCWSTR;
 const HKEY = sys.HKEY;
 const REGSAM = u32;
@@ -93,13 +95,13 @@ pub fn setProcessAumid() void {
 /// activates for a click on one of its toasts (`win32_toast_activator.zig`);
 /// the measurement build's early return skips that too.
 pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
-    const exe_path = std.fs.selfExePathAlloc(alloc) catch return;
+    const exe_path = std.process.executablePathAlloc(global.io(), alloc) catch return;
     defer alloc.free(exe_path);
     const parent = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Classes\\AppUserModelId");
     const name = std.unicode.utf8ToUtf16LeStringLiteral(aumid_utf8);
     const elevated = win32_elevation.isProcessElevated() catch true;
     const installer_managed = if (std.fs.path.dirname(exe_path)) |dir|
-        os_windows.isInstallerManagedInstallDir(dir)
+        windows_ext.isInstallerManagedInstallDir(global.io(), dir)
     else
         false;
     // A test that starts a real App reaches this; it must never name an
@@ -150,7 +152,7 @@ fn register(
         return false;
     }
     var random: [8]u8 = undefined;
-    std.crypto.random.bytes(&random);
+    global.io().random(&random);
     var suffix_buf: [32]u8 = undefined;
     const suffix = try std.fmt.bufPrint(&suffix_buf, ".pending-{x}", .{random});
     const pending_w = try alloc.allocSentinel(u16, name.len + suffix.len, 0);
@@ -288,7 +290,7 @@ fn iconUriPath(alloc: std.mem.Allocator, exe_path: []const u8) !?[]u8 {
     // A stat, not an access check: `IconUri` has to name an image file,
     // and a directory that happens to be called `noctty.ico` passes
     // `accessAbsolute` just the same.
-    const stat = std.fs.cwd().statFile(icon_path) catch |err| {
+    const stat = std.Io.Dir.cwd().statFile(global.io(), icon_path, .{}) catch |err| {
         std.log.info("AUMID: {s} not found next to exe ({}); leaving IconUri unchanged", .{ icon_file_name, err });
         alloc.free(icon_path);
         return null;
@@ -320,7 +322,7 @@ test "aumid icon uri is absent when the sibling icon is missing" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
     const exe_path = try std.fs.path.join(testing.allocator, &.{ dir, "noctty.exe" });
     defer testing.allocator.free(exe_path);
@@ -329,12 +331,12 @@ test "aumid icon uri is absent when the sibling icon is missing" {
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
 
     // A directory of that name is not an icon either.
-    try tmp.dir.makeDir(icon_file_name);
+    try tmp.dir.createDir(std.testing.io, icon_file_name, .default_dir);
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
-    try tmp.dir.deleteDir(icon_file_name);
+    try tmp.dir.deleteDir(std.testing.io, icon_file_name);
 
     // Once the icon is staged next to the exe it is preferred.
-    try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = icon_file_name, .data = "ico" });
     const resolved = (try iconUriPath(testing.allocator, exe_path)) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(resolved);
     try testing.expect(std.mem.endsWith(u8, resolved, icon_file_name));
@@ -358,7 +360,7 @@ const TestRegistry = struct {
 
     fn init(alloc: std.mem.Allocator) !TestRegistry {
         var random: [16]u8 = undefined;
-        std.crypto.random.bytes(&random);
+        std.testing.io.random(&random);
         const utf8 = try std.fmt.allocPrint(alloc, parent_prefix ++ "{x}", .{random});
         defer alloc.free(utf8);
         return .{ .parent = try std.unicode.utf8ToUtf16LeAllocZ(alloc, utf8) };
@@ -426,8 +428,8 @@ test "portable and elevated copies register no toast activator" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = icon_file_name, .data = "ico" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const exe = try std.fs.path.join(alloc, &.{ root, "noctty.exe" });
     defer alloc.free(exe);
@@ -473,15 +475,15 @@ test "aumid registration: installed copies always write, portable copies only cr
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     var exes: [5][]u8 = undefined;
     var icons: [5][]u8 = undefined;
     var icon_buf: [64]u8 = undefined;
     for (&exes, &icons, [_][]const u8{ "installed", "p1", "p2", "p3", "bare" }) |*exe, *icon, dir| {
         if (!std.mem.eql(u8, dir, "bare")) {
-            try tmp.dir.makeDir(dir);
-            try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&icon_buf, "{s}/{s}", .{ dir, icon_file_name }), .data = dir });
+            try tmp.dir.createDir(std.testing.io, dir, .default_dir);
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = try std.fmt.bufPrint(&icon_buf, "{s}/{s}", .{ dir, icon_file_name }), .data = dir });
         }
         exe.* = try std.fs.path.join(alloc, &.{ root, dir, "noctty.exe" });
         icon.* = try siblingIconPath(alloc, exe.*);
@@ -515,7 +517,7 @@ test "aumid registration: installed copies always write, portable copies only cr
 
         // Present: another portable copy changes no value and not even the
         // key's last-write time, including values it would not have written.
-        std.Thread.sleep(20 * std.time.ns_per_ms);
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
         try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p2, true, null));
         const kept = try reg.snapshot();
         try std.testing.expectEqualSlices(u16, created.icon[0 .. created.icon_bytes / 2], kept.icon[0 .. kept.icon_bytes / 2]);
@@ -532,12 +534,12 @@ test "aumid registration: installed copies always write, portable copies only cr
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
 
         // Not even a registration whose icon has gone is repaired.
-        try tmp.dir.deleteFile("installed/" ++ icon_file_name);
+        try tmp.dir.deleteFile(std.testing.io, "installed/" ++ icon_file_name);
         const broken = try reg.snapshot();
         try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
         try std.testing.expectEqual(broken.written, (try reg.snapshot()).written);
-        try tmp.dir.writeFile(.{ .sub_path = "installed/" ++ icon_file_name, .data = "installed" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "installed/" ++ icon_file_name, .data = "installed" });
     }
 
     // Copies starting together, released at once: portable copies alone
@@ -549,17 +551,17 @@ test "aumid registration: installed copies always write, portable copies only cr
             const reg = try TestRegistry.init(alloc);
             defer reg.deinit(alloc);
             const Run = struct {
-                fn run(gate: *std.Thread.ResetEvent, a: std.mem.Allocator, parent: [:0]const u16, exe: []const u8, portable: bool, out: *?bool) void {
-                    gate.wait();
+                fn run(gate: *std.Io.Event, a: std.mem.Allocator, parent: [:0]const u16, exe: []const u8, portable: bool, out: *?bool) void {
+                    gate.waitUncancelable(std.testing.io);
                     out.* = register(a, parent, TestRegistry.name, exe, portable, null) catch null;
                 }
             };
-            var gate: std.Thread.ResetEvent = .{};
+            var gate: std.Io.Event = .unset;
             var published: [4]?bool = .{ null, null, null, null };
             var threads: [4]std.Thread = undefined;
             var spawned: usize = 0;
             defer {
-                gate.set();
+                gate.set(std.testing.io);
                 for (threads[0..spawned]) |t| t.join();
             }
             const first: usize = if (with_installed) 0 else 1;
@@ -567,7 +569,7 @@ test "aumid registration: installed copies always write, portable copies only cr
                 threads[spawned] = try std.Thread.spawn(.{}, Run.run, .{ &gate, alloc, reg.parent, exes[i], i != 0, &published[i] });
                 spawned += 1;
             }
-            gate.set();
+            gate.set(std.testing.io);
             for (threads[0..spawned]) |t| t.join();
             spawned = 0;
 

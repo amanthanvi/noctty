@@ -4,6 +4,7 @@
 //! tab that asked, the app a link opens in) and get a `Prompt`, which
 //! `Host.showConfirm` copies. Nothing here touches a window.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 const paint_text = @import("text.zig");
 
@@ -645,7 +646,7 @@ test "a program's clipboard prompt names its tab and cannot be reordered by its 
     const read = "Let a program read your clipboard?";
     const write = "Let a program change your clipboard?";
     // Marks that take no cell are cut by count.
-    const marks = "x" ++ "\u{0301}" ** 50;
+    const marks = "x" ++ comptime win32_repeat.repeat("\u{0301}", 50);
     for ([_]struct { Clipboard, []const u8, []const u8 }{
         .{
             .{ .program = .{ .request = .read, .contents = "a", .asked_by = .{ .number = 2, .title = "vim" } } },
@@ -665,7 +666,7 @@ test "a program's clipboard prompt names its tab and cannot be reordered by its 
         .{
             .{ .program = .{ .request = .write, .contents = "a", .asked_by = .{ .number = 4, .title = marks } } },
             write,
-            "Tab 4 (x" ++ "\u{0301}" ** 20 ++ "...) asked to replace your clipboard with the text below.",
+            "Tab 4 (x" ++ comptime win32_repeat.repeat("\u{0301}", 20) ++ "...) asked to replace your clipboard with the text below.",
         },
         .{
             .{ .program = .{ .request = .read, .contents = "a", .asked_by = .{ .number = 5, .title = "a\x1b[2Jb\u{9B}c\u{2028}d" } } },
@@ -771,7 +772,7 @@ test "win32 confirm preview survives a run of orphan continuation bytes" {
 
     // The pathological case: nothing but continuation bytes used to drag
     // the boundary to zero and show an empty pane.
-    var all = try previewUpTo(std.testing.allocator, "\x80" ** 12, 8);
+    var all = try previewUpTo(std.testing.allocator, comptime win32_repeat.repeat("\x80", 12), 8);
     defer all.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 8), all.shown_bytes);
@@ -877,7 +878,7 @@ test "win32 confirm preview keeps a malformed lead byte at the boundary" {
 test "win32 confirm preview caption reports what is being approved" {
     const alloc = std.testing.allocator;
 
-    var whole = try preview(alloc, "a" ** 12);
+    var whole = try preview(alloc, comptime win32_repeat.repeat("a", 12));
     defer whole.deinit(alloc);
     try std.testing.expectEqualStrings("12 bytes", whole.caption);
 

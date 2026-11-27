@@ -57,19 +57,21 @@ face_y: f64,
 
 /// Minimum acceptable values for some fields to prevent modifiers
 /// from being able to, for example, cause 0-thickness underlines.
+/// The decls are `pub` because `clamp` finds them with `@hasDecl`, which
+/// Zig 0.17 answers only for public declarations, even in this file.
 const Minimums = struct {
-    const cell_width = 1;
-    const cell_height = 1;
-    const underline_thickness = 1;
-    const strikethrough_thickness = 1;
-    const overline_thickness = 1;
-    const box_thickness = 1;
-    const cursor_thickness = 1;
-    const cursor_height = 1;
-    const icon_height = 1.0;
-    const icon_height_single = 1.0;
-    const face_height = 1.0;
-    const face_width = 1.0;
+    pub const cell_width = 1;
+    pub const cell_height = 1;
+    pub const underline_thickness = 1;
+    pub const strikethrough_thickness = 1;
+    pub const overline_thickness = 1;
+    pub const box_thickness = 1;
+    pub const cursor_thickness = 1;
+    pub const cursor_height = 1;
+    pub const icon_height = 1.0;
+    pub const icon_height_single = 1.0;
+    pub const face_height = 1.0;
+    pub const face_width = 1.0;
 };
 
 /// Metrics extracted from a font face, based on
@@ -435,11 +437,11 @@ inline fn addFloatToInt(int: *u32, float: f64) void {
 
 /// Clamp all metrics to their allowable range.
 fn clamp(self: *Metrics) void {
-    inline for (std.meta.fields(Metrics)) |field| {
-        if (@hasDecl(Minimums, field.name)) {
-            @field(self, field.name) = @max(
-                @field(self, field.name),
-                @field(Minimums, field.name),
+    inline for (@typeInfo(Metrics).@"struct".field_names) |field| {
+        if (@hasDecl(Minimums, field)) {
+            @field(self, field) = @max(
+                @field(self, field),
+                @field(Minimums, field),
             );
         }
     }
@@ -493,7 +495,7 @@ pub const Modifier = union(enum) {
             .percent => |v| {
                 try formatter.formatEntry(
                     []const u8,
-                    std.fmt.bufPrint(
+                    std.mem.print(
                         &buf,
                         "{d}%",
                         .{(v - 1) * 100},
@@ -504,7 +506,7 @@ pub const Modifier = union(enum) {
             .absolute => |v| {
                 try formatter.formatEntry(
                     []const u8,
-                    std.fmt.bufPrint(
+                    std.mem.print(
                         &buf,
                         "{d}",
                         .{v},
@@ -591,24 +593,23 @@ pub const Modifier = union(enum) {
 
 /// Key is an enum of all the available metrics keys.
 pub const Key = key: {
-    const field_infos = std.meta.fields(Metrics);
-    var enumFields: [field_infos.len]std.builtin.Type.EnumField = undefined;
+    const field_names = @typeInfo(Metrics).@"struct".field_names;
+    const field_types = @typeInfo(Metrics).@"struct".field_types;
+    var names: [field_names.len][]const u8 = undefined;
+    var raw_values: [field_names.len]comptime_int = undefined;
     var count: usize = 0;
-    for (field_infos, 0..) |field, i| {
-        if (field.type != u32 and field.type != i32 and field.type != f64) continue;
-        enumFields[i] = .{ .name = field.name, .value = i };
+    for (field_names, field_types, &names, &raw_values, 0..) |field, field_type, *name, *raw, i| {
+        if (field_type != u32 and field_type != i32 and field_type != f64) continue;
+        name.* = field;
+        raw.* = i;
         count += 1;
     }
 
-    var decls = [_]std.builtin.Type.Declaration{};
-    break :key @Type(.{
-        .@"enum" = .{
-            .tag_type = std.math.IntFittingRange(0, count - 1),
-            .fields = enumFields[0..count],
-            .decls = &decls,
-            .is_exhaustive = true,
-        },
-    });
+    const TagInt = std.math.IntFittingRange(0, count - 1);
+    var values: [count]TagInt = undefined;
+    for (raw_values, &values) |raw, *v| v.* = raw;
+
+    break :key @Enum(TagInt, .exhaustive, names[0..count], &values);
 };
 
 // NOTE: This is purposely not pub because we want to force outside callers

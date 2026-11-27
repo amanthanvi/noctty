@@ -1,31 +1,42 @@
 //! Console entrypoint. Keep the application in noctty.exe; this binary only
 //! chooses whether to wait and forwards the original Windows command line.
 const std = @import("std");
+const win32_sys = @import("apprt/win32/sys.zig");
+const win32_types = @import("apprt/win32_types.zig");
 const w = std.os.windows;
 const k = w.kernel32;
 const cli_action = @import("cli/action.zig");
 const Action = @import("cli/ghostty_action.zig").Action;
 const jobs = @import("apprt/win32_job_object.zig");
+const os_windows = @import("os/windows.zig");
+const windows_ext = @import("os/windows_ext.zig");
 
 pub const panic = std.debug.no_panic;
 
-pub fn main() void {
-    const code = forward() catch |err| {
+// No `std.Io` here: a `std.Io` from `std.Io.Threaded` links every
+// implementation its vtable names, which took this binary from under
+// 128 KiB to 576,000 bytes on Zig 0.17 (cli-forwarder.yml's gate). Its two
+// uses are Win32 calls instead: the error line (`WriteFile`) and the
+// launcher's own path (`selfPathAlloc`).
+
+pub fn main(init: std.process.Init.Minimal) void {
+    const code = forward(init.args) catch |err| {
         var buffer: [256]u8 = undefined;
-        var writer = std.fs.File.stderr().writer(&buffer);
-        writer.interface.print("noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch {};
-        writer.interface.flush() catch {};
-        k.ExitProcess(1);
+        const line = std.fmt.bufPrint(&buffer, "noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch "noctty command launcher could not start or wait for noctty.exe\n";
+        if (win32_sys.GetStdHandle(win32_types.STD_ERROR_HANDLE)) |stderr| {
+            if (stderr != w.INVALID_HANDLE_VALUE) _ = win32_sys.WriteFile(stderr, line.ptr, @intCast(line.len), null, null);
+        }
+        win32_sys.ExitProcess(1);
     };
-    k.ExitProcess(code);
+    win32_sys.ExitProcess(code);
 }
 
-fn forward() !u32 {
+fn forward(args: std.process.Args) !u32 {
     const alloc = std.heap.page_allocator;
     // Detection errors are actions too: noctty.exe owns their diagnostics.
-    const wait = if (cli_action.detectArgs(Action, alloc)) |action| action != null else |_| true;
-    // selfExePath resolves symlinks, preserving the old launcher's sibling rule.
-    const self_path = try std.fs.selfExePathAlloc(alloc);
+    const wait = if (cli_action.detectArgs(Action, alloc, args)) |action| action != null else |_| true;
+    // The path after any link, preserving the old launcher's sibling rule.
+    const self_path = try selfPathAlloc(alloc);
     defer alloc.free(self_path);
     const image_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(self_path) orelse return error.ExecutablePathUnavailable, "noctty.exe" });
     defer alloc.free(image_path);
@@ -43,7 +54,7 @@ fn forward() !u32 {
         @memcpy(value[1..][0..image_z.len], image_z);
         value[value.len - 1] = '"';
         break :raw value;
-    } else try alloc.dupeZ(u16, command_line);
+    } else try alloc.dupeSentinel(u16, command_line, 0);
     defer alloc.free(raw);
     var parent: w.STARTUPINFOW = std.mem.zeroes(w.STARTUPINFOW);
     GetStartupInfoW(&parent);
@@ -51,9 +62,9 @@ fn forward() !u32 {
     startup.cb = @sizeOf(w.STARTUPINFOW);
     startup.lpDesktop = parent.lpDesktop;
     const handles = if (wait) [3]?w.HANDLE{
-        try inheritableStdHandle(w.STD_INPUT_HANDLE),
-        try inheritableStdHandle(w.STD_OUTPUT_HANDLE),
-        try inheritableStdHandle(w.STD_ERROR_HANDLE),
+        try inheritableStdHandle(win32_types.STD_INPUT_HANDLE),
+        try inheritableStdHandle(win32_types.STD_OUTPUT_HANDLE),
+        try inheritableStdHandle(win32_types.STD_ERROR_HANDLE),
     } else [3]?w.HANDLE{ null, null, null };
     defer for (handles) |handle| {
         if (handle) |h| if (h != w.INVALID_HANDLE_VALUE) w.CloseHandle(h);
@@ -65,15 +76,15 @@ fn forward() !u32 {
         startup.hStdError = handles[2];
         // A real handler is not inherited; the NULL-handler ignore attribute
         // is. Keep receiving the child's full exit status after Ctrl+C/Break.
-        if (k.SetConsoleCtrlHandler(ignoreControl, w.TRUE) == 0) return error.ConsoleHandlerFailed;
+        if (win32_sys.SetConsoleCtrlHandler(ignoreControl, win32_types.TRUE) == 0) return error.ConsoleHandlerFailed;
     }
     // Keep an action's lifetime tied to the wrapper, as with the old in-process
     // dispatch. Editors or GUI processes the action launches may outlive it.
     const job = if (wait) actionJob() catch null else null;
     defer if (job) |handle| w.CloseHandle(handle);
-    var process: w.PROCESS_INFORMATION = undefined;
-    if (k.CreateProcessW(image_z, raw, null, null, @intFromBool(wait), .{ .detached_process = !wait, .create_suspended = wait }, null, null, &startup, &process) == 0)
-        return switch (k.GetLastError()) {
+    var process: os_windows.PROCESS_INFORMATION = undefined;
+    if (windows_ext.CreateProcessW(image_z, raw, null, null, @intFromBool(wait), .{ .detached_process = !wait, .create_suspended = wait }, null, null, &startup, &process) == 0)
+        return switch (std.os.windows.GetLastError()) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             .ACCESS_DENIED => error.AccessDenied,
             .BAD_EXE_FORMAT => error.InvalidExecutable,
@@ -82,26 +93,41 @@ fn forward() !u32 {
     defer w.CloseHandle(process.hProcess);
     defer w.CloseHandle(process.hThread);
     errdefer {
-        _ = k.TerminateProcess(process.hProcess, 1);
-        _ = k.WaitForSingleObject(process.hProcess, w.INFINITE);
+        _ = win32_sys.TerminateProcess(process.hProcess, 1);
+        _ = win32_sys.WaitForSingleObject(process.hProcess, win32_types.INFINITE);
     }
     if (!wait) return 0;
     // Some caller-owned jobs cannot nest (notably with UI restrictions).
     // Preserve CLI availability there; lifetime cleanup is best effort.
     if (job) |handle| _ = jobs.AssignProcessToJobObject(handle, process.hProcess);
     if (ResumeThread(process.hThread) == 0xFFFFFFFF) return error.ResumeFailed;
-    if (k.WaitForSingleObject(process.hProcess, w.INFINITE) != w.WAIT_OBJECT_0) return error.WaitFailed;
+    if (win32_sys.WaitForSingleObject(process.hProcess, win32_types.INFINITE) != win32_types.WAIT_OBJECT_0) return error.WaitFailed;
     var code: u32 = undefined;
-    if (k.GetExitCodeProcess(process.hProcess, &code) == 0) return error.ExitCodeUnavailable;
+    if (win32_sys.GetExitCodeProcess(process.hProcess, &code) == 0) return error.ExitCodeUnavailable;
     return code;
 }
 
+/// The launcher's own path after any link, as std's `executablePathAlloc`
+/// gives it on Windows (`processExecutablePath` in `lib/std/Io/Threaded.zig`):
+/// the PEB's image path, opened, and its final path in DOS form, as WTF-8.
+fn selfPathAlloc(alloc: std.mem.Allocator) ![]u8 {
+    var path = try std.Io.Threaded.wToPrefixedFileW(null, w.peb().ProcessParameters.ImagePathName.sliceZ(), .{});
+    const handle = try win32_sys.openFile(path.span(), .{
+        .access_mask = win32_types.SYNCHRONIZE | win32_types.GENERIC_READ,
+        .creation = win32_types.FILE_OPEN,
+        .filter = .any,
+    });
+    defer w.CloseHandle(handle);
+    const final = try win32_sys.getFinalPathNameByHandle(handle, &path.data);
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, final);
+}
+
 fn inheritableStdHandle(id: w.DWORD) !?w.HANDLE {
-    const handle = k.GetStdHandle(id);
+    const handle = win32_sys.GetStdHandle(id);
     if (handle == null or handle == w.INVALID_HANDLE_VALUE) return handle;
     var copy: w.HANDLE = undefined;
-    if (k.DuplicateHandle(w.GetCurrentProcess(), handle.?, w.GetCurrentProcess(), &copy, 0, w.TRUE, w.DUPLICATE_SAME_ACCESS) == 0) {
-        if (k.GetLastError() == .INVALID_HANDLE) return null;
+    if (win32_sys.DuplicateHandle(w.GetCurrentProcess(), handle.?, w.GetCurrentProcess(), &copy, 0, win32_types.TRUE, w.DUPLICATE_SAME_ACCESS) == 0) {
+        if (std.os.windows.GetLastError() == .INVALID_HANDLE) return null;
         return error.StandardHandleUnavailable;
     }
     return copy;
@@ -116,7 +142,7 @@ fn actionJob() !w.HANDLE {
     return job;
 }
 
-fn ignoreControl(kind: w.DWORD) callconv(.winapi) w.BOOL {
+fn ignoreControl(kind: w.DWORD) callconv(.winapi) win32_types.BOOL {
     return @intFromBool(kind == 0 or kind == 1); // CTRL_C_EVENT / CTRL_BREAK_EVENT
 }
 

@@ -22,7 +22,6 @@ function Get-WindowsSignedRuntimePayloads {
     return @(
         'noctty/noctty.com',
         'noctty/noctty.exe',
-        'noctty/ghostty-vt.dll',
         'noctty/noctty-terminal-handoff-proxy.dll'
     )
 }

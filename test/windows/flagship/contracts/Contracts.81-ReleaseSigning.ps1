@@ -349,7 +349,7 @@ function Invoke-PreflightTimestampProbe {
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
     }
     try {
-        $output = @(& pwsh -NoProfile -File $releasePreflight -Version 1.3.100 -RequireSigning 2>&1)
+        $output = @(& pwsh -NoProfile -File $releasePreflight -Version 1.4.100 -RequireSigning 2>&1)
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Text = ($output | ForEach-Object { [string]$_ }) -join "`n"

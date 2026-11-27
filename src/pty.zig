@@ -2,6 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const internal_os = @import("os/main.zig");
 const windows = internal_os.windows;
+const windows_ext = internal_os.windows_ext;
+const global = @import("global.zig");
+const once = @import("os/once.zig").once;
 const posix = std.posix;
 const assert = @import("quirks.zig").inlineAssert;
 
@@ -234,7 +237,7 @@ const PosixPty = struct {
 
     /// Buffer for storage of slave tty name so that we don't have to recompute
     /// it every time we need it.
-    tty_name_buf: [std.fs.max_path_bytes:0]u8 = undefined,
+    tty_name_buf: [std.Io.Dir.max_path_bytes:0]u8 = undefined,
     /// The name of slave tty. If `null` it has not yet been computed or
     /// may not be available. Should not be accessed directly, but through
     /// `self.getProcessInfo(.tty_name)`
@@ -266,19 +269,20 @@ const PosixPty = struct {
         // Set CLOEXEC on the master fd, only the slave fd should be inherited
         // by the child process (shell/command).
         cloexec: {
-            const flags = posix.fcntl(master_fd, posix.F.GETFD, 0) catch |err| {
-                log.warn("error getting flags for master fd err={}", .{err});
+            const flags = posix.system.fcntl(master_fd, posix.F.GETFD);
+            if (flags == -1) {
+                log.warn("error getting flags for master fd err=E{s}", .{@tagName(posix.errno(-1))});
                 break :cloexec;
-            };
+            }
 
-            _ = posix.fcntl(
+            switch (posix.errno(posix.system.fcntl(
                 master_fd,
                 posix.F.SETFD,
                 flags | posix.FD_CLOEXEC,
-            ) catch |err| {
-                log.warn("error setting CLOEXEC on master fd err={}", .{err});
-                break :cloexec;
-            };
+            ))) {
+                .SUCCESS => {},
+                else => |e| log.warn("error setting CLOEXEC on master fd err=E{}", .{e}),
+            }
         }
 
         // Enable UTF-8 mode. I think this is on by default on Linux but it
@@ -373,8 +377,8 @@ const PosixPty = struct {
         }
 
         // Can close master/slave pair now
-        posix.close(self.slave);
-        posix.close(self.master);
+        _ = posix.system.close(self.slave);
+        _ = posix.system.close(self.master);
     }
 
     /// Get information about the process(es) attached to the PTY. Returns
@@ -383,14 +387,14 @@ const PosixPty = struct {
     pub fn getProcessInfo(self: *PosixPty, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
         return switch (info) {
             .foreground_pid => {
-                switch (builtin.os.tag) {
+                switch (builtin.target.os.tag) {
                     .linux => {
                         const linux = std.os.linux;
                         var pgrp: i32 = undefined;
                         const rc = linux.tcgetpgrp(self.master, &pgrp);
-                        switch (linux.E.init(rc)) {
-                            .SUCCESS => return @intCast(pgrp),
-                            else => return null,
+                        switch (rc) {
+                            0 => return @intCast(pgrp), // SUCCESS
+                            else => return null, // Anything else
                         }
                     },
                     else => {
@@ -403,7 +407,7 @@ const PosixPty = struct {
             .tty_name => {
                 if (self.tty_name) |tty_name| return tty_name;
 
-                switch (builtin.os.tag) {
+                switch (builtin.target.os.tag) {
                     .macos => {
                         // The macOS TIOCPTYGNAME ioctl does not allow us to
                         // specify the length of the buffer passed to it, but
@@ -448,18 +452,18 @@ const WindowsConPty = struct {
 
     const Functions = struct {
         source: ConPtySource,
-        module: ?windows.HMODULE = null,
+        module: ?windows_ext.HMODULE = null,
         bundled_path: ?[]const u8 = null,
         /// Why an in-box selection was made; null for bundled.
         fallback: ?ConPtyFallback = null,
-        create: windows.exp.CreatePseudoConsoleFn,
-        resize: windows.exp.ResizePseudoConsoleFn,
-        close: windows.exp.ClosePseudoConsoleFn,
+        create: windows_ext.CreatePseudoConsoleFn,
+        resize: windows_ext.ResizePseudoConsoleFn,
+        close: windows_ext.ClosePseudoConsoleFn,
         // Optional: only the bundled conpty.dll exports these, and an older
         // one may lack any of them. Null means the call is skipped.
-        clear: ?windows.exp.ClearPseudoConsoleFn = null,
-        show_hide: ?windows.exp.ShowHidePseudoConsoleFn = null,
-        reparent: ?windows.exp.ReparentPseudoConsoleFn = null,
+        clear: ?windows_ext.ClearPseudoConsoleFn = null,
+        show_hide: ?windows_ext.ShowHidePseudoConsoleFn = null,
+        reparent: ?windows_ext.ReparentPseudoConsoleFn = null,
 
         /// `CreatePseudoConsole` flags for `measurement`. Only the bundled
         /// pair is known to accept the glyph width flags, and the in-box
@@ -469,7 +473,7 @@ const WindowsConPty = struct {
             if (self.source != .bundled) return 0;
             return switch (measurement) {
                 .graphemes => 0,
-                .wcswidth => windows.exp.PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH,
+                .wcswidth => windows_ext.PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH,
             };
         }
 
@@ -499,7 +503,7 @@ const WindowsConPty = struct {
     var fallback_functions: Functions = inbox_functions;
     const demoted_functions: Functions = .inboxBecause(error.CreateFailed);
     var selected = std.atomic.Value(*const Functions).init(&inbox_functions);
-    var resolver_once = std.once(initialize);
+    var resolver_once = once(initialize);
     /// Number of bundled pseudo consoles currently open in this process.
     /// Incremented under `backend_lock` when a bundled creation succeeds and
     /// decremented by `WindowsPty.deinit` after the handle is closed, so a
@@ -521,7 +525,7 @@ const WindowsConPty = struct {
     /// `conPtyInfo` and the fallback banner both misreport. Opens happen once
     /// per surface and already spawn OpenConsole.exe, so the contention cost
     /// is irrelevant.
-    var backend_lock: std.Thread.Mutex = .{};
+    var backend_lock: std.Io.Mutex = .init;
 
     /// Pick the backend that will own a new pseudo console.
     ///
@@ -538,8 +542,8 @@ const WindowsConPty = struct {
     /// `error.BundledConptyInconsistent` instead. Once the last bundled
     /// handle closes the count returns to zero and demotion is allowed again.
     fn selectBackend(context: anytype) SelectError!*const Functions {
-        backend_lock.lock();
-        defer backend_lock.unlock();
+        backend_lock.lockUncancelable(global.io());
+        defer backend_lock.unlock(global.io());
 
         const initial = functions();
         if (context.attempt(initial)) {
@@ -607,7 +611,9 @@ const WindowsConPty = struct {
     }
 
     fn forceInbox() bool {
-        const value = std.process.getEnvVarOwned(
+        // A live read of the process environment, once per process (the
+        // resolver runs once), as 0.15's `getEnvVarOwned` was.
+        const value = global.environ().getAlloc(
             std.heap.page_allocator,
             "NOCTTY_CONPTY",
         ) catch return false;
@@ -617,10 +623,10 @@ const WindowsConPty = struct {
     }
 
     fn loadBundled() BundledLoadError!Functions {
-        var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const exe_dir = std.fs.selfExeDirPath(&exe_dir_buf) catch
+        var exe_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const exe_dir_len = std.process.executableDirPath(global.io(), &exe_dir_buf) catch
             return error.PathUnavailable;
-        return loadBundledFrom(exe_dir);
+        return loadBundledFrom(exe_dir_buf[0..exe_dir_len]);
     }
 
     fn loadBundledFrom(exe_dir: []const u8) BundledLoadError!Functions {
@@ -636,8 +642,8 @@ const WindowsConPty = struct {
         ) catch return error.PathUnavailable;
         defer std.heap.page_allocator.free(path_w);
 
-        const flags = windows.exp.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-            windows.exp.LOAD_LIBRARY_SEARCH_SYSTEM32;
+        const flags = windows_ext.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+            windows_ext.LOAD_LIBRARY_SEARCH_SYSTEM32;
         // A conpty.dll that is not a valid image makes the loader raise a
         // system-error dialog ("Bad Image") from inside LoadLibraryExW and wait
         // for someone to click it, unless the thread asks for failure codes
@@ -656,19 +662,19 @@ const WindowsConPty = struct {
         defer if (suppressed) {
             _ = loader_errors.SetThreadErrorMode(previous_mode, null);
         };
-        const module = windows.kernel32.LoadLibraryExW(
+        const module = windows_ext.kernel32.LoadLibraryExW(
             path_w.ptr,
             null,
             flags,
-        ) orelse return switch (windows.kernel32.GetLastError()) {
+        ) orelse return switch (windows_ext.kernel32.GetLastError()) {
             // MOD_NOT_FOUND also means a DLL that conpty.dll needs is missing.
-            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => if (std.fs.accessAbsolute(path, .{}))
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => if (std.Io.Dir.accessAbsolute(global.io(), path, .{}))
                 error.LoadFailed
             else |_|
                 error.NotFound,
             else => error.LoadFailed,
         };
-        errdefer _ = windows.kernel32.FreeLibrary(module);
+        errdefer _ = windows_ext.kernel32.FreeLibrary(module);
 
         const open_console_path = std.fs.path.join(
             std.heap.page_allocator,
@@ -682,16 +688,16 @@ const WindowsConPty = struct {
             else => return error.OpenConsoleMissing,
         }
 
-        const create: windows.exp.CreatePseudoConsoleFn = @ptrCast(@alignCast(
-            windows.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse
+        const create: windows_ext.CreatePseudoConsoleFn = @ptrCast(@alignCast(
+            windows_ext.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse
                 return error.CreateSymbolMissing,
         ));
-        const resize: windows.exp.ResizePseudoConsoleFn = @ptrCast(@alignCast(
-            windows.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse
+        const resize: windows_ext.ResizePseudoConsoleFn = @ptrCast(@alignCast(
+            windows_ext.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse
                 return error.ResizeSymbolMissing,
         ));
-        const close: windows.exp.ClosePseudoConsoleFn = @ptrCast(@alignCast(
-            windows.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse
+        const close: windows_ext.ClosePseudoConsoleFn = @ptrCast(@alignCast(
+            windows_ext.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse
                 return error.CloseSymbolMissing,
         ));
 
@@ -702,24 +708,24 @@ const WindowsConPty = struct {
             .create = create,
             .resize = resize,
             .close = close,
-            .clear = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(module, "ConptyClearPseudoConsole"))),
-            .show_hide = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(module, "ConptyShowHidePseudoConsole"))),
-            .reparent = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(module, "ConptyReparentPseudoConsole"))),
+            .clear = @ptrCast(@alignCast(windows_ext.kernel32.GetProcAddress(module, "ConptyClearPseudoConsole"))),
+            .show_hide = @ptrCast(@alignCast(windows_ext.kernel32.GetProcAddress(module, "ConptyShowHidePseudoConsole"))),
+            .reparent = @ptrCast(@alignCast(windows_ext.kernel32.GetProcAddress(module, "ConptyReparentPseudoConsole"))),
         };
     }
 
     fn openConsoleMatchesArchitecture(path: []const u8) !bool {
-        var file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
+        const io = global.io();
+        var file = try std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false });
+        defer file.close(io);
 
         var dos_header: [64]u8 = undefined;
-        if (try file.readAll(&dos_header) != dos_header.len) return false;
+        if (try file.readPositionalAll(io, &dos_header, 0) != dos_header.len) return false;
         if (!std.mem.eql(u8, dos_header[0..2], "MZ")) return false;
 
         const pe_offset = std.mem.readInt(u32, dos_header[0x3c..0x40], .little);
-        try file.seekTo(@as(u64, pe_offset));
         var pe_header: [6]u8 = undefined;
-        if (try file.readAll(&pe_header) != pe_header.len) return false;
+        if (try file.readPositionalAll(io, &pe_header, @as(u64, pe_offset)) != pe_header.len) return false;
         if (!std.mem.eql(u8, pe_header[0..4], "PE\x00\x00")) return false;
 
         const expected: u16 = switch (builtin.cpu.arch) {
@@ -741,22 +747,24 @@ const WindowsConPty = struct {
     fn resetForTest() void {
         std.debug.assert(builtin.is_test);
         // No live HPCON may cross this reset or its module provenance would change.
+        // Nor a resolve: a reset under a running `initialize` would race it (council F12).
+        std.debug.assert(!resolver_once.isRunning());
 
         selected.store(&inbox_functions, .release);
-        if (bundled_functions.module) |module| _ = windows.kernel32.FreeLibrary(module);
+        if (bundled_functions.module) |module| _ = windows_ext.kernel32.FreeLibrary(module);
         if (bundled_functions.bundled_path) |path| std.heap.page_allocator.free(path);
         bundled_functions = inbox_functions;
         fallback_functions = inbox_functions;
-        resolver_once = std.once(initialize);
+        resolver_once = once(initialize);
         live_bundled_hpcons.store(0, .release);
         fallback_banner_pending.store(false, .release);
     }
 };
 
 const user32 = struct {
-    extern "user32" fn IsWindowVisible(hwnd: windows.HWND) callconv(.winapi) windows.BOOL;
-    extern "user32" fn IsIconic(hwnd: windows.HWND) callconv(.winapi) windows.BOOL;
-    extern "user32" fn GetDesktopWindow() callconv(.winapi) windows.HWND;
+    extern "user32" fn IsWindowVisible(hwnd: windows_ext.HWND) callconv(.winapi) windows_ext.BOOL;
+    extern "user32" fn IsIconic(hwnd: windows_ext.HWND) callconv(.winapi) windows_ext.BOOL;
+    extern "user32" fn GetDesktopWindow() callconv(.winapi) windows_ext.HWND;
 };
 
 /// Windows PTY creation and management.
@@ -783,7 +791,7 @@ const WindowsPty = struct {
     /// A pseudo console together with the ConPTY implementation that created
     /// it, so a handle is only ever resized or closed by its creator.
     const PseudoConsole = struct {
-        handle: windows.exp.HPCON,
+        handle: windows.HPCON,
         conpty: *const WindowsConPty.Functions,
     };
 
@@ -791,16 +799,16 @@ const WindowsPty = struct {
         signal: ?windows.HANDLE,
         server_process: windows.HANDLE,
         reference: windows.HANDLE,
-        signal_write_mutex: std.Thread.Mutex = .{},
+        signal_write_mutex: std.Io.Mutex = .init,
 
         /// Write one whole packet to the signal pipe under the write lock.
         /// False when the pipe is closed or the write fails or falls short.
         fn writeSignal(self: *HandoffControl, packet: []const u8) bool {
-            self.signal_write_mutex.lock();
-            defer self.signal_write_mutex.unlock();
+            self.signal_write_mutex.lockUncancelable(global.io());
+            defer self.signal_write_mutex.unlock(global.io());
             const signal = self.signal orelse return false;
             var written: windows.DWORD = 0;
-            return windows.kernel32.WriteFile(signal, packet.ptr, @intCast(packet.len), &written, null) != 0 and
+            return windows_ext.kernel32.WriteFile(signal, packet.ptr, @intCast(packet.len), &written, null) != 0 and
                 written == packet.len;
         }
     };
@@ -827,13 +835,14 @@ const WindowsPty = struct {
 
         var pipe_path_buf: [128]u8 = undefined;
         var pipe_path_buf_w: [128]u16 = undefined;
-        const pipe_path = std.fmt.bufPrintZ(
+        const pipe_path = std.mem.printSentinel(
             &pipe_path_buf,
             "\\\\.\\pipe\\LOCAL\\ghostty-pty-{d}-{d}",
             .{
                 windows.GetCurrentProcessId(),
                 pipe_name_counter.fetchAdd(1, .monotonic),
             },
+            0,
         ) catch unreachable;
 
         const pipe_path_w_len = std.unicode.utf8ToUtf16Le(
@@ -849,10 +858,10 @@ const WindowsPty = struct {
             .lpSecurityDescriptor = null,
         };
 
-        pty.in_pipe = windows.kernel32.CreateNamedPipeW(
+        pty.in_pipe = windows.exp.kernel32.CreateNamedPipeW(
             pipe_path_w.ptr,
             windows.PIPE_ACCESS_OUTBOUND |
-                windows.exp.FILE_FLAG_FIRST_PIPE_INSTANCE |
+                windows.FILE_FLAG_FIRST_PIPE_INSTANCE |
                 windows.FILE_FLAG_OVERLAPPED,
             windows.PIPE_TYPE_BYTE,
             1,
@@ -862,12 +871,12 @@ const WindowsPty = struct {
             &security_attributes,
         );
         if (pty.in_pipe == windows.INVALID_HANDLE_VALUE) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(windows.GetLastError());
         }
-        errdefer _ = windows.CloseHandle(pty.in_pipe);
+        errdefer _ = windows.exp.kernel32.CloseHandle(pty.in_pipe);
 
         var security_attributes_read = security_attributes;
-        const in_pipe_pty = windows.kernel32.CreateFileW(
+        const in_pipe_pty = windows.exp.kernel32.CreateFileW(
             pipe_path_w.ptr,
             windows.GENERIC_READ,
             0,
@@ -877,10 +886,10 @@ const WindowsPty = struct {
             null,
         );
         if (in_pipe_pty == windows.INVALID_HANDLE_VALUE) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(windows.GetLastError());
         }
         pty.in_pipe_pty = in_pipe_pty;
-        errdefer _ = windows.CloseHandle(in_pipe_pty);
+        errdefer _ = windows.exp.kernel32.CloseHandle(in_pipe_pty);
 
         // The in_pipe needs to be created as a named pipe, since anonymous
         // pipes created with CreatePipe do not support overlapped operations,
@@ -890,27 +899,39 @@ const WindowsPty = struct {
         // visible to any other processes.
 
         // if (windows.exp.kernel32.CreatePipe(&pty.in_pipe_pty, &pty.in_pipe, null, 0) == 0) {
-        //     return windows.unexpectedError(windows.kernel32.GetLastError());
+        //     return windows.unexpectedError(windows_ext.kernel32.GetLastError());
         // }
         // errdefer {
-        //     _ = windows.CloseHandle(pty.in_pipe_pty);
-        //     _ = windows.CloseHandle(pty.in_pipe);
+        //     _ = windows_ext.CloseHandle(pty.in_pipe_pty);
+        //     _ = windows_ext.CloseHandle(pty.in_pipe);
         // }
 
         var out_pipe_pty: windows.HANDLE = undefined;
-        if (windows.exp.kernel32.CreatePipe(&pty.out_pipe, &out_pipe_pty, null, 0) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (windows.exp.kernel32.CreatePipe(&pty.out_pipe, &out_pipe_pty, null, 0) == windows.FALSE) {
+            return windows.unexpectedError(windows.GetLastError());
         }
         pty.out_pipe_pty = out_pipe_pty;
         errdefer {
-            _ = windows.CloseHandle(pty.out_pipe);
-            _ = windows.CloseHandle(out_pipe_pty);
+            _ = windows.exp.kernel32.CloseHandle(pty.out_pipe);
+            _ = windows.exp.kernel32.CloseHandle(out_pipe_pty);
         }
 
-        try windows.SetHandleInformation(pty.in_pipe, windows.HANDLE_FLAG_INHERIT, 0);
-        try windows.SetHandleInformation(in_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
-        try windows.SetHandleInformation(pty.out_pipe, windows.HANDLE_FLAG_INHERIT, 0);
-        try windows.SetHandleInformation(out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
+        const SetHandleInformation = struct {
+            fn f(hObject: windows.HANDLE) !void {
+                if (windows.exp.kernel32.SetHandleInformation(
+                    hObject,
+                    windows.HANDLE_FLAG_INHERIT,
+                    0,
+                ) == windows.FALSE) {
+                    return windows.unexpectedError(windows.GetLastError());
+                }
+            }
+        };
+
+        try SetHandleInformation.f(pty.in_pipe);
+        try SetHandleInformation.f(in_pipe_pty);
+        try SetHandleInformation.f(pty.out_pipe);
+        try SetHandleInformation.f(out_pipe_pty);
 
         pty.size = size;
         return pty;
@@ -921,7 +942,7 @@ const WindowsPty = struct {
         var pty = try openPipes(size);
         errdefer pty.closePipes();
 
-        var pseudo_console: windows.exp.HPCON = undefined;
+        var pseudo_console: windows.HPCON = undefined;
 
         // Selection, creation, and the demotion decision are one critical
         // section. See `WindowsConPty.backend_lock`.
@@ -929,7 +950,7 @@ const WindowsPty = struct {
             pty: *const Pty,
             size: winsize,
             text_measurement: TextMeasurement,
-            pseudo_console: *windows.exp.HPCON,
+            pseudo_console: *windows.HPCON,
 
             fn attempt(
                 self: *const @This(),
@@ -963,7 +984,7 @@ const WindowsPty = struct {
         // Visibility is read here, on the IO thread just before the child
         // starts, because a new window is shown while its pty is created.
         if (options.console_owner) |owner_ptr| {
-            const owner: windows.HWND = @ptrCast(owner_ptr);
+            const owner: windows_ext.HWND = @ptrCast(owner_ptr);
             pty.reparentPseudoConsole(owner) catch |err| {
                 log.warn("pseudo console owner signal failed err={}", .{err});
             };
@@ -994,7 +1015,7 @@ const WindowsPty = struct {
         return pty;
     }
 
-    pub fn pseudoConsole(self: *const Pty) ?windows.exp.HPCON {
+    pub fn pseudoConsole(self: *const Pty) ?windows.HPCON {
         return switch (self.control) {
             .pseudo_console => |pc| pc.handle,
             .handoff => null,
@@ -1035,10 +1056,10 @@ const WindowsPty = struct {
         switch (self.control) {
             .pseudo_console => {},
             .handoff => |*handoff| {
-                handoff.signal_write_mutex.lock();
-                defer handoff.signal_write_mutex.unlock();
+                handoff.signal_write_mutex.lockUncancelable(global.io());
+                defer handoff.signal_write_mutex.unlock(global.io());
                 if (handoff.signal) |handle| {
-                    _ = windows.CloseHandle(handle);
+                    _ = windows_ext.CloseHandle(handle);
                     handoff.signal = null;
                 }
             },
@@ -1114,7 +1135,7 @@ const WindowsPty = struct {
     /// neither focus nor the foreground). Same scope as `clearPseudoConsole`.
     /// Sent again when the terminal's tab moves to another window
     /// (`Exec.ptyOwner`), as Windows Terminal does for a torn-off tab.
-    pub fn reparentPseudoConsole(self: *Pty, owner: windows.HWND) PseudoConsoleSignalError!void {
+    pub fn reparentPseudoConsole(self: *Pty, owner: windows_ext.HWND) PseudoConsoleSignalError!void {
         const pc = self.createdPseudoConsole() orelse return;
         const reparent = pc.conpty.reparent orelse return;
         if (reparent(pc.handle, owner) != windows.S_OK) return error.SignalFailed;
@@ -1152,8 +1173,8 @@ const WindowsPty = struct {
                 if (pc.conpty.source == .bundled) WindowsConPty.releaseBundledHpcon();
             },
             .handoff => |handoff| {
-                _ = windows.CloseHandle(handoff.server_process);
-                _ = windows.CloseHandle(handoff.reference);
+                _ = windows_ext.CloseHandle(handoff.server_process);
+                _ = windows_ext.CloseHandle(handoff.reference);
             },
         }
         self.* = undefined;
@@ -1232,21 +1253,21 @@ test "handoff release drops the marshaled pipe ends without closing them" {
     const process = std.os.windows.GetCurrentProcess();
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    defer _ = windows.CloseHandle(signal_read);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    defer _ = windows_ext.CloseHandle(signal_read);
 
     // `openAdopted` takes ownership of all three control handles, and `deinit`
     // closes them, so they have to be real closable handles.
     var server_process: windows.HANDLE = undefined;
     var reference: windows.HANDLE = undefined;
     for ([_]*windows.HANDLE{ &server_process, &reference }) |slot| {
-        try std.testing.expect(windows.kernel32.DuplicateHandle(
+        try std.testing.expect(windows_ext.kernel32.DuplicateHandle(
             process,
             process,
             process,
             slot,
             0,
-            windows.FALSE,
+            windows_ext.FALSE,
             std.os.windows.DUPLICATE_SAME_ACCESS,
         ) != 0);
     }
@@ -1293,16 +1314,16 @@ test "handoff resize writes one exact signal packet" {
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    defer _ = windows.CloseHandle(signal_read);
-    defer _ = windows.CloseHandle(signal_write);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    defer _ = windows_ext.CloseHandle(signal_read);
+    defer _ = windows_ext.CloseHandle(signal_write);
 
     var pty = handoffPtyForTest(signal_write);
     try pty.setSize(.{ .ws_col = 80, .ws_row = 24 });
 
     var packet: [6]u8 = undefined;
     var read: windows.DWORD = 0;
-    try std.testing.expect(windows.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
+    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != windows.FALSE);
     try std.testing.expectEqual(@as(windows.DWORD, packet.len), read);
     try std.testing.expectEqualSlices(u8, &.{ 0x08, 0x00, 0x50, 0x00, 0x18, 0x00 }, &packet);
 }
@@ -1312,8 +1333,8 @@ test "handoff visibility writes exact boolean packets and fails after signal clo
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    defer _ = windows.CloseHandle(signal_read);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    defer _ = windows_ext.CloseHandle(signal_read);
 
     var pty = handoffPtyForTest(signal_write);
     defer pty.closeAdoptedSignal();
@@ -1322,7 +1343,7 @@ test "handoff visibility writes exact boolean packets and fails after signal clo
     try pty.setAdoptedVisibility(false);
     var packet: [8]u8 = undefined;
     var read: windows.DWORD = 0;
-    try std.testing.expect(windows.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
+    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != windows.FALSE);
     try std.testing.expectEqual(@as(windows.DWORD, packet.len), read);
     try std.testing.expectEqualSlices(u8, &.{ 1, 0, 1, 0, 1, 0, 0, 0 }, &packet);
 
@@ -1341,9 +1362,9 @@ test "handoff visibility reports a broken signal receiver" {
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    _ = windows.CloseHandle(signal_read);
-    defer _ = windows.CloseHandle(signal_write);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    _ = windows_ext.CloseHandle(signal_read);
+    defer _ = windows_ext.CloseHandle(signal_write);
 
     var pty = handoffPtyForTest(signal_write);
     try std.testing.expectError(error.VisibilityFailed, pty.setAdoptedVisibility(true));
@@ -1356,12 +1377,12 @@ test "handoff visibility resize and close share the signal lock" {
     const Worker = struct {
         pty: *WindowsPty,
         operation: Operation,
-        entered: std.Thread.ResetEvent = .{},
-        done: std.Thread.ResetEvent = .{},
+        entered: std.Io.Event = .unset,
+        done: std.Io.Event = .unset,
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.entered.set();
+            self.entered.set(std.testing.io);
             switch (self.operation) {
                 .visibility => self.pty.setAdoptedVisibility(true) catch |err| {
                     self.failure = err;
@@ -1371,28 +1392,28 @@ test "handoff visibility resize and close share the signal lock" {
                 },
                 .close => self.pty.closeAdoptedSignal(),
             }
-            self.done.set();
+            self.done.set(std.testing.io);
         }
     };
 
     inline for (.{ Operation.visibility, Operation.resize, Operation.close }) |operation| {
         var signal_read: windows.HANDLE = undefined;
         var signal_write: windows.HANDLE = undefined;
-        try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-        defer _ = windows.CloseHandle(signal_read);
+        try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+        defer _ = windows_ext.CloseHandle(signal_read);
         var pty = handoffPtyForTest(signal_write);
         defer pty.closeAdoptedSignal();
         var worker: Worker = .{ .pty = &pty, .operation = operation };
         var thread: ?std.Thread = null;
         defer if (thread) |value| value.join();
         {
-            pty.control.handoff.signal_write_mutex.lock();
-            defer pty.control.handoff.signal_write_mutex.unlock();
+            pty.control.handoff.signal_write_mutex.lockUncancelable(std.testing.io);
+            defer pty.control.handoff.signal_write_mutex.unlock(std.testing.io);
             thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
-            try worker.entered.timedWait(5 * std.time.ns_per_s);
-            try std.testing.expectError(error.Timeout, worker.done.timedWait(20 * std.time.ns_per_ms));
+            try worker.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+            try std.testing.expectError(error.Timeout, worker.done.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
             var available: windows.DWORD = 0;
-            try std.testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != 0);
+            try std.testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != windows.FALSE);
             try std.testing.expectEqual(@as(windows.DWORD, 0), available);
         }
         thread.?.join();
@@ -1404,9 +1425,9 @@ test "handoff visibility resize and close share the signal lock" {
 
 /// The caller's `NOCTTY_CONPTY`, if set, for `restoreConPtyEnvForTest`.
 fn saveConPtyEnvForTest(alloc: std.mem.Allocator) !?[:0]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_CONPTY") catch return null;
+    const raw = std.testing.environ.getAlloc(alloc, "NOCTTY_CONPTY") catch return null;
     defer alloc.free(raw);
-    return try alloc.dupeZ(u8, raw);
+    return try alloc.dupeSentinel(u8, raw, 0);
 }
 
 fn restoreConPtyEnvForTest(original: ?[:0]const u8) void {
@@ -1457,7 +1478,7 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
 
 /// Install a bundled-looking backend without loading conpty.dll, so the
 /// selection bookkeeping can be exercised without creating a pseudo console.
-/// The resolver `std.once` is burned first, otherwise the next `functions()`
+/// The resolver's once (`os/once.zig`) is burned first, otherwise the next `functions()`
 /// call would overwrite the fake selection with a real resolve.
 fn installFakeBundledBackendForTest() void {
     std.debug.assert(builtin.is_test);
@@ -1619,7 +1640,7 @@ test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
 
     // What a source build that could not download the pair runs into.
@@ -1630,7 +1651,7 @@ test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
     );
 
     // A conpty.dll that is there but does not load is not "missing".
-    try tmp.dir.writeFile(.{ .sub_path = "conpty.dll", .data = "stale" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "conpty.dll", .data = "stale" });
     try testing.expectError(error.LoadFailed, WindowsConPty.loadBundledFrom(dir));
 }
 
@@ -1663,21 +1684,21 @@ test "Windows ConPTY live bundled count follows real pseudo console open and clo
     // An adopted session owns no HPCON and must not touch the count.
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    defer _ = windows.CloseHandle(signal_read);
+    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    defer _ = windows_ext.CloseHandle(signal_read);
     const duplicate = struct {
         fn handle(source: windows.HANDLE) !windows.HANDLE {
             var result: windows.HANDLE = undefined;
             const current = std.os.windows.GetCurrentProcess();
-            if (windows.kernel32.DuplicateHandle(
+            if (windows_ext.kernel32.DuplicateHandle(
                 current,
                 source,
                 current,
                 &result,
                 0,
-                std.os.windows.FALSE,
+                windows_ext.FALSE,
                 std.os.windows.DUPLICATE_SAME_ACCESS,
-            ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+            ) == 0) return windows.unexpectedError(windows_ext.kernel32.GetLastError());
             return result;
         }
     }.handle;
@@ -1694,9 +1715,9 @@ test "Windows ConPTY live bundled count follows real pseudo console open and clo
 /// test can see the flags noctty asked for without kernel32 judging them.
 const RecordingConPty = struct {
     var create_flags: ?windows.DWORD = null;
-    var clear_args: ?struct { handle: windows.exp.HPCON, keep: windows.BOOL } = null;
-    var show_args: ?struct { handle: windows.exp.HPCON, show: windows.BOOL } = null;
-    var reparent_args: ?struct { handle: windows.exp.HPCON, owner: windows.HWND } = null;
+    var clear_args: ?struct { handle: windows.HPCON, keep: windows_ext.BOOL } = null;
+    var show_args: ?struct { handle: windows.HPCON, show: windows_ext.BOOL } = null;
+    var reparent_args: ?struct { handle: windows.HPCON, owner: windows_ext.HWND } = null;
     var result: windows.HRESULT = windows.S_OK;
 
     fn create(
@@ -1704,23 +1725,23 @@ const RecordingConPty = struct {
         input: windows.HANDLE,
         output: windows.HANDLE,
         flags: windows.DWORD,
-        handle: *windows.exp.HPCON,
+        handle: *windows.HPCON,
     ) callconv(.winapi) windows.HRESULT {
         create_flags = flags;
         return windows.exp.kernel32.CreatePseudoConsole(size, input, output, 0, handle);
     }
 
-    fn clear(handle: windows.exp.HPCON, keep: windows.BOOL) callconv(.winapi) windows.HRESULT {
+    fn clear(handle: windows.HPCON, keep: windows_ext.BOOL) callconv(.winapi) windows.HRESULT {
         clear_args = .{ .handle = handle, .keep = keep };
         return result;
     }
 
-    fn showHide(handle: windows.exp.HPCON, show: windows.BOOL) callconv(.winapi) windows.HRESULT {
+    fn showHide(handle: windows.HPCON, show: windows_ext.BOOL) callconv(.winapi) windows.HRESULT {
         show_args = .{ .handle = handle, .show = show };
         return result;
     }
 
-    fn reparent(handle: windows.exp.HPCON, owner: windows.HWND) callconv(.winapi) windows.HRESULT {
+    fn reparent(handle: windows.HPCON, owner: windows_ext.HWND) callconv(.winapi) windows.HRESULT {
         reparent_args = .{ .handle = handle, .owner = owner };
         return result;
     }
@@ -1753,7 +1774,7 @@ test "Windows ConPTY measures text the terminal's way, on the bundled backend on
         // `grapheme-width-method = legacy`.
         var pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 }, .{ .text_measurement = .wcswidth });
         defer pty.deinit();
-        try testing.expectEqual(@as(?windows.DWORD, windows.exp.PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH), RecordingConPty.create_flags);
+        try testing.expectEqual(@as(?windows.DWORD, windows_ext.PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH), RecordingConPty.create_flags);
     }
     {
         // The default keeps the flags it always had: ConPTY measures
@@ -1778,7 +1799,7 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
     defer if (original) |value| testing.allocator.free(value);
     defer restoreConPtyEnvForTest(original);
 
-    const owner: windows.HWND = @ptrFromInt(0x1234);
+    const owner: windows_ext.HWND = @ptrFromInt(0x1234);
 
     WindowsConPty.resetForTest();
     RecordingConPty.install();
@@ -1802,19 +1823,19 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
         try testing.expectEqual(shown_owner, created_owned.owner);
         const created_shown = RecordingConPty.show_args orelse return error.VisibilityNotSetAtOpen;
         try testing.expectEqual(handle, created_shown.handle);
-        try testing.expectEqual(@as(windows.BOOL, 1), created_shown.show);
+        try testing.expectEqual(@as(windows_ext.BOOL, 1), created_shown.show);
 
         try pty.clearPseudoConsole(true);
         const kept = RecordingConPty.clear_args orelse return error.ClearNotForwarded;
         try testing.expectEqual(handle, kept.handle);
-        try testing.expectEqual(@as(windows.BOOL, 1), kept.keep);
+        try testing.expectEqual(@as(windows_ext.BOOL, 1), kept.keep);
         try pty.clearPseudoConsole(false);
-        try testing.expectEqual(@as(windows.BOOL, 0), RecordingConPty.clear_args.?.keep);
+        try testing.expectEqual(@as(windows_ext.BOOL, 0), RecordingConPty.clear_args.?.keep);
 
         try pty.showPseudoConsole(false);
         const shown = RecordingConPty.show_args orelse return error.ShowHideNotForwarded;
         try testing.expectEqual(handle, shown.handle);
-        try testing.expectEqual(@as(windows.BOOL, 0), shown.show);
+        try testing.expectEqual(@as(windows_ext.BOOL, 0), shown.show);
 
         try pty.reparentPseudoConsole(owner);
         const owned = RecordingConPty.reparent_args orelse return error.ReparentNotForwarded;
@@ -1845,8 +1866,8 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
     // know a signal ends the session, so nothing reaches its signal pipe.
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
-    defer _ = windows.CloseHandle(signal_read);
+    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
+    defer _ = windows_ext.CloseHandle(signal_read);
     var adopted = handoffPtyForTest(signal_write);
     defer adopted.closeAdoptedSignal();
     try testing.expect(!adopted.hasSynchronizedClear());
@@ -1854,7 +1875,7 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
     try adopted.showPseudoConsole(true);
     try adopted.reparentPseudoConsole(owner);
     var available: windows.DWORD = 0;
-    try testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != 0);
+    try testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != windows.FALSE);
     try testing.expectEqual(@as(windows.DWORD, 0), available);
 }
 
@@ -1871,19 +1892,19 @@ test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     // stand-in (and keep the cleanup from deleting a mapped image).
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
     const conpty_path = try std.fs.path.join(testing.allocator, &.{ dir, "conpty.dll" });
     defer testing.allocator.free(conpty_path);
     const open_console_path = try std.fs.path.join(testing.allocator, &.{ dir, "OpenConsole.exe" });
     defer testing.allocator.free(open_console_path);
 
-    const system_root = try std.process.getEnvVarOwned(testing.allocator, "SystemRoot");
+    const system_root = try testing.environ.getAlloc(testing.allocator, "SystemRoot");
     defer testing.allocator.free(system_root);
     const known_bad = try std.fs.path.join(testing.allocator, &.{ system_root, "System32", "version.dll" });
     defer testing.allocator.free(known_bad);
-    try std.fs.copyFileAbsolute(known_bad, conpty_path, .{});
-    try std.fs.copyFileAbsolute(known_bad, open_console_path, .{});
+    try std.Io.Dir.copyFileAbsolute(known_bad, conpty_path, testing.io, .{});
+    try std.Io.Dir.copyFileAbsolute(known_bad, open_console_path, testing.io, .{});
 
     try testing.expectError(error.CreateSymbolMissing, WindowsConPty.loadBundledFrom(dir));
 }
@@ -1908,7 +1929,7 @@ test {
     try pty.setSize(ws);
     try testing.expectEqual(ws, try pty.getSize());
 
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .freebsd => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/")),
         .linux => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/pts/")),
         .macos => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/")),

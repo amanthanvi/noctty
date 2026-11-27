@@ -106,8 +106,12 @@ pub fn init(
     if (scratch.len < required) return error.OutputTooSmall;
     if (required == 0) return null;
 
-    // Compression preserves the opaque page bytes, including addressable
-    // struct padding that Memcheck may mark undefined.
+    // Page memory is an opaque snapshot containing structs whose padding has
+    // no semantic value. Assigning those structs can leave their padding
+    // undefined in Memcheck even though every byte is addressable and must be
+    // preserved by compression. Mark the complete byte representation as
+    // defined at this boundary so that undefined padding does not propagate
+    // through the codec and obscure real Valgrind failures.
     if (std.valgrind.runningOnValgrind() > 0)
         std.valgrind.memcheck.makeMemDefined(source.memory);
 
@@ -214,8 +218,11 @@ test "compressed Page retained mapping round trip" {
 
     const expected = try testing.allocator.dupe(u8, resident.memory);
     defer testing.allocator.free(expected);
-    if (std.valgrind.runningOnValgrind() > 0)
+    if (std.valgrind.runningOnValgrind() > 0) {
+        // This snapshot deliberately includes semantically irrelevant struct
+        // padding so the round trip can compare the complete representation.
         std.valgrind.memcheck.makeMemDefined(expected);
+    }
     const memory_ptr = resident.memory.ptr;
     const memory_len = resident.memory.len;
 

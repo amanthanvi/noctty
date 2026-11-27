@@ -1130,8 +1130,8 @@ quit the exit receipt (`GetExitCodeProcess` on that handle) and the seal, into
 `<run>\role-manifest.tsv`. It fails closed: a supervisor call that fails, a
 copy that has not ended, no dump, or any dump but the copy's own makes the
 driver exit 5 (`RoleErrors` in `harness.json`). Then symbolise the dump with
-the build's images and PDBs (the symbols ZIP) and compare it; on 0.15.2 the
-pair checks are advisory and the launch, dump and seal checks gate.
+the build's images and PDBs (the symbols ZIP) and compare it; on 0.17.1 the
+run's two pairs are required, and the launch, dump and seal checks gate.
 
 ```powershell
 pwsh -NoProfile -File test/windows/interactive-win11-soak.ps1 `
@@ -1143,7 +1143,7 @@ $env:NOCTTY_THREAD_ROLE_SYMBOLISED = '<new dir>'
 $env:NOCTTY_THREAD_ROLE_IMAGES = '<dir holding the copy''s noctty.exe and noctty.pdb>'
 $env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = '<the build''s checkout>\'
 zig-out\bin\ghostty-test.exe
-python -I ci/role_compare3.py --runs ci/role-runs.tsv --run soak-releasesafe --compiler 0.15 `
+python -I ci/role_compare3.py --runs ci/role-runs.tsv --run soak-releasesafe --compiler 0.17 `
     <run>\role-manifest.tsv ci/lock-inventory-threads.tsv <symbolised dir> --table-scope 1a
 ```
 
@@ -2302,46 +2302,36 @@ metadata, and logs the clipboard sequence number before and after.
 
 ## test_dll_init.c
 
-Packaged ghostty-vt.dll smoke. The portable ZIP carries a noctty placeholder
-under that name, not libghostty-vt (see
-[Library consumers](../../PACKAGING.md#library-consumers)), and this checks the file a package carries is the placeholder:
-`LoadLibraryExW` fails with `ERROR_DLL_INIT_FAILED` (1114), the export table
-is empty (read from the file, so nothing in it runs), and the version
-resource's FileDescription is the one passed in. The portable package CLI
-smoke (`package-portable-cli.ps1`) compiles and runs it against the packaged
-x64 DLL, and the native ARM64 job (`.github/workflows/windows-arm64.yml`, its
-packaged smoke step) against the packaged arm64 DLL, both passing
-`$GhosttyVtStubDescription` from `scripts/ghostty-vt-stub.ps1`.
+Regression test for the DLL CRT initialization fix. Loads
+ghostty-internal.dll at runtime and calls ghostty_info + ghostty_init to
+verify the MSVC C runtime is properly initialized.
 
 ### Build
 
-From the repository root, build noctty (which builds the placeholder into
-`zig-out\bin\ghostty-vt-stub\`) and compile the test:
+First build ghostty-internal.dll, then compile the test:
 
-```powershell
-zig build -Demit-exe=true
-zig cc test/windows/test_dll_init.c -lshell32 -lversion -o test_dll_init.exe
+```
+zig build -Dapp-runtime=none -Demit-exe=false
+zig cc test_dll_init.c -o test_dll_init.exe -target native-native-msvc
 ```
 
 ### Run
 
-Pass the absolute path of the built or packaged DLL and the expected
-FileDescription:
+From this directory:
 
-```powershell
-. .\scripts\ghostty-vt-stub.ps1
-.\test_dll_init.exe (Resolve-Path .\zig-out\bin\ghostty-vt-stub\ghostty-vt.dll).Path $GhosttyVtStubDescription
+```
+copy ..\..\zig-out\lib\ghostty-internal.dll . && test_dll_init.exe
 ```
 
-Expected output:
+Expected output (after the CRT fix):
 
-```text
-ghostty-vt.dll placeholder smoke: 3/3 checks passed
+```
+ghostty_info: <version string>
 ```
 
-A DLL that loads (libghostty-vt from `zig build -Demit-lib-vt=true` does),
-fails to load for any other reason, has an export table or carries another
-FileDescription fails the smoke.
+The ghostty_info call verifies the DLL loads and the CRT is initialized.
+Before the fix, loading the DLL would crash with "access violation writing
+0x0000000000000024".
 
 ## Published portable direct updates
 

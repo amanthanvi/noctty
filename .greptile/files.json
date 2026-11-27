@@ -8,6 +8,7 @@
       "path": "docs/agents/log/conpty.md",
       "description": "Self-Correction Log: ConPTY, pty I/O and resize.",
       "scope": [
+        "src/global.zig",
         "src/pty.zig",
         "src/pty_transport_probe.zig",
         "src/termio/**",
@@ -26,7 +27,15 @@
         "test/windows/interactive-win11-conpty-sync.ps1",
         "test/windows/hidden-win11-conpty-reply-path.ps1",
         "test/windows/console-reply-reader.c",
-        "src/os/local_path.zig"
+        "src/os/local_path.zig",
+        "src/apprt/win32_prefixed_path.zig",
+        "src/build/uucode_config.zig",
+        "src/unicode/main.zig",
+        "src/unicode/testdata/conpty_width.tsv",
+        "test/windows/hidden-win11-conpty-width.ps1",
+        "test/windows/conpty-width-probe.c",
+        "test/windows/hidden-win11-conpty-passthru.ps1",
+        "test/windows/conpty-passthru-probe.c"
       ]
     },
     {
@@ -93,6 +102,9 @@
         "src/sync/thread_role.zig",
         "src/sync/recorder.zig",
         "src/sync/dump.zig",
+        "src/sync/io_tasks.zig",
+        "src/os/once.zig",
+        "src/global.zig",
         "src/apprt/win32_settings.zig",
         "src/apprt/win32/window_state.zig",
         "src/apprt/win32/search_controls.zig",
@@ -236,6 +248,7 @@
       "path": "docs/agents/log/launch-and-paths.md",
       "description": "Self-Correction Log: default shell, process launch, WSL, terminfo, path safety and links.",
       "scope": [
+        "src/global.zig",
         "src/config/windows_shell.zig",
         "src/termio/Exec.zig",
         "src/termio/wsl_env.zig",
@@ -372,16 +385,19 @@
         "build.zig",
         "build.zig.zon",
         "src/build/**",
+        "src/extra/pkg-config.zig",
         "src/update/**",
-        "src/ghostty_vt_stub/**",
         "pkg/wuffs/**",
+        "pkg/highway/src/detect.zig",
+        "pkg/dcimgui/ext.cpp",
         "scripts/**",
         "dist/**",
-        "test/windows/test_dll_init.c",
         "test/windows/release-promote.ps1",
         "test/windows/release-fixture-cleanup.ps1",
+        "test/windows/flagship/contracts/Contracts.21-BuildEnvironment.ps1",
         "test/windows/flagship/contracts/Contracts.93-ConPty.ps1",
-        ".github/**"
+        ".github/**",
+        "src/apprt/win32/sys.zig"
       ]
     },
     {
@@ -426,6 +442,7 @@
         "src/apprt/win32/ipc_server.zig",
         "src/sync/symbolise.zig",
         "src/sync/compare.zig",
+        "src/sync/io_tasks.zig",
         "src/sync/state_mutex.zig",
         "src/termio/stream_handler.zig",
         "ci/lock-inventory-threads.tsv",
@@ -438,7 +455,9 @@
         "ci/soak-thresholds.tsv",
         "scripts/package-windows.ps1",
         "scripts/ci-gui-selection.ps1",
-        "scripts/ci-script-closure.ps1"
+        "scripts/ci-script-closure.ps1",
+        "ci/role_compare3.py",
+        "ci/controls.py"
       ]
     },
     {

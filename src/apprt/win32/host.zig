@@ -124,6 +124,7 @@ const host_titlebar_action_button_size = win32.host_titlebar_action_button_size;
 const infoBannersExpire = win32.infoBannersExpire;
 const input = @import("../../input.zig");
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const isHighContrastActive = win32.isHighContrastActive;
 const keyEventFromWin32Message = win32.keyEventFromWin32Message;
 const keyPressed = win32.keyPressed;
@@ -2602,7 +2603,7 @@ pub const Host = struct {
 
     fn setConfigTheme(config: *configpkg.Config, name: []const u8) !void {
         const arena = config._arena.?.allocator();
-        const owned = try arena.dupeZ(u8, name);
+        const owned = try arena.dupeSentinel(u8, name, 0);
         config.theme = .{
             .light = owned,
             .dark = owned,
@@ -2611,15 +2612,16 @@ pub const Host = struct {
 
     fn loadPaletteThemeConfig(self: *Host, name: []const u8) !configpkg.Config {
         const alloc = self.app.core_app.alloc;
-        const cwd_before = try std.process.getCwdAlloc(alloc);
+        const io = global.io();
+        const cwd_before = try std.process.currentPathAlloc(io, alloc);
         defer alloc.free(cwd_before);
 
         var changed_cwd = false;
         if (self.app.startup_cwd) |cwd| {
-            try std.process.changeCurDir(cwd);
+            try std.process.setCurrentPath(io, cwd);
             changed_cwd = true;
         }
-        defer if (changed_cwd) std.process.changeCurDir(cwd_before) catch |err| {
+        defer if (changed_cwd) std.process.setCurrentPath(io, cwd_before) catch |err| {
             log.warn("palette theme cwd restore failed path={f} err={}", .{ internal_os.redact.bytes(cwd_before), err });
         };
 
@@ -4000,7 +4002,7 @@ pub const Host = struct {
         if (sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, dpi) == 0) {
             // Not a (0,0) frame: this window's own, scaled to `dpi`, which is
             // what the grab used before #703.
-            log.warn("tear-off frame at dpi={} not known err={}; this window's own frame, scaled", .{ dpi, windows.kernel32.GetLastError() });
+            log.warn("tear-off frame at dpi={} not known err={}; this window's own frame, scaled", .{ dpi, std.os.windows.GetLastError() });
             var window_rect: RECT = undefined;
             var origin: POINT = .{ .x = 0, .y = 0 };
             if (sys.GetWindowRect(hwnd, &window_rect) == 0 or sys.ClientToScreen(hwnd, &origin) == 0) return .{ .x = 0, .y = 0 };
@@ -4394,7 +4396,7 @@ pub const Host = struct {
         const prior_target_tree = self.tabs.items[self.active_tab].tree;
         const prior_target_focus = self.tabs.items[self.active_tab].focused;
         self.tabs.items[self.active_tab].tree = next_tree;
-        self.tabs.items[self.active_tab].focused = @enumFromInt(target_node_count + source_focus.idx());
+        self.tabs.items[self.active_tab].focused = @fromBackingInt(@intCast(target_node_count + source_focus.idx()));
         var removed = self.tabs.orderedRemove(source_index);
         self.destroyTabButton(&removed);
         removed.button_placement = .{};
@@ -4718,7 +4720,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(usize, 0), host.active_tab);
 
         // Backward with Shift held.
-        var held = [_]u8{0} ** 256;
+        var held = @as([256]u8, @splat(0));
         held[c.VK_SHIFT] = 0x80;
         keyboard.set(&held);
         _ = sys.SetFocus(stops[0]);
@@ -4728,7 +4730,7 @@ pub const Host = struct {
             try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(from, c.WM_KEYDOWN, c.VK_TAB, 0));
             try std.testing.expectEqual(@as(?HWND, stops[(count - i - 1) % count]), sys.GetFocus());
         }
-        keyboard.set(&([_]u8{0} ** 256));
+        keyboard.set(&(@as([256]u8, @splat(0))));
 
         // Enter is a keyboard activation, not a synthetic mouse press.
         const Clicks = struct {
@@ -5223,7 +5225,7 @@ pub const Host = struct {
 
         fn take() usize {
             var count: usize = 0;
-            while (watched.?.core_surface.io.mailbox.spsc.queue.pop()) |message| {
+            while (watched.?.core_surface.io.mailbox.spsc.queue.pop(std.testing.io)) |message| {
                 message.deinit();
                 count += 1;
             }
@@ -5274,10 +5276,10 @@ pub const Host = struct {
         var client: RECT = undefined;
         _ = sys.GetClientRect(surface.hwnd.?, &client);
         const queue = surface.core_surface.io.mailbox.spsc.queue;
-        const resize = (queue.pop() orelse return error.TestExpectedResize).resize;
+        const resize = (queue.pop(std.testing.io) orelse return error.TestExpectedResize).resize;
         try std.testing.expectEqual(@as(u32, @intCast(client.right)), resize.screen.width);
         try std.testing.expectEqual(@as(u32, @intCast(client.bottom)), resize.screen.height);
-        try std.testing.expect(queue.pop() == null);
+        try std.testing.expect(queue.pop(std.testing.io) == null);
         try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
     }
 
@@ -5416,7 +5418,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.shows);
         try std.testing.expect(!surface_b.window_visible);
         try std.testing.expect(sys.IsWindowVisible(surface_b.hwnd.?) == 0);
-        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop() == null);
+        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
         try std.testing.expectEqual(@as(u8, 0), surface_b.core_surface.resize_batch.depth);
         try expectOneLaidOutResize(&surface_a);
     }
@@ -6591,7 +6593,7 @@ pub const Host = struct {
     pub fn bannerButtonOf(self: *const Host, hwnd: ?HWND) ?BannerButton {
         const value = hwnd orelse return null;
         for (self.banner_buttons, 0..) |button, i| {
-            if (button == value) return @enumFromInt(i);
+            if (button == value) return @fromBackingInt(@intCast(i));
         }
         return null;
     }
@@ -6808,7 +6810,7 @@ pub const Host = struct {
         // UIA Invoke is posted, so it can arrive after the button went away
         // (an overlay opened, the notice changed): a hidden button does
         // nothing.
-        if (!self.bannerShown() or !self.banner_button_placements[@intFromEnum(button)].visible) return;
+        if (!self.bannerShown() or !self.banner_button_placements[@backingInt(button)].visible) return;
         if (self.banner_text != null) {
             if (button != .dismiss) return;
             const had_focus = self.banner_focused;
@@ -6845,7 +6847,7 @@ pub const Host = struct {
             .dismiss => self.activateBannerButton(.dismiss),
             .other_button => {
                 const other: BannerButton = if (button == .primary) .dismiss else .primary;
-                if (focusableHwnd(self.banner_buttons[@intFromEnum(other)])) |target| {
+                if (focusableHwnd(self.banner_buttons[@backingInt(other)])) |target| {
                     if (target != hwnd) _ = sys.SetFocus(target);
                 }
             },
@@ -6975,7 +6977,7 @@ pub const Host = struct {
         }
         const notice = self.app.update_notice orelse return "";
         const label = if (notice.staged) "Install" else "Open Release";
-        return switch (@as(BannerButton, @enumFromInt(tag))) {
+        return switch (@as(BannerButton, @fromBackingInt(@intCast(tag)))) {
             .primary => if (notice.message_text) |text|
                 std.fmt.bufPrint(buf, "{s}: {s}", .{ label, utf8BoundedPrefix(text, buf.len -| label.len -| 2) }) catch label
             else
@@ -7048,7 +7050,7 @@ pub const Host = struct {
         };
         pub const raw = struct {
             extern "gdi32" fn CreateDIBSection(hdc: HDC, info: *const BITMAPINFOHEADER, usage: u32, bits: *?[*]u32, section: ?*anyopaque, offset: u32) callconv(.winapi) HGDIOBJ;
-            pub extern "gdi32" fn GdiFlush() callconv(.winapi) i32;
+            pub const GdiFlush = sys.GdiFlush;
         };
 
         dc: HDC,
@@ -7135,8 +7137,8 @@ pub const Host = struct {
 
     fn bannerTestPress(host: *Host, button: BannerButton) void {
         const banner = host.banner_hwnd.?;
-        const child = host.banner_buttons[@intFromEnum(button)].?;
-        const id: usize = 1914 + @as(usize, @intFromEnum(button));
+        const child = host.banner_buttons[@backingInt(button)].?;
+        const id: usize = 1914 + @as(usize, @backingInt(button));
         _ = sys.SendMessageW(banner, c.WM_COMMAND, (c.BN_CLICKED << 16) | id, @bitCast(@intFromPtr(child)));
     }
 
@@ -7156,7 +7158,7 @@ pub const Host = struct {
         const window = try BannerTestWindow.init(&host);
         defer window.deinit(&host);
         const banner = host.banner_hwnd.?;
-        const close_button = host.banner_buttons[@intFromEnum(BannerButton.dismiss)].?;
+        const close_button = host.banner_buttons[@backingInt(BannerButton.dismiss)].?;
 
         // Nothing to show: hidden, so F6 skips it.
         host.layoutBanner(window.content, window.content.top);
@@ -7179,7 +7181,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(i32, 32), banner_rect.bottom - banner_rect.top);
         // A close button, nothing else.
         try std.testing.expect(bannerTestVisible(close_button));
-        try std.testing.expect(!bannerTestVisible(host.banner_buttons[@intFromEnum(BannerButton.primary)].?));
+        try std.testing.expect(!bannerTestVisible(host.banner_buttons[@backingInt(BannerButton.primary)].?));
         // Opaque to the pointer, unlike the hit-transparent child it was.
         const center_x: LPARAM = @divTrunc(banner_rect.left + banner_rect.right, 2);
         const center_y: LPARAM = @divTrunc(banner_rect.top + banner_rect.bottom, 2);
@@ -7245,8 +7247,8 @@ pub const Host = struct {
         const window = try BannerTestWindow.init(&host);
         defer window.deinit(&host);
         const banner = host.banner_hwnd.?;
-        const primary = host.banner_buttons[@intFromEnum(BannerButton.primary)].?;
-        const dismiss = host.banner_buttons[@intFromEnum(BannerButton.dismiss)].?;
+        const primary = host.banner_buttons[@backingInt(BannerButton.primary)].?;
+        const dismiss = host.banner_buttons[@backingInt(BannerButton.dismiss)].?;
         host.layoutBanner(window.content, window.content.top);
 
         // Never press these here: Dismiss writes the real update state and
@@ -7267,13 +7269,13 @@ pub const Host = struct {
         );
         try std.testing.expectEqualStrings(
             "Open Release: Update available: noctty 1.3.200 is ready on GitHub Releases.",
-            bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.primary), &name_buf),
+            bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.primary), &name_buf),
         );
-        try std.testing.expectEqualStrings("Dismiss update notice", bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.dismiss), &name_buf));
+        try std.testing.expectEqualStrings("Dismiss update notice", bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.dismiss), &name_buf));
         // A staged update offers Install instead, in the label and the name.
         app.update_notice.?.staged = true;
         try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Install"), host.bannerButtonLabel(.primary));
-        try std.testing.expect(std.mem.startsWith(u8, bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.primary), &name_buf), "Install: "));
+        try std.testing.expect(std.mem.startsWith(u8, bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.primary), &name_buf), "Install: "));
         try std.testing.expectEqual(chrome_layout.BannerActions.update_staged, host.bannerActions());
         app.update_notice.?.staged = false;
         // Updates never count down.
@@ -7293,7 +7295,7 @@ pub const Host = struct {
         try host.setBanner(.info, "Layout saved.");
         try std.testing.expectEqual(chrome_layout.BannerActions.close, host.bannerActions());
         try std.testing.expect(!bannerTestVisible(primary));
-        try std.testing.expectEqualStrings("Close: Layout saved.", bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.dismiss), &name_buf));
+        try std.testing.expectEqualStrings("Close: Layout saved.", bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.dismiss), &name_buf));
         // UIA Invoke is posted: one that lands while an overlay hides the
         // banner does nothing.
         host.overlay_mode = .tab_title;
@@ -7322,9 +7324,9 @@ pub const Host = struct {
     /// no window yet).
     pub fn runOnPrivateDesktop(comptime body: anytype) !void {
         const Desktop = struct {
-            extern "user32" fn CreateDesktopW(name: [*:0]const u16, device: ?*anyopaque, mode: ?*anyopaque, flags: u32, access: u32, attributes: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-            extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
-            extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+            const CreateDesktopW = sys.CreateDesktopW;
+            const SetThreadDesktop = sys.SetThreadDesktop;
+            const CloseDesktop = sys.CloseDesktop;
             fn run(desktop: *anyopaque, result: *anyerror!void) void {
                 // This desktop's UI thread from its first statement (test 9 wants an
                 // entry's role scope first): the body's windows are made and
@@ -7435,7 +7437,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         host.bannerPointerLeft();
         try std.testing.expect(host.banner_expires_at != null);
-        host.setHoveredButton(host.banner_buttons[@intFromEnum(BannerButton.dismiss)]);
+        host.setHoveredButton(host.banner_buttons[@backingInt(BannerButton.dismiss)]);
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         host.setHoveredButton(null);
         try std.testing.expect(host.banner_expires_at != null);
@@ -7531,8 +7533,8 @@ pub const Host = struct {
         host.refreshSurfaceVisibility();
 
         const name = std.unicode.utf8ToUtf16LeStringLiteral("NOCTTY_RENDERER_KEEP_NOTICES");
-        if (windows.kernel32.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
-        defer _ = windows.kernel32.SetEnvironmentVariableW(name, null);
+        if (sys.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
+        defer _ = sys.SetEnvironmentVariableW(name, null);
         try host.setBanner(.info, "OpenGL could not start.");
         bannerTestPaint(&host);
         if (build_config.renderer_test_tools) {
@@ -9080,10 +9082,10 @@ pub const Host = struct {
     pub fn chromeUiaProviderForHwnd(self: *Host, child: HWND) ?*win32_uia.ChromeControlProvider {
         if (self.new_tab_hwnd == child) return self.new_tab_uia_provider;
         if (self.overflow_hwnd == child) return self.overflow_uia_provider;
-        if (self.bannerButtonOf(child)) |button| return self.banner_button_uia_providers[@intFromEnum(button)];
+        if (self.bannerButtonOf(child)) |button| return self.banner_button_uia_providers[@backingInt(button)];
         const surface = self.searchControlSurface(child) orelse return null;
         const role = surface.searchBarButtonRole(child) orelse return null;
-        return surface.search_bar_button_uia_providers[@intFromEnum(role)];
+        return surface.search_bar_button_uia_providers[@backingInt(role)];
     }
 
     pub const searchBarButtonRole = search_controls.HostControls.searchBarButtonRole;
@@ -10131,7 +10133,7 @@ pub const Host = struct {
         var profiles = [_]windows_shell.Profile{.{ .kind = .powershell, .key = "chrome57-profile", .label = "PowerShell", .command = .{ .shell = "pwsh" } }};
         host.profiles = &profiles;
         defer host.profiles = null;
-        const key = try std.testing.allocator.dupeZ(u8, profiles[0].key);
+        const key = try std.testing.allocator.dupeSentinel(u8, profiles[0].key, 0);
         defer std.testing.allocator.free(key);
         app.launcher_quick_slot_keys[0] = key;
         defer app.launcher_quick_slot_keys[0] = null;
@@ -11590,8 +11592,10 @@ pub const Host = struct {
     /// (client coordinates), with the panes laid out in `content`.
     pub fn paneDividerAt(self: *Host, content: RECT, point: POINT) ?PaneDividers.Divider {
         const tab = self.paneDividerTab() orelse return null;
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         return PaneDividers.hitTest(
@@ -11853,8 +11857,10 @@ pub const Host = struct {
         const along = paneDividerAlong(drag.layout, point);
         const same_content = paneDividerSameRect(content, drag.anchor_content);
         const ratio = if (same_content and along == drag.press_along and drag.anchor_along == drag.press_along) drag.start_ratio else ratio: {
-            var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-            const alloc = fallback.get();
+            // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+            var fallback_buf: [2048]u8 = undefined;
+            var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+            const alloc = fallback.allocator();
             var spatial = tab.tree.spatial(alloc) catch return;
             defer spatial.deinit(alloc);
             const area = paneDividerArea(content);
@@ -11896,8 +11902,10 @@ pub const Host = struct {
         const now = tab.tree.nodes[handle.idx()].split.ratio;
         defer tab.tree.resizeInPlace(handle, now);
         tab.tree.resizeInPlace(handle, ratio);
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         const area = paneDividerArea(content);
@@ -11938,8 +11946,10 @@ pub const Host = struct {
     /// Where the divider at `handle` sits in `content`, along its axis.
     fn paneDividerPosition(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle, content: RECT) ?i32 {
         if (builtin.is_test and self.test_pane_divider_lookup_fails) return null;
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         const found = PaneDividers.divider(&tab.tree, spatial, paneDividerArea(content), handle, 0) orelse return null;
@@ -12450,9 +12460,9 @@ test "win32 settings patch persists a palette theme selection" {
     defer pending.deinit();
     try Host.setConfigTheme(&pending, "0x96f");
 
-    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
-    edited.set(@intFromEnum(ConfigKey.theme));
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .empty;
+    edited.set(@backingInt(ConfigKey.theme));
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);
     try patchOrAppendEdits(
         testing.allocator,
@@ -12507,8 +12517,8 @@ test "win32 a palette theme preview drops the startup launch-layout it parses ag
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "preview-theme", alloc);
     defer alloc.free(theme);
 
     // What `loadPaletteThemeConfig` has before it finishes: the command line,
@@ -12534,8 +12544,8 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "preview-theme", alloc);
     defer alloc.free(theme);
 
     // The running config, which the hosts' lists were built from.
@@ -13021,13 +13031,20 @@ const PaletteCapacityTest = struct {
         host.profiles = try windows_shell.cloneProfiles(app.core_app.alloc, &profile_list);
         host.profiles_complete = true;
 
-        // A full recent-action list, of distinct commands.
+        // A full recent-action list, of distinct commands the palette lists
+        // (`catalog.listsAction`: not `open_config:new_window`).
         const snap = host.paletteSnapshot();
         defer app.palette_mru = @splat(null);
         var recent: usize = 0;
+        var listed_commands: usize = 0;
+        for (snap.cvals) |cval| {
+            if (win32_palette.catalog.listsAction(std.mem.span(cval.action))) listed_commands += 1;
+        }
+        try std.testing.expect(listed_commands < snap.commands.len);
         for (snap.cvals) |cval| {
             if (recent == app.palette_mru.len) break;
             const action = std.mem.span(cval.action);
+            if (!win32_palette.catalog.listsAction(action)) continue;
             for (app.palette_mru[0..recent]) |slot| {
                 if (std.mem.eql(u8, slot.?, action)) break;
             } else {
@@ -13060,7 +13077,7 @@ const PaletteCapacityTest = struct {
         try std.testing.expectEqual(tabs, kinds.get(.tab));
         try std.testing.expectEqual(tabs * panes_per_tab, kinds.get(.pane));
         try std.testing.expectEqual((tabs - 1) * 4, transfers);
-        try std.testing.expectEqual(snap.commands.len + transfers, kinds.get(.action));
+        try std.testing.expectEqual(listed_commands + transfers, kinds.get(.action));
         try std.testing.expectEqual(profiles, kinds.get(.profile));
         try std.testing.expectEqual(std.enums.values(win32_settings.SettingField).len, kinds.get(.setting));
         try std.testing.expectEqual(@as(usize, win32_palette.catalog.reviewed_help.len), kinds.get(.help));

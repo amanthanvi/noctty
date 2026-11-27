@@ -4,7 +4,8 @@ pub const Thread = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
+const xev = global.xev;
 const crash = @import("../crash/main.zig");
 const internal_os = @import("../os/main.zig");
 const rendererpkg = @import("../renderer.zig");
@@ -370,7 +371,7 @@ pub fn sendMessage(
     notify(wakeup);
 
     // Renderer messages may transfer ownership or required state.
-    _ = mailbox.push(msg, .{ .forever = {} });
+    _ = mailbox.push(global.io(), msg, .{ .forever = {} });
 
     notify(wakeup);
 }
@@ -390,7 +391,7 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
     const pool = darwin.beginAutoreleasePool();
     defer darwin.endAutoreleasePool(pool);
 
-    while (self.mailbox.pop()) |message| {
+    while (self.mailbox.pop(global.io())) |message| {
         log.debug("mailbox message={}", .{message});
         switch (message) {
             .crash => @panic("crash request, crashing intentionally"),
@@ -492,6 +493,9 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
                 self.flags.has_inspector = v;
             },
 
+            // GTK's DMABUF export reports it (47693cc4b); nothing on Win32
+            // sends it.
+            .presentation_health => {},
             .macos_display_id => |v| {
                 if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
                     try self.renderer.setMacOSDisplayID(v);
@@ -935,9 +939,36 @@ test "a timer reset in the pass it falls due loses the run its callback arms nex
     defer probe.b.deinit();
     probe.a.run(&loop, &probe.a_c, 1, Probe, &probe, Probe.onA);
     probe.b.run(&loop, &probe.b_c, 2, Probe, &probe, Probe.onB);
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
     try loop.run(.until_done);
     try std.testing.expectEqualStrings("RCR", probe.seen[0..probe.len]);
+}
+
+test "the Win32 runtime declares every hook this file probes by name" {
+    // `@hasDecl` is false for a declaration that is not `pub`, so a hook
+    // that loses `pub`, or its name, turns its call off without a compile
+    // error (tooling.md: 2026-11-06 FACADE-S8-HASDECL, 2026-11-26
+    // HASDECL-PRIVATE-017).
+    if (comptime @import("../build_config.zig").app_runtime != .win32) return error.SkipZigTest;
+    inline for (.{
+        "must_draw_from_app_thread",
+        "renderer_pacing_clock",
+    }) |name| {
+        errdefer std.debug.print("apprt.App does not declare the hook {s}\n", .{name});
+        try std.testing.expect(@hasDecl(apprt.App, name));
+    }
+    inline for (.{
+        "cancelRendererRepaintRequest",
+        "noteRendererDrawRequest",
+        "beginRendererRepaintRequest",
+        "beginRendererFrameUpdate",
+        "noteRendererUpdateFrame",
+        "noteRendererWakeupCallback",
+        "noteRendererFollowupCallback",
+    }) |name| {
+        errdefer std.debug.print("apprt.Surface does not declare the hook {s}\n", .{name});
+        try std.testing.expect(@hasDecl(apprt.Surface, name));
+    }
 }
 
 test "send wakes the renderer before waiting on a full mailbox" {
@@ -952,7 +983,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
     defer mailbox.destroy(alloc);
 
     var filled: usize = 0;
-    while (mailbox.push(.{ .reset_cursor_blink = {} }, .{ .instant = {} }) != 0) {
+    while (mailbox.push(testing.io, .{ .reset_cursor_blink = {} }, .{ .instant = {} }) != 0) {
         filled += 1;
     }
     try testing.expect(filled > 0);
@@ -960,7 +991,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
     // Confirm the mailbox really is full before we test the blocking path.
     try testing.expectEqual(
         @as(Mailbox.Size, 0),
-        mailbox.push(.{ .focus = true }, .{ .instant = {} }),
+        mailbox.push(testing.io, .{ .focus = true }, .{ .instant = {} }),
     );
 
     const Consumer = struct {
@@ -979,7 +1010,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
         /// Pop exactly the messages we pre-filled, leaving whatever the
         /// sender adds. Draining until empty would race the sender's push.
         fn drain(self: *Consumer) void {
-            for (0..self.to_drain) |_| _ = self.mailbox.pop();
+            for (0..self.to_drain) |_| _ = self.mailbox.pop(std.testing.io);
             self.loop.stop();
         }
 
@@ -1041,10 +1072,10 @@ test "send wakes the renderer before waiting on a full mailbox" {
     try testing.expect(consumer.woken);
 
     // And the message was delivered rather than dropped.
-    const delivered = mailbox.pop();
+    const delivered = mailbox.pop(testing.io);
     try testing.expect(delivered != null);
     try testing.expect(std.meta.activeTag(delivered.?) == .focus);
-    try testing.expect(mailbox.pop() == null);
+    try testing.expect(mailbox.pop(testing.io) == null);
 }
 
 /// The renderer's state for a `Frame` whose reads a test calls: `screen` and
@@ -1057,7 +1088,7 @@ const FrameReadTest = struct {
 
     fn init(self: *FrameReadTest) !void {
         self.* = .{ .term = undefined, .state = undefined, .t = undefined };
-        self.term = try terminalpkg.Terminal.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+        self.term = try terminalpkg.Terminal.init(std.testing.io, std.testing.allocator, .{ .cols = 4, .rows = 3 });
         self.state = .{ .mutex = &self.renderer_mutex, .terminal = &self.term };
         self.t.state = &self.state;
     }

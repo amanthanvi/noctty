@@ -28,7 +28,7 @@ const ownedStringEquals = paint_text.ownedStringEquals;
 const rectEquals = chrome_layout.rectEquals;
 
 pub fn lastError() std.posix.UnexpectedError {
-    return windows.unexpectedError(windows.kernel32.GetLastError());
+    return windows.unexpectedError(std.os.windows.GetLastError());
 }
 
 pub fn setWindowData(hwnd: HWND, ptr: ?*anyopaque) void {
@@ -155,7 +155,7 @@ pub fn syncWindowTextUtf8CachedAfterSet(
 
 pub fn readWindowTextUtf8Alloc(alloc: Allocator, hwnd: HWND) ![:0]u8 {
     const len_w = sys.GetWindowTextLengthW(hwnd);
-    if (len_w <= 0) return try alloc.dupeZ(u8, "");
+    if (len_w <= 0) return try alloc.dupeSentinel(u8, "", 0);
 
     const needed: usize = @intCast(len_w + 1);
     var buf_w = try alloc.alloc(u16, needed);

@@ -14,6 +14,7 @@
 //! the Windows SDK headers (dwrite.h, dwrite_1.h, dwrite_2.h).
 
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.discovery);
@@ -38,7 +39,7 @@ pub const SystemFallback = struct {
     fallback: ?*IDWriteFontFallback = null,
     /// Null-terminated user locale, e.g. "ja-JP". DirectWrite picks
     /// language-appropriate fonts from it, most visibly for CJK text.
-    locale: [locale_name_max]u16 = [_]u16{0} ** locale_name_max,
+    locale: [locale_name_max]u16 = @as([locale_name_max]u16, @splat(0)),
     /// Set after the first attempt, successful or not, so a machine
     /// without DirectWrite fallback is not retried on every codepoint.
     tried: bool = false,
@@ -497,16 +498,16 @@ test "windowsDwriteSamePathIgnoresCaseAndSeparator" {
 
         // Paths spanning many comparison chunks still fold non-ASCII case,
         // including where a letter sits on a chunk boundary.
-        const long_a = "C:\\" ++ "ю" ** (compare_chunk * 3 + 5) ++ ".ttf";
-        const long_b = "c:/" ++ "Ю" ** (compare_chunk * 3 + 5) ++ ".TTF";
+        const long_a = "C:\\" ++ comptime win32_repeat.repeat("ю", (compare_chunk * 3 + 5)) ++ ".ttf";
+        const long_b = "c:/" ++ comptime win32_repeat.repeat("Ю", (compare_chunk * 3 + 5)) ++ ".TTF";
         try testing.expect(samePath(long_a, long_b));
-        const long_c = "c:/" ++ "Ю" ** (compare_chunk * 3 + 4) ++ "Я.TTF";
+        const long_c = "c:/" ++ comptime win32_repeat.repeat("Ю", (compare_chunk * 3 + 4)) ++ "Я.TTF";
         try testing.expect(!samePath(long_a, long_c));
 
         // One unit longer, right at a chunk boundary: not the same path.
-        const exact = "x" ** compare_chunk;
+        const exact = comptime win32_repeat.repeat("x", compare_chunk);
         try testing.expect(!samePath(exact, exact ++ "x"));
-        try testing.expect(samePath(exact, "X" ** compare_chunk));
+        try testing.expect(samePath(exact, comptime win32_repeat.repeat("X", compare_chunk)));
 
         // A supplementary-plane letter (a surrogate pair in UTF-16).
         try testing.expect(samePath("C:\\𝒳\\a.ttf", "c:/𝒳/A.TTF"));
@@ -548,8 +549,8 @@ test "windowsDwriteSystemFallbackMapsToALocalFontFile" {
             defer mapped.deinit(testing.allocator);
             try testing.expect(mapped.path.len > 0);
             try testing.expect(mapped.face_index >= 0);
-            const file = try std.fs.openFileAbsolute(mapped.path, .{});
-            file.close();
+            const file = try std.Io.Dir.openFileAbsolute(testing.io, mapped.path, .{});
+            file.close(testing.io);
         }
     } else return error.SkipZigTest;
 }

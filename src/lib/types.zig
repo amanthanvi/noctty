@@ -28,10 +28,12 @@ test "String init accepts byte slices" {
 }
 
 test "String.init empty output" {
-    const testing = @import("std").testing;
-    const empty = try testing.allocator.alloc(u8, 0);
-    defer testing.allocator.free(empty);
+    const std = @import("std");
+    const empty = try std.testing.allocator.alloc(u8, 0);
+    defer std.testing.allocator.free(empty);
     const str = String.init(empty);
-    try testing.expectEqual(@as(usize, 0), str.len);
-    try testing.expectEqual(@as([*]const u8, ""), str.ptr);
+    try std.testing.expectEqual(@as(usize, 0), str.len);
+    // Empty borrowed strings use the same real storage as an empty literal,
+    // never Zig's zero-length allocation sentinel.
+    try std.testing.expectEqual(@as([*]const u8, ""), str.ptr);
 }

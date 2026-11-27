@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const util = @import("util.zig");
 
@@ -7,6 +9,7 @@ const log = std.log.scoped(.update_portable_apply);
 const portableRelativePathAlloc = util.portableRelativePathAlloc;
 const parseSha256Hex = util.parseSha256Hex;
 const sha256File = util.sha256File;
+const updateIo = util.updateIo;
 
 pub const StagedKind = enum {
     installer,
@@ -149,13 +152,13 @@ pub const managed_entries = [_][]const u8{
 /// payload without every `managed_entries` name while staging
 /// (`verifyPortablePayload`, in the running app) and again in the swap (run by
 /// `portable-update-helper.exe`, a copy of the running, old, executable). So
-/// the portable ZIP keeps a file under each retired name until a release with
-/// this list has been out; `legacy_updater_required_entries` pins that, and
-/// `retired_placeholders` says what the file is meanwhile.
+/// the portable ZIP kept a file under each retired name until a release with
+/// this list had been out; `legacy_updater_required_entries` pins that, and
+/// `portable_zip_carries_legacy_entries` says it no longer does.
 pub const retired_entries = [_][]const u8{
     // The name of libghostty-vt 0.1.0, the pre-1.0 C ABI, which is also the
     // name upstream's libghostty-vt 1.0 DLL uses. noctty.exe does not import
-    // it, and the portable ZIP carries a placeholder under it.
+    // it, and from v1.4.100 the portable ZIP carries nothing under it.
     "ghostty-vt.dll",
 };
 
@@ -196,7 +199,7 @@ pub fn requirePayloadEntries(alloc: Allocator, payload_root: []const u8) !void {
 /// Whether a payload has `name`: false only for a retired entry it leaves
 /// out, `IncompletePortablePayload` for any other entry it cannot show.
 fn payloadEntryPresent(path: []const u8, name: []const u8) !bool {
-    std.fs.accessAbsolute(path, .{}) catch |err| return payloadEntryAbsent(err, name);
+    std.Io.Dir.accessAbsolute(updateIo(), path, .{}) catch |err| return payloadEntryAbsent(err, name);
     return true;
 }
 
@@ -239,7 +242,7 @@ fn expectScriptManagedEntries(script: []const u8) !void {
     const list_end = std.mem.indexOf(u8, remainder, ")) {") orelse
         return error.InvalidManagedRootList;
 
-    var seen = [_]bool{false} ** managed_entries.len;
+    var seen = @as([managed_entries.len]bool, @splat(false));
     var lines = std.mem.splitScalar(u8, remainder[0..list_end], '\n');
     while (lines.next()) |raw_line| {
         var line = std.mem.trim(u8, raw_line, " \t\r");
@@ -264,7 +267,7 @@ test "portable managed entries match both PowerShell manifest script sets" {
         "scripts/package-windows.ps1",
         "scripts/portable-manifest-verification.ps1",
     }) |path| {
-        const script = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
+        const script = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, alloc, .limited(1024 * 1024));
         defer alloc.free(script);
         try expectScriptManagedEntries(script);
     }
@@ -300,69 +303,28 @@ test "portable managed script list parser rejects missing extra and duplicate en
 }
 
 /// Whether the portable ZIP still carries a file under each retired name
-/// that `legacy_updater_required_entries` names. From 1.3.137 that file is a
-/// placeholder (`retired_placeholders`), not the retired library. Without it,
-/// every portable copy of 1.3.125 to 1.3.136 fails to stage the update
-/// (`IncompletePortablePayload`) and falls back to the release page. (No
-/// release up to 1.3.124 updates a portable copy in-app, so those copies
-/// already update by hand.)
+/// that `legacy_updater_required_entries` names. False from v1.4.100 (the
+/// maintainer's decision). From 1.3.137 until then that file was a
+/// noctty-built placeholder, not the retired library: it exported nothing
+/// and failed to load, and it was there only because the portable updater
+/// of 1.3.125 to 1.3.136 refuses a payload without it
+/// (`IncompletePortablePayload`) and falls back to the release page. That
+/// updater asks of a payload DLL only that it exists, has its line in the
+/// signed manifest, has the build's PE machine and carries the pinned
+/// publisher's signature; it never loads it.
 ///
-/// Why a placeholder satisfies them: their updater (identical from v1.3.125
-/// to v1.3.136 in `github_releases.zig`) asks of a payload DLL only that it
-/// exists (`verifyPortablePayload`, and `swapPayload` in the helper), has its
-/// SHA-256 line in the signed manifest
-/// (`verifyPortablePayloadAgainstManifest`), is `MZ`/`PE` with the build's
-/// machine (`verifyPortablePeMachine`, `readPeMachine`) and carries a
-/// pinned-publisher Authenticode signature (`verifyPortablePayloadBinaries`,
-/// `portableBinaryTrust`). Nothing reads its exports, size or version
-/// resource (`readWindowsFileVersion`, later `verifyStagedBinaryVersion`,
-/// reads only noctty.exe), and nothing loads it: their only `LoadLibraryW`
-/// calls are for wintrust.dll and version.dll. So the placeholder's DllMain
-/// never runs during an update.
+/// So portable copies on 1.3.125 to 1.3.136 that never installed a release
+/// with the placeholder (1.3.137 or later) have to update by hand; every
+/// later copy has `retired_entries` and updates in-app. (No release up to
+/// 1.3.124 updates a portable copy in-app, so those copies already update
+/// by hand.) The change that set this false dropped the placeholder: its
+/// build, its staging and smoke checks, its pins and what the docs said of
+/// it. The 2026-11-08 entry on the portable ZIP's placeholder in
+/// docs/agents/log/build-release-ci.md records what it was. Nothing builds
+/// a placeholder any more, so setting this back to true fails
+/// `checkPackagingStagesPlaceholders`.
 ///
-/// Set it to false in v1.4.100 (the maintainer's decision), in the change
-/// that drops the placeholder. Portable copies on 1.3.125 to 1.3.136 that
-/// never installed a release with the placeholder (1.3.137 or later) then
-/// have to update by hand; every later copy has `retired_entries` and
-/// updates in-app. That change drops (names, not line numbers, so this
-/// survives edits):
-/// - the placeholder from `$runtimeFiles` in scripts/package-windows.ps1 and
-///   scripts/build-package-windows.ps1, its `Assert-GhosttyVtStub` call in
-///   scripts/package-windows.ps1, and so ghostty-vt.pdb from the symbols ZIP;
-/// - its build: `GhosttyVtStub` in build.zig, src/build/GhosttyVtStub.zig,
-///   src/ghostty_vt_stub/ and scripts/ghostty-vt-stub.ps1;
-/// - `retired_placeholders` and its check here (the test "portable payload
-///   keeps retired entries while older updaters require them");
-/// - `noctty/ghostty-vt.dll` from `Get-WindowsSignedRuntimePayloads` in
-///   scripts/common.ps1 (the release chain derives its expected signature
-///   count from it, so the count drops on its own) and the pins of that list
-///   in test/windows/flagship/contracts/Contracts.93-ConPty.ps1;
-/// - the list in the github_releases.zig test "portable payload PEs are
-///   publisher-pinned except the bundled ConPTY pair", which mirrors
-///   `Get-WindowsSignedRuntimePayloads`;
-/// - scripts/test-windows-build-capabilities.ps1's placeholder path;
-/// - the placeholder smoke: test/windows/package-portable-cli.ps1,
-///   test/windows/test_dll_init.c, its section in test/windows/README.md and
-///   its rule in scripts/ci-changed-paths.ps1;
-/// - the placeholder pins in the contracts: `$vtStubBuild82` in
-///   Contracts.82-ReleaseSymbols.ps1, the staging check
-///   (`Get-PlaceholderStagingProblems` and its controls) in
-///   Contracts.93-ConPty.ps1, and the reviewed package-portable-cli.ps1
-///   digest in Contracts.99-Baselines.ps1 and baselines/origin-main.json;
-/// - the ARM64 packaged smoke step in .github/workflows/windows-arm64.yml;
-/// - the comment on the stage rule in dist/windows/noctty.iss, and the
-///   placeholder's names in the AGENTS.md build-release-ci trigger and the
-///   .greptile scope;
-/// - the symbols fixture in
-///   test/windows/flagship/contracts/Contracts.82-ReleaseSymbols.ps1. It is
-///   synthetic but not independent: `Assert-SymbolsMatchBinaries` takes its
-///   binary list from `Get-WindowsSignedRuntimePayloads`, so with the DLL gone
-///   from that list the fixture's ghostty-vt.pdb "matches no shipped binary",
-///   its evidence count of 3 is wrong, and the age-mismatch case has to move
-///   to another binary;
-/// - what PACKAGING.md, CONTRIBUTING.md and docs/status.md say the portable
-///   ZIP carries, and the v1.4.100 notice in them.
-/// These keep naming it. The `$managedRootFiles` allowlists in
+/// These keep naming the DLL. The `$managedRootFiles` allowlists in
 /// scripts/portable-manifest-verification.ps1 and scripts/package-windows.ps1
 /// must match `managed_entries`, which keeps the DLL while the updater manages
 /// retired copies (they permit it in a payload, they do not require it).
@@ -370,36 +332,7 @@ test "portable managed script list parser rejects missing extra and duplicate en
 /// scripts/check-site-copy.ps1 and site/tests/trust.test.mjs. The lib-vt jobs
 /// in .github/workflows/test.yml stay while CI builds lib-vt; packaging
 /// stopped building it in 1.3.137.
-///
-/// The placeholder's cost: a file under the name upstream's libghostty-vt 1.0
-/// DLL uses stays in the portable ZIP until then. A program that loads it
-/// fails at once (`ERROR_DLL_INIT_FAILED`) rather than binding to an old ABI.
-const portable_zip_carries_legacy_entries = true;
-
-/// What the packaging scripts stage under a retired name while
-/// `portable_zip_carries_legacy_entries` holds: a `$runtimeFiles` path under
-/// zig-out\bin whose leaf is the retired name, built by noctty for the
-/// purpose. Any other `$runtimeFiles` item with that leaf (above all the
-/// `-Demit-lib-vt=true` library at zig-out\bin\ghostty-vt.dll) is refused.
-const RetiredPlaceholder = struct {
-    entry: []const u8,
-    runtime_file: []const u8,
-};
-
-const retired_placeholders = [_]RetiredPlaceholder{
-    // src/build/GhosttyVtStub.zig: exports and imports nothing, and its
-    // DllMain fails DLL_PROCESS_ATTACH. scripts/package-windows.ps1 checks
-    // the staged file (`Assert-GhosttyVtStub`) and the packaged smoke
-    // (test/windows/test_dll_init.c) loads it.
-    .{ .entry = "ghostty-vt.dll", .runtime_file = "ghostty-vt-stub\\ghostty-vt.dll" },
-};
-
-fn retiredPlaceholder(entry: []const u8) ?RetiredPlaceholder {
-    for (retired_placeholders) |placeholder| {
-        if (std.mem.eql(u8, placeholder.entry, entry)) return placeholder;
-    }
-    return null;
-}
+const portable_zip_carries_legacy_entries = false;
 
 /// The quoted names of a PowerShell `<marker> @(` list, one per line, with
 /// blank and `#` comment lines skipped. Any other syntax is refused rather
@@ -439,31 +372,28 @@ fn scriptListContains(script: []const u8, marker: []const u8, name: []const u8) 
     return found;
 }
 
-/// A packaging script stages a placeholder, never the retired file, under
-/// each retired name the older updaters require, and builds no libghostty-vt:
-/// - no `$runtimeFiles` item other than a placeholder has a retired leaf name
-///   (compared without case, as Windows does);
-/// - the placeholder is listed exactly while
-///   `portable_zip_carries_legacy_entries` holds;
+/// A packaging script stages nothing under a retired name and builds no
+/// libghostty-vt:
+/// - no `$runtimeFiles` item has a retired leaf name (compared without case,
+///   as Windows does): v1.4.100 dropped the placeholder, and the
+///   `-Demit-lib-vt=true` library at zig-out\bin\ghostty-vt.dll never ships;
+/// - `portable_zip_carries_legacy_entries` does not hold, since nothing is
+///   left to stage under a retired name the older updaters require;
 /// - no line outside a `#` comment passes `-Demit-lib-vt`.
 fn checkPackagingStagesPlaceholders(script: []const u8) !void {
     var items = try ScriptListIterator.init(script, "$runtimeFiles = @(");
+    var count: usize = 0;
     while (try items.next()) |item| {
+        count += 1;
         const leaf_start = if (std.mem.lastIndexOfAny(u8, item, "\\/")) |i| i + 1 else 0;
         const leaf = item[leaf_start..];
         for (retired_entries) |entry| {
-            if (!std.ascii.eqlIgnoreCase(leaf, entry)) continue;
-            const placeholder = retiredPlaceholder(entry) orelse return error.RetiredEntryStaged;
-            if (!std.mem.eql(u8, item, placeholder.runtime_file)) return error.RetiredEntryStaged;
+            if (std.ascii.eqlIgnoreCase(leaf, entry)) return error.RetiredEntryStaged;
         }
     }
+    if (count == 0) return error.ScriptListMissing;
 
-    for (legacy_updater_required_entries) |entry| {
-        if (!isRetiredEntry(entry)) continue;
-        const placeholder = retiredPlaceholder(entry) orelse return error.RetiredEntryWithoutPlaceholder;
-        const shipped = try scriptListContains(script, "$runtimeFiles = @(", placeholder.runtime_file);
-        if (shipped != portable_zip_carries_legacy_entries) return error.RetiredEntryTransitionBroken;
-    }
+    if (portable_zip_carries_legacy_entries) return error.RetiredEntryTransitionBroken;
 
     var lines = std.mem.splitScalar(u8, script, '\n');
     while (lines.next()) |raw_line| {
@@ -561,9 +491,9 @@ fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
         if (std.mem.indexOf(u8, line, "{#") != null) return error.SetupRuleExpansion;
         if (std.mem.indexOfAny(u8, line, "*?") != null) return error.SetupExtraWildcardRule;
         for (retired_entries) |entry| {
-            if (std.ascii.indexOfIgnoreCase(line, entry) != null) return error.RetiredEntryInstalledBySetup;
+            if (std.ascii.findIgnoreCase(line, entry) != null) return error.RetiredEntryInstalledBySetup;
         }
-        if (std.ascii.indexOfIgnoreCase(line, "libghostty-vt") != null) return error.LibVtShareFileInstalledBySetup;
+        if (std.ascii.findIgnoreCase(line, "libghostty-vt") != null) return error.LibVtShareFileInstalledBySetup;
     }
     const rule = stage_rule orelse return error.SetupStageRuleMissing;
 
@@ -595,7 +525,7 @@ fn checkSetupRetiresLibVt(alloc: Allocator, iss: []const u8) !void {
 
 test "Setup retirement check reads only the rules ISCC compiles" {
     const alloc = std.testing.allocator;
-    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
+    const iss = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "dist/windows/noctty.iss", alloc, .limited(1024 * 1024));
     defer alloc.free(iss);
     try checkSetupRetiresLibVt(alloc, iss);
 
@@ -663,17 +593,13 @@ test "portable payload keeps retired entries while older updaters require them" 
         try std.testing.expect(!std.mem.eql(u8, entry, "share"));
     }
 
-    for (retired_entries) |entry| {
-        if (retiredPlaceholder(entry) == null) return error.RetiredEntryWithoutPlaceholder;
-    }
-
     // The portable ZIP is staged from `$runtimeFiles` (built by both scripts):
-    // a placeholder under each retired name, never the library.
+    // nothing under a retired name from v1.4.100, and never the library.
     for ([_][]const u8{
         "scripts/package-windows.ps1",
         "scripts/build-package-windows.ps1",
     }) |path| {
-        const script = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
+        const script = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, alloc, .limited(1024 * 1024));
         defer alloc.free(script);
         checkPackagingStagesPlaceholders(script) catch |err| {
             std.debug.print("{s}: {s}\n", .{ path, @errorName(err) });
@@ -684,28 +610,24 @@ test "portable payload keeps retired entries while older updaters require them" 
     // Setup runs the new release's own script, so it needs no transition:
     // it never installs a retired file, and removes the copy an older Setup
     // installed.
-    const iss = try std.fs.cwd().readFileAlloc(alloc, "dist/windows/noctty.iss", 1024 * 1024);
+    const iss = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "dist/windows/noctty.iss", alloc, .limited(1024 * 1024));
     defer alloc.free(iss);
     try checkSetupRetiresLibVt(alloc, iss);
 }
 
-test "packaging placeholder check refuses the library, a dropped placeholder and a lib-vt build" {
+test "packaging check refuses the library under a retired name and a lib-vt build" {
     const alloc = std.testing.allocator;
     const Mutation = struct { from: []const u8, to: []const u8, err: anyerror };
-    const placeholder = "\"ghostty-vt-stub\\ghostty-vt.dll\",";
+    // The last `$runtimeFiles` item of both scripts and the list's end.
+    const last = "\"noctty-terminal-handoff-proxy.dll\"\n)";
     const common = [_]Mutation{
         // The -Demit-lib-vt=true library, by its zig-out\bin path, in another
         // case, or from another directory.
-        .{ .from = placeholder, .to = "\"ghostty-vt.dll\",", .err = error.RetiredEntryStaged },
-        .{ .from = placeholder, .to = "\"GHOSTTY-VT.DLL\",", .err = error.RetiredEntryStaged },
-        .{ .from = placeholder, .to = "'lib\\ghostty-vt.dll',", .err = error.RetiredEntryStaged },
-        .{ .from = placeholder, .to = placeholder ++ "\n    \"ghostty-vt.dll\",", .err = error.RetiredEntryStaged },
-        // The placeholder dropped or commented out while older updaters
-        // still require the name.
-        .{ .from = placeholder, .to = "", .err = error.RetiredEntryTransitionBroken },
-        .{ .from = placeholder, .to = "# " ++ placeholder, .err = error.RetiredEntryTransitionBroken },
+        .{ .from = last, .to = "\"ghostty-vt.dll\",\n    " ++ last, .err = error.RetiredEntryStaged },
+        .{ .from = last, .to = "\"GHOSTTY-VT.DLL\",\n    " ++ last, .err = error.RetiredEntryStaged },
+        .{ .from = last, .to = "'lib\\ghostty-vt.dll',\n    " ++ last, .err = error.RetiredEntryStaged },
         // A computed name cannot hide from the check.
-        .{ .from = placeholder, .to = "$libVtDll,", .err = error.InvalidScriptList },
+        .{ .from = last, .to = "$libVtDll,\n    " ++ last, .err = error.InvalidScriptList },
     };
     const Script = struct { path: []const u8, build: Mutation };
     for ([_]Script{
@@ -720,7 +642,7 @@ test "packaging placeholder check refuses the library, a dropped placeholder and
             .err = error.PackagingBuildsLibVt,
         } },
     }) |script_case| {
-        const script = try std.fs.cwd().readFileAlloc(alloc, script_case.path, 1024 * 1024);
+        const script = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, script_case.path, alloc, .limited(1024 * 1024));
         defer alloc.free(script);
         try checkPackagingStagesPlaceholders(script);
         for (common ++ [_]Mutation{script_case.build}) |mutation| {
@@ -764,7 +686,7 @@ pub fn prepareBackup(
         error.FileNotFound => {},
         else => return err,
     };
-    try std.fs.cwd().makePath(backup_root);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), backup_root);
 
     for (managed_entries) |name| {
         const source = try std.fs.path.join(alloc, &.{ install_root, name });
@@ -805,7 +727,7 @@ pub fn swapPayload(
         error.FileNotFound => {},
         else => return err,
     };
-    try std.fs.cwd().makePath(displaced_root);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), displaced_root);
 
     // Check the whole payload before the first replacement, so a payload
     // that is missing a required entry changes nothing.
@@ -832,7 +754,7 @@ fn displaceManagedPath(target: []const u8, displaced: []const u8) !void {
         error.FileNotFound => {},
         else => return err,
     };
-    std.fs.renameAbsolute(target, displaced) catch |err| switch (err) {
+    std.Io.Dir.renameAbsolute(target, displaced, updateIo()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -860,7 +782,7 @@ pub fn rollback(
     const displaced_share_kind = pathKind(displaced_share) catch null;
     const restored_share_by_rename = restored: {
         if (displaced_share_kind != .directory) break :restored false;
-        std.fs.renameAbsolute(displaced_share, install_share) catch break :restored false;
+        std.Io.Dir.renameAbsolute(displaced_share, install_share, updateIo()) catch break :restored false;
         break :restored true;
     };
     if (!restored_share_by_rename) {
@@ -900,23 +822,23 @@ fn replaceManagedPath(
         error.FileNotFound => {},
         else => return err,
     };
-    std.fs.renameAbsolute(target, displaced) catch |err| switch (err) {
+    std.Io.Dir.renameAbsolute(target, displaced, updateIo()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    std.fs.renameAbsolute(source, target) catch |err| {
-        std.fs.renameAbsolute(displaced, target) catch {};
+    std.Io.Dir.renameAbsolute(source, target, updateIo()) catch |err| {
+        std.Io.Dir.renameAbsolute(displaced, target, updateIo()) catch {};
         return err;
     };
 }
 
 fn replaceFileAtomic(alloc: Allocator, source: []const u8, target: []const u8) !void {
     if (builtin.os.tag != .windows) {
-        std.fs.deleteFileAbsolute(target) catch |err| switch (err) {
+        std.Io.Dir.deleteFileAbsolute(updateIo(), target) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
-        return std.fs.renameAbsolute(source, target);
+        return std.Io.Dir.renameAbsolute(source, target, updateIo());
     }
 
     const source_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, source);
@@ -930,19 +852,20 @@ fn replaceFileAtomic(alloc: Allocator, source: []const u8, target: []const u8) !
 
 fn copyPath(alloc: Allocator, source: []const u8, destination: []const u8) !void {
     if (pathIsWindowsReparsePoint(source)) return error.InvalidPortableUpdatePath;
+    const io = updateIo();
     if (try pathKind(source) != .directory) {
-        if (std.fs.path.dirname(destination)) |parent| try std.fs.cwd().makePath(parent);
-        try std.fs.copyFileAbsolute(source, destination, .{});
-        const copied = try std.fs.openFileAbsolute(destination, .{ .mode = .read_write });
-        defer copied.close();
-        return copied.sync();
+        if (std.fs.path.dirname(destination)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+        try std.Io.Dir.copyFileAbsolute(source, destination, io, .{});
+        const copied = try std.Io.Dir.openFileAbsolute(io, destination, .{ .mode = .read_write });
+        defer copied.close(io);
+        return copied.sync(io);
     }
 
-    try std.fs.cwd().makePath(destination);
-    var source_dir = try std.fs.openDirAbsolute(source, .{ .iterate = true });
-    defer source_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, destination);
+    var source_dir = try std.Io.Dir.openDirAbsolute(io, source, .{ .iterate = true });
+    defer source_dir.close(io);
     var iter = source_dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const child_source = try std.fs.path.join(alloc, &.{ source, entry.name });
         defer alloc.free(child_source);
         const child_destination = try std.fs.path.join(alloc, &.{ destination, entry.name });
@@ -963,46 +886,49 @@ fn copyPath(alloc: Allocator, source: []const u8, destination: []const u8) !void
 /// Non-Windows keeps the real `fsync` and its error.
 fn syncDirectory(alloc: Allocator, path: []const u8) !void {
     if (builtin.os.tag != .windows) {
-        var dir = try std.fs.openDirAbsolute(path, .{});
-        defer dir.close();
-        return std.posix.fsync(dir.fd);
+        const io = updateIo();
+        var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+        defer dir.close(io);
+        const dir_file: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+        return dir_file.sync(io);
     }
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const handle = std.os.windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path_w.ptr,
-        std.os.windows.GENERIC_WRITE,
-        std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE | std.os.windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_WRITE,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_FLAG_BACKUP_SEMANTICS,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_FLAG_BACKUP_SEMANTICS,
         null,
     );
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) {
         log.debug("directory sync open unsupported path={s} err={}", .{
             path,
-            std.os.windows.kernel32.GetLastError(),
+            std.os.windows.GetLastError(),
         });
         return;
     }
     defer std.os.windows.CloseHandle(handle);
-    if (std.os.windows.kernel32.FlushFileBuffers(handle) == 0) {
+    if (win32_sys.FlushFileBuffers(handle) == 0) {
         log.debug("directory sync unsupported path={s} err={}", .{
             path,
-            std.os.windows.kernel32.GetLastError(),
+            std.os.windows.GetLastError(),
         });
     }
 }
 
 fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
+    const io = updateIo();
     var contents: std.ArrayList(u8) = .empty;
     defer contents.deinit(alloc);
-    var backup_dir = try std.fs.openDirAbsolute(backup_root, .{ .iterate = true });
-    defer backup_dir.close();
+    var backup_dir = try std.Io.Dir.openDirAbsolute(io, backup_root, .{ .iterate = true });
+    defer backup_dir.close(io);
     var walker = try backup_dir.walk(alloc);
     defer walker.deinit();
     var file_count: usize = 0;
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind == .directory) continue;
         if (entry.kind != .file) return error.IncompletePortableUpdateBackup;
         const relative = try portableRelativePathAlloc(alloc, entry.path);
@@ -1011,7 +937,7 @@ fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
         const path = try std.fs.path.join(alloc, &.{ backup_root, entry.path });
         defer alloc.free(path);
         const digest = try sha256File(path);
-        try contents.writer(alloc).print("{s} *{s}\n", .{
+        try contents.print(alloc, "{s} *{s}\n", .{
             std.fmt.bytesToHex(digest, .lower),
             relative,
         });
@@ -1023,10 +949,10 @@ fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
     defer alloc.free(marker_path);
     const temp_path = try std.fmt.allocPrint(alloc, "{s}.tmp", .{marker_path});
     defer alloc.free(temp_path);
-    const marker = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true });
-    defer marker.close();
-    try marker.writeAll(contents.items);
-    try marker.sync();
+    const marker = try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true });
+    defer marker.close(io);
+    try marker.writeStreamingAll(io, contents.items);
+    try marker.sync(io);
     if (builtin.os.tag == .windows) {
         const source_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, temp_path);
         defer alloc.free(source_w);
@@ -1036,7 +962,7 @@ fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
             return error.PortableUpdateReplaceFailed;
         }
     } else {
-        try std.fs.renameAbsolute(temp_path, marker_path);
+        try std.Io.Dir.renameAbsolute(temp_path, marker_path, io);
     }
 }
 
@@ -1048,10 +974,11 @@ fn verifyBackupManifest(
 ) !void {
     const marker_path = try std.fs.path.join(alloc, &.{ backup_root, backup_complete_name });
     defer alloc.free(marker_path);
-    const contents = try std.fs.cwd().readFileAlloc(alloc, marker_path, max_backup_manifest_bytes);
+    const io = updateIo();
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, marker_path, alloc, .limited(max_backup_manifest_bytes + 1));
     defer alloc.free(contents);
 
-    var seen: std.StringHashMapUnmanaged(void) = .{};
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var keys = seen.keyIterator();
         while (keys.next()) |key| alloc.free(key.*);
@@ -1066,7 +993,7 @@ fn verifyBackupManifest(
             return error.IncompletePortableUpdateBackup;
         }
         const hex = line[0 .. std.crypto.hash.sha2.Sha256.digest_length * 2];
-        const name_raw = std.mem.trimLeft(
+        const name_raw = std.mem.trimStart(
             u8,
             line[std.crypto.hash.sha2.Sha256.digest_length * 2 ..],
             " \t",
@@ -1149,11 +1076,11 @@ fn verifyBackupManifest(
                 continue;
             }
             if (kind != .directory) return error.IncompletePortableUpdateRollback;
-            var managed_dir = try std.fs.openDirAbsolute(managed_path, .{ .iterate = true });
-            defer managed_dir.close();
+            var managed_dir = try std.Io.Dir.openDirAbsolute(io, managed_path, .{ .iterate = true });
+            defer managed_dir.close(io);
             var walker = try managed_dir.walk(alloc);
             defer walker.deinit();
-            while (try walker.next()) |entry| {
+            while (try walker.next(io)) |entry| {
                 if (entry.kind == .directory) continue;
                 if (entry.kind != .file) return error.IncompletePortableUpdateRollback;
                 const native_relative = try std.fs.path.join(
@@ -1208,27 +1135,29 @@ fn removePathIfExists(path: []const u8) !void {
     if (builtin.os.tag == .windows) {
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
         defer std.heap.page_allocator.free(path_w);
-        const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
+        const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
         if (attributes != std.os.windows.INVALID_FILE_ATTRIBUTES and
-            attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0)
         {
             if (attributes & file_attribute_directory != 0) {
-                return std.fs.deleteDirAbsolute(path);
+                return std.Io.Dir.deleteDirAbsolute(updateIo(), path);
             }
-            return std.fs.deleteFileAbsolute(path);
+            return std.Io.Dir.deleteFileAbsolute(updateIo(), path);
         }
     }
-    if (try pathKind(path) == .directory) return std.fs.deleteTreeAbsolute(path);
-    return std.fs.deleteFileAbsolute(path);
+    // 0.17 has no `deleteTreeAbsolute`; `deleteTree` from the cwd takes the
+    // absolute path as is.
+    if (try pathKind(path) == .directory) return std.Io.Dir.cwd().deleteTree(updateIo(), path);
+    return std.Io.Dir.deleteFileAbsolute(updateIo(), path);
 }
 
-fn pathKind(path: []const u8) !std.fs.File.Kind {
-    if (builtin.os.tag != .windows) return (try std.fs.cwd().statFile(path)).kind;
+fn pathKind(path: []const u8) !std.Io.File.Kind {
+    if (builtin.os.tag != .windows) return (try std.Io.Dir.cwd().statFile(updateIo(), path, .{})).kind;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
-    const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
+    const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
     if (attributes == std.os.windows.INVALID_FILE_ATTRIBUTES) {
-        const err = std.os.windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         return switch (err) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             else => std.os.windows.unexpectedError(err),
@@ -1245,15 +1174,15 @@ fn pathIsWindowsReparsePointChecked(alloc: Allocator, path: []const u8) !bool {
     if (builtin.os.tag != .windows) return false;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
+    const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
     if (attributes == std.os.windows.INVALID_FILE_ATTRIBUTES) {
-        const err = std.os.windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         return switch (err) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             else => std.os.windows.unexpectedError(err),
         };
     }
-    return attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    return attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0;
 }
 
 const movefile_replace_existing: u32 = 0x1;
@@ -1346,11 +1275,11 @@ test "portable update preserves complete backup across interrupted retry" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "old-resource" });
+    try tmp.dir.createDirPath(std.testing.io, "install/share");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "old" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/resource theme.txt", .data = "old-resource" });
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1358,10 +1287,10 @@ test "portable update preserves complete backup across interrupted retry" {
     defer alloc.free(backup_root);
 
     try prepareBackup(alloc, install_root, backup_root);
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "mixed" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "mixed" });
     try prepareBackup(alloc, install_root, backup_root);
 
-    const backed_up = try tmp.dir.readFileAlloc(alloc, "backup/noctty.com", 16);
+    const backed_up = try tmp.dir.readFileAlloc(std.testing.io, "backup/noctty.com", alloc, .limited(16));
     defer alloc.free(backed_up);
     try std.testing.expectEqualStrings("old", backed_up);
 }
@@ -1370,12 +1299,12 @@ test "portable rollback removes new-only managed files without deleting user dat
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "old-resource" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
+    try tmp.dir.createDirPath(std.testing.io, "install/share");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "old" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/resource theme.txt", .data = "old-resource" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/user-data.txt", .data = "keep" });
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1384,36 +1313,36 @@ test "portable rollback removes new-only managed files without deleting user dat
     const displaced_root = try std.fs.path.join(alloc, &.{ root, "displaced" });
     defer alloc.free(displaced_root);
     try prepareBackup(alloc, install_root, backup_root);
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "new" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "new-resource" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "new-only share" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/LICENSE", .data = "new-only" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "new" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/resource theme.txt", .data = "new-resource" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/new-only.ps1", .data = "new-only share" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/LICENSE", .data = "new-only" });
 
     try rollback(alloc, install_root, backup_root, displaced_root);
-    const restored = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 16);
+    const restored = try tmp.dir.readFileAlloc(std.testing.io, "install/noctty.com", alloc, .limited(16));
     defer alloc.free(restored);
     try std.testing.expectEqualStrings("old", restored);
-    const restored_resource = try tmp.dir.readFileAlloc(alloc, "install/share/resource theme.txt", 32);
+    const restored_resource = try tmp.dir.readFileAlloc(std.testing.io, "install/share/resource theme.txt", alloc, .limited(32));
     defer alloc.free(restored_resource);
     try std.testing.expectEqualStrings("old-resource", restored_resource);
-    const sentinel = try tmp.dir.readFileAlloc(alloc, "install/user-data.txt", 16);
+    const sentinel = try tmp.dir.readFileAlloc(std.testing.io, "install/user-data.txt", alloc, .limited(16));
     defer alloc.free(sentinel);
     try std.testing.expectEqualStrings("keep", sentinel);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/share/new-only.ps1", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/LICENSE", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/share/new-only.ps1", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/LICENSE", .{}));
 }
 
 test "portable rollback renames displaced share tree back exactly" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install/share/shell-integration");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old executable" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/old-only.ps1", .data = "old only" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/shared.ps1", .data = "old shared" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
+    try tmp.dir.createDirPath(std.testing.io, "install/share/shell-integration");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "old executable" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/old-only.ps1", .data = "old only" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/shared.ps1", .data = "old shared" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/user-data.txt", .data = "keep" });
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1423,47 +1352,47 @@ test "portable rollback renames displaced share tree back exactly" {
     defer alloc.free(displaced_root);
     try prepareBackup(alloc, install_root, backup_root);
 
-    try tmp.dir.makePath("displaced");
-    try tmp.dir.rename("install/share", "displaced/share");
-    try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "new executable" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/shared.ps1", .data = "new shared" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "new only" });
+    try tmp.dir.createDirPath(std.testing.io, "displaced");
+    try tmp.dir.rename("install/share", tmp.dir, "displaced/share", std.testing.io);
+    try tmp.dir.createDirPath(std.testing.io, "install/share");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "new executable" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/shared.ps1", .data = "new shared" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/new-only.ps1", .data = "new only" });
 
     try rollback(alloc, install_root, backup_root, displaced_root);
-    const restored_executable = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    const restored_executable = try tmp.dir.readFileAlloc(std.testing.io, "install/noctty.com", alloc, .limited(32));
     defer alloc.free(restored_executable);
     try std.testing.expectEqualStrings("old executable", restored_executable);
-    const restored_old_only = try tmp.dir.readFileAlloc(alloc, "install/share/old-only.ps1", 32);
+    const restored_old_only = try tmp.dir.readFileAlloc(std.testing.io, "install/share/old-only.ps1", alloc, .limited(32));
     defer alloc.free(restored_old_only);
     try std.testing.expectEqualStrings("old only", restored_old_only);
-    const restored_shared = try tmp.dir.readFileAlloc(alloc, "install/share/shared.ps1", 32);
+    const restored_shared = try tmp.dir.readFileAlloc(std.testing.io, "install/share/shared.ps1", alloc, .limited(32));
     defer alloc.free(restored_shared);
     try std.testing.expectEqualStrings("old shared", restored_shared);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/share/new-only.ps1", .{}));
-    const user_data = try tmp.dir.readFileAlloc(alloc, "install/user-data.txt", 16);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/share/new-only.ps1", .{}));
+    const user_data = try tmp.dir.readFileAlloc(std.testing.io, "install/user-data.txt", alloc, .limited(16));
     defer alloc.free(user_data);
     try std.testing.expectEqualStrings("keep", user_data);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("displaced/share", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "displaced/share", .{}));
 }
 
 /// A payload under `root` with every managed entry, each file holding
 /// "new <name>", except the names in `omit`.
-fn writeTestPayload(dir: std.fs.Dir, root: []const u8, omit: []const []const u8) !void {
-    try dir.makePath(root);
+fn writeTestPayload(dir: std.Io.Dir, root: []const u8, omit: []const []const u8) !void {
+    try dir.createDirPath(std.testing.io, root);
     var buf: [256]u8 = undefined;
     entries: for (managed_entries) |name| {
         for (omit) |omitted| if (std.mem.eql(u8, name, omitted)) continue :entries;
         if (std.mem.eql(u8, name, "share")) {
             const sub_path = try std.fmt.bufPrint(&buf, "{s}/share/themes/theme.txt", .{root});
-            try dir.makePath(std.fs.path.dirname(sub_path).?);
-            try dir.writeFile(.{ .sub_path = sub_path, .data = "new share" });
+            try dir.createDirPath(std.testing.io, std.fs.path.dirname(sub_path).?);
+            try dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "new share" });
             continue;
         }
         const sub_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ root, name });
         var data_buf: [128]u8 = undefined;
         const data = try std.fmt.bufPrint(&data_buf, "new {s}", .{name});
-        try dir.writeFile(.{ .sub_path = sub_path, .data = data });
+        try dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
     }
 }
 
@@ -1476,7 +1405,7 @@ test "portable payload check requires every managed entry except a retired one" 
     try writeTestPayload(tmp.dir, "without-com", &.{"noctty.com"});
     try writeTestPayload(tmp.dir, "without-share", &.{"share"});
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     for ([_]struct { name: []const u8, ok: bool }{
         .{ .name = "full", .ok = true },
@@ -1500,17 +1429,17 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
     defer tmp.cleanup();
     // An install from a release that still shipped ghostty-vt.dll, with the
     // user's own files beside it.
-    try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/theme.txt", .data = "old share" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll.txt", .data = "keep too" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.portable", .data = "" });
+    try tmp.dir.createDirPath(std.testing.io, "install/share");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.exe", .data = "old exe" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/theme.txt", .data = "old share" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/user-data.txt", .data = "keep" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/ghostty-vt.dll.txt", .data = "keep too" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.portable", .data = "" });
     try writeTestPayload(tmp.dir, "payload", &retired_entries);
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1524,11 +1453,11 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
     try prepareBackup(alloc, install_root, backup_root);
     try swapPayload(alloc, install_root, payload_root, backup_root, displaced_root);
 
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/ghostty-vt.dll", .{}));
-    const displaced = try tmp.dir.readFileAlloc(alloc, "displaced/ghostty-vt.dll", 16);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/ghostty-vt.dll", .{}));
+    const displaced = try tmp.dir.readFileAlloc(std.testing.io, "displaced/ghostty-vt.dll", alloc, .limited(16));
     defer alloc.free(displaced);
     try std.testing.expectEqualStrings("old vt", displaced);
-    const swapped = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    const swapped = try tmp.dir.readFileAlloc(std.testing.io, "install/noctty.com", alloc, .limited(32));
     defer alloc.free(swapped);
     try std.testing.expectEqualStrings("new noctty.com", swapped);
     for ([_][2][]const u8{
@@ -1536,7 +1465,7 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
         .{ "install/ghostty-vt.dll.txt", "keep too" },
         .{ "install/noctty.portable", "" },
     }) |kept| {
-        const contents = try tmp.dir.readFileAlloc(alloc, kept[0], 16);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, kept[0], alloc, .limited(16));
         defer alloc.free(contents);
         try std.testing.expectEqualStrings(kept[1], contents);
     }
@@ -1548,11 +1477,11 @@ test "portable swap removes a retired file the payload leaves out, and rollback 
         .{ "install/noctty.exe", "old exe" },
         .{ "install/user-data.txt", "keep" },
     }) |restored| {
-        const contents = try tmp.dir.readFileAlloc(alloc, restored[0], 16);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, restored[0], alloc, .limited(16));
         defer alloc.free(contents);
         try std.testing.expectEqualStrings(restored[1], contents);
     }
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/LICENSE", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/LICENSE", .{}));
 }
 
 test "portable rollback succeeds when the swap failed on a file held without delete sharing" {
@@ -1560,14 +1489,14 @@ test "portable rollback succeeds when the swap failed on a file held without del
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install/share");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/theme.txt", .data = "old share" });
+    try tmp.dir.createDirPath(std.testing.io, "install/share");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.exe", .data = "old exe" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/theme.txt", .data = "old share" });
     try writeTestPayload(tmp.dir, "payload", &retired_entries);
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1584,13 +1513,13 @@ test "portable rollback succeeds when the swap failed on a file held without del
     // read and copied, but neither renamed nor replaced.
     const dll_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, dll_path);
     defer alloc.free(dll_w);
-    const holder = std.os.windows.kernel32.CreateFileW(
+    const holder = win32_sys.CreateFileW(
         dll_w.ptr,
-        std.os.windows.GENERIC_READ,
-        std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE,
+        win32_types.GENERIC_READ,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expect(holder != std.os.windows.INVALID_HANDLE_VALUE);
@@ -1601,7 +1530,7 @@ test "portable rollback succeeds when the swap failed on a file held without del
     if (swapPayload(alloc, install_root, payload_root, backup_root, displaced_root)) |_| {
         return error.TestExpectedError;
     } else |_| {}
-    const partial = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    const partial = try tmp.dir.readFileAlloc(std.testing.io, "install/noctty.com", alloc, .limited(32));
     defer alloc.free(partial);
     try std.testing.expectEqualStrings("new noctty.com", partial);
 
@@ -1614,23 +1543,23 @@ test "portable rollback succeeds when the swap failed on a file held without del
         .{ "install/noctty.exe", "old exe" },
         .{ "install/share/theme.txt", "old share" },
     }) |restored| {
-        const contents = try tmp.dir.readFileAlloc(alloc, restored[0], 16);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, restored[0], alloc, .limited(16));
         defer alloc.free(contents);
         try std.testing.expectEqualStrings(restored[1], contents);
     }
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/ghostty-vt.dll.restore", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/ghostty-vt.dll.restore", .{}));
 }
 
 test "portable swap of an install without the retired file, or a payload with it" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.exe", .data = "old exe" });
+    try tmp.dir.createDirPath(std.testing.io, "install");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.exe", .data = "old exe" });
     try writeTestPayload(tmp.dir, "without", &retired_entries);
     try writeTestPayload(tmp.dir, "with", &.{});
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1646,14 +1575,14 @@ test "portable swap of an install without the retired file, or a payload with it
     // Nothing to remove: the swap succeeds and creates nothing in its place.
     try prepareBackup(alloc, install_root, backup_root);
     try swapPayload(alloc, install_root, without_root, backup_root, displaced_root);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/ghostty-vt.dll", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("displaced/ghostty-vt.dll", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "install/ghostty-vt.dll", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "displaced/ghostty-vt.dll", .{}));
     try cleanupBackup(backup_root);
 
     // A payload that still ships it (the transition release) installs it.
     try prepareBackup(alloc, install_root, backup_root);
     try swapPayload(alloc, install_root, with_root, backup_root, displaced_root);
-    const installed = try tmp.dir.readFileAlloc(alloc, "install/ghostty-vt.dll", 32);
+    const installed = try tmp.dir.readFileAlloc(std.testing.io, "install/ghostty-vt.dll", alloc, .limited(32));
     defer alloc.free(installed);
     try std.testing.expectEqualStrings("new ghostty-vt.dll", installed);
 }
@@ -1662,13 +1591,13 @@ test "portable swap refuses a payload missing a required entry before replacing 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install");
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old com" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
+    try tmp.dir.createDirPath(std.testing.io, "install");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "old com" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/ghostty-vt.dll", .data = "old vt" });
     // Missing noctty.exe, which the swap would reach last.
     try writeTestPayload(tmp.dir, "payload", &.{ "noctty.exe", "ghostty-vt.dll" });
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
     defer alloc.free(install_root);
@@ -1688,7 +1617,7 @@ test "portable swap refuses a payload missing a required entry before replacing 
         .{ "install/noctty.com", "old com" },
         .{ "install/ghostty-vt.dll", "old vt" },
     }) |kept| {
-        const contents = try tmp.dir.readFileAlloc(alloc, kept[0], 16);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, kept[0], alloc, .limited(16));
         defer alloc.free(contents);
         try std.testing.expectEqualStrings(kept[1], contents);
     }

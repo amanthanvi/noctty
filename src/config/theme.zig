@@ -2,10 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const build_config = @import("../build_config.zig");
-const global_state = &@import("../global.zig").state;
 const internal_os = @import("../os/main.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
 const file_load = @import("file_load.zig");
+const global = @import("../global.zig");
 
 /// Location of possible themes. The order of this enum matters because it
 /// defines the priority of theme search (from top to bottom).
@@ -26,7 +26,9 @@ pub const Location = enum {
     pub fn dir(
         self: Location,
         arena_alloc: Allocator,
-    ) error{OutOfMemory}!?[]const u8 {
+    ) error{ OutOfMemory, Unexpected }!?[]const u8 {
+        var environ_map = try global.environMap();
+        defer environ_map.deinit();
         return switch (self) {
             .user, .legacy_user => user: {
                 const subdir = std.fs.path.join(arena_alloc, &.{
@@ -47,13 +49,15 @@ pub const Location = enum {
                 };
 
                 break :user internal_os.xdg.config(
+                    global.io(),
                     arena_alloc,
+                    &environ_map,
                     .{ .subdir = subdir },
                 ) catch |err| {
                     // We need to do some comptime tricks to get the right
                     // error set since some platforms don't support some
                     // error types.
-                    const Error = @TypeOf(err) || switch (builtin.os.tag) {
+                    const Error = @TypeOf(err) || switch (builtin.target.os.tag) {
                         .ios => error{BufferTooSmall},
                         else => error{},
                     };
@@ -71,7 +75,7 @@ pub const Location = enum {
             },
 
             .resources => try std.fs.path.join(arena_alloc, &.{
-                global_state.resources_dir.app() orelse return null,
+                global.resourcesDir().app() orelse return null,
                 "themes",
             }),
         };
@@ -91,9 +95,9 @@ pub const LocationIterator = struct {
         location: Location,
         dir: []const u8,
     } {
-        const max = @typeInfo(Location).@"enum".fields.len;
+        const max = @typeInfo(Location).@"enum".field_names.len;
         while (self.i < max) {
-            const location: Location = @enumFromInt(self.i);
+            const location: Location = @fromBackingInt(@intCast(self.i));
             self.i += 1;
             if (try location.dir(self.arena_alloc)) |dir|
                 return .{
@@ -152,18 +156,19 @@ pub fn listFromDirectories(alloc: Allocator, dirs: []const Directory) ![]Entry {
         themes.deinit(alloc);
     }
 
+    const io = global.io();
     for (dirs) |loc| {
-        var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.cwd().openDir(io, loc.dir, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => {
                 std.log.warn("failed to open theme directory dir={f} err={}", .{ internal_os.redact.bytes(loc.dir), err });
                 continue;
             },
         };
-        defer dir.close();
+        defer dir.close(io);
 
         var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(io)) |entry| {
             switch (entry.kind) {
                 .file, .sym_link => {},
                 else => continue,
@@ -216,21 +221,20 @@ pub fn open(
     arena_alloc: Allocator,
     theme: []const u8,
     diags: *cli_diags.DiagnosticList,
-) error{OutOfMemory}!?struct {
+) error{ OutOfMemory, Unexpected }!?struct {
     path: []const u8,
-    file: std.fs.File,
+    file: std.Io.File,
 } {
     // Absolute themes are loaded a different path.
     if (std.fs.path.isAbsolute(theme)) {
-        const file: std.fs.File = try openAbsolute(
+        const file: std.Io.File = try openAbsolute(
             arena_alloc,
             theme,
             diags,
         ) orelse return null;
-        const stat = file.stat() catch |err| {
+        const stat = file.stat(global.io()) catch |err| {
             try diags.append(arena_alloc, .{
-                .message = try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                .message = try arena_alloc.printSentinel(
                     "not reading theme from \"{s}\": {}",
                     .{ theme, err },
                     0,
@@ -242,8 +246,7 @@ pub fn open(
             .file => {},
             else => {
                 try diags.append(arena_alloc, .{
-                    .message = try std.fmt.allocPrintSentinel(
-                        arena_alloc,
+                    .message = try arena_alloc.printSentinel(
                         "not reading theme from \"{s}\": it is a {s}",
                         .{ theme, @tagName(stat.kind) },
                         0,
@@ -258,8 +261,7 @@ pub fn open(
     const basename = std.fs.path.basename(theme);
     if (!std.mem.eql(u8, theme, basename)) {
         try diags.append(arena_alloc, .{
-            .message = try std.fmt.allocPrintSentinel(
-                arena_alloc,
+            .message = try arena_alloc.printSentinel(
                 "theme \"{s}\" cannot include path separators unless it is an absolute path",
                 .{theme},
                 0,
@@ -271,14 +273,15 @@ pub fn open(
     // Iterate over the possible locations to try to find the
     // one that exists.
     var it: LocationIterator = .{ .arena_alloc = arena_alloc };
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     while (try it.next()) |loc| {
         const path = try std.fs.path.join(arena_alloc, &.{ loc.dir, theme });
-        if (cwd.openFile(path, .{})) |file| {
-            const stat = file.stat() catch |err| {
+        // 0.15's openFile refused a directory (`IsDir`); 0.17's opens one
+        // unless told not to.
+        if (cwd.openFile(global.io(), path, .{ .allow_directory = false })) |file| {
+            const stat = file.stat(global.io()) catch |err| {
                 try diags.append(arena_alloc, .{
-                    .message = try std.fmt.allocPrintSentinel(
-                        arena_alloc,
+                    .message = try arena_alloc.printSentinel(
                         "not reading theme from \"{s}\": {}",
                         .{ theme, err },
                         0,
@@ -290,8 +293,7 @@ pub fn open(
                 .file => {},
                 else => {
                     try diags.append(arena_alloc, .{
-                        .message = try std.fmt.allocPrintSentinel(
-                            arena_alloc,
+                        .message = try arena_alloc.printSentinel(
                             "not reading theme from \"{s}\": it is a {s}",
                             .{ theme, @tagName(stat.kind) },
                             0,
@@ -311,8 +313,7 @@ pub fn open(
             // Anything else is an error we log and give up on.
             else => {
                 try diags.append(arena_alloc, .{
-                    .message = try std.fmt.allocPrintSentinel(
-                        arena_alloc,
+                    .message = try arena_alloc.printSentinel(
                         "failed to load theme \"{s}\" from the file \"{s}\": {}",
                         .{ theme, path, err },
                         0,
@@ -342,7 +343,7 @@ fn appendNotFound(
     theme: []const u8,
     it: *LocationIterator,
     diags: *cli_diags.DiagnosticList,
-) error{OutOfMemory}!void {
+) error{ OutOfMemory, Unexpected }!void {
     var message: std.Io.Writer.Allocating = .init(arena_alloc);
     message.writer.print("theme \"{s}\" not found", .{theme}) catch return error.OutOfMemory;
     var tried: usize = 0;
@@ -368,20 +369,18 @@ pub fn openAbsolute(
     arena_alloc: Allocator,
     theme: []const u8,
     diags: *cli_diags.DiagnosticList,
-) error{OutOfMemory}!?std.fs.File {
-    return std.fs.openFileAbsolute(theme, .{}) catch |err| {
+) error{OutOfMemory}!?std.Io.File {
+    return std.Io.Dir.openFileAbsolute(global.io(), theme, .{ .allow_directory = false }) catch |err| {
         switch (err) {
             error.FileNotFound => try diags.append(arena_alloc, .{
-                .message = try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                .message = try arena_alloc.printSentinel(
                     "failed to load theme from the path \"{s}\"",
                     .{theme},
                     0,
                 ),
             }),
             else => try diags.append(arena_alloc, .{
-                .message = try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                .message = try arena_alloc.printSentinel(
                     "failed to load theme from the path \"{s}\": {}",
                     .{ theme, err },
                     0,
@@ -397,36 +396,36 @@ test "theme list keeps first duplicate by directory priority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("user");
-    try tmp.dir.makePath("legacy-user");
-    try tmp.dir.makePath("resources");
+    try tmp.dir.createDirPath(std.testing.io, "user");
+    try tmp.dir.createDirPath(std.testing.io, "legacy-user");
+    try tmp.dir.createDirPath(std.testing.io, "resources");
     {
-        var file = try tmp.dir.createFile("user/Dupe", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "user/Dupe", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("legacy-user/Dupe", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "legacy-user/Dupe", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("legacy-user/LegacyWins", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "legacy-user/LegacyWins", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("resources/Dupe", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "resources/Dupe", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("resources/LegacyWins", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "resources/LegacyWins", .{});
+        file.close(std.testing.io);
     }
 
     var user_buf: [std.fs.max_path_bytes]u8 = undefined;
     var legacy_user_buf: [std.fs.max_path_bytes]u8 = undefined;
     var resources_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const user_dir = try tmp.dir.realpath("user", &user_buf);
-    const legacy_user_dir = try tmp.dir.realpath("legacy-user", &legacy_user_buf);
-    const resources_dir = try tmp.dir.realpath("resources", &resources_buf);
+    const user_dir = user_buf[0..try tmp.dir.realPathFile(std.testing.io, "user", &user_buf)];
+    const legacy_user_dir = legacy_user_buf[0..try tmp.dir.realPathFile(std.testing.io, "legacy-user", &legacy_user_buf)];
+    const resources_dir = resources_buf[0..try tmp.dir.realPathFile(std.testing.io, "resources", &resources_buf)];
     const entries = try listFromDirectories(std.testing.allocator, &.{
         .{ .location = .user, .dir = user_dir },
         .{ .location = .legacy_user, .dir = legacy_user_dir },
@@ -485,7 +484,7 @@ test "a theme no directory has is one diagnostic that names every path tried" {
     // names (a test build has none otherwise), so the paths tried are there.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const home = try tmp.dir.realpathAlloc(arena.allocator(), ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena.allocator());
     file_load.test_config_root = home;
     defer file_load.test_config_root = null;
 
@@ -527,30 +526,30 @@ test "a test build looks for user themes only under the config home its test nam
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const themes_dir = build_config.data_dir_name ++ "/themes";
-    try tmp.dir.makePath(themes_dir);
-    try tmp.dir.writeFile(.{ .sub_path = themes_dir ++ "/test-config-guard-theme", .data = "font-size = 31\n" });
-    const home = try tmp.dir.realpathAlloc(arena.allocator(), ".");
+    try tmp.dir.createDirPath(std.testing.io, themes_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = themes_dir ++ "/test-config-guard-theme", .data = "font-size = 31\n" });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena.allocator());
     const saved: ?[:0]u8 = saved: {
-        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :saved null,
+        const value = std.testing.environ.getAlloc(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableMissing => break :saved null,
             else => return err,
         };
         defer alloc.free(value);
-        break :saved try alloc.dupeZ(u8, value);
+        break :saved try alloc.dupeSentinel(u8, value, 0);
     };
     defer if (saved) |value| alloc.free(value);
     defer _ = if (saved) |value|
         internal_os.setenv("XDG_CONFIG_HOME", value)
     else
         internal_os.unsetenv("XDG_CONFIG_HOME");
-    try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", try arena.allocator().dupeZ(u8, home)));
+    try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", try arena.allocator().dupeSentinel(u8, home, 0)));
 
     // No root named: the theme is not found, and no user theme directory is
     // there to look in.
     {
         var diags: cli_diags.DiagnosticList = .{};
         if (try open(arena.allocator(), "test-config-guard-theme", &diags)) |hit| {
-            hit.file.close();
+            hit.file.close(std.testing.io);
             std.debug.print("found the scratch home's theme without a named root\n", .{});
             return error.TestUserThemeFound;
         }
@@ -569,7 +568,7 @@ test "a test build looks for user themes only under the config home its test nam
     var diags: cli_diags.DiagnosticList = .{};
     const hit = (try open(arena.allocator(), "test-config-guard-theme", &diags)) orelse
         return error.TestExpectedTheme;
-    defer hit.file.close();
+    defer hit.file.close(std.testing.io);
     const expected = try std.fs.path.join(arena.allocator(), &.{ home, build_config.data_dir_name, "themes", "test-config-guard-theme" });
     try std.testing.expectEqualStrings(expected, hit.path);
 }

@@ -650,7 +650,7 @@ test "win32 session state round-trips pane scrollback snapshot" {
 }
 
 test "win32 session state enforces scrollback line and byte caps" {
-    const too_many_lines = [_][]const u8{"x"} ** (max_scrollback_lines + 1);
+    const too_many_lines: [max_scrollback_lines + 1][]const u8 = @splat("x");
     try std.testing.expectError(
         error.TooManyScrollbackLines,
         encodeTestPane(.{ .scrollback = .{
@@ -1082,8 +1082,19 @@ fn fuzzParseSessionState(_: void, raw: []const u8) !void {
     defer parsed.deinit();
 }
 
+/// `fuzzParseSessionState` behind Zig 0.17's fuzz interface, which hands a test a
+/// `std.testing.Smith` rather than the input bytes. Outside fuzz mode the
+/// Smith holds one corpus entry (or the empty smoke input), passed through
+/// verbatim as 0.15's runner passed it; in fuzz mode the fuzzer draws the
+/// input.
+fn fuzzParseSessionStateSmith(_: void, smith: *std.testing.Smith) anyerror!void {
+    if (smith.in) |input| return fuzzParseSessionState({}, input);
+    var buf: [4096]u8 = undefined;
+    try fuzzParseSessionState({}, buf[0..smith.slice(&buf)]);
+}
+
 test "fuzz win32 session state parser" {
-    try std.testing.fuzz({}, fuzzParseSessionState, .{ .corpus = &.{
+    try std.testing.fuzz({}, fuzzParseSessionStateSmith, .{ .corpus = &.{
         "{}",
         \\{"schema_version":1,"windows":[]}
         ,

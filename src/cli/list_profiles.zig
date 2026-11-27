@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const configpkg = @import("../config.zig");
 const windows_shell = @import("../config/windows_shell.zig");
 const internal_os = @import("../os/main.zig");
@@ -93,17 +94,17 @@ pub const Options = struct {
 ///     `\u` escapes, so a console code page cannot garble it. `--format=text`
 ///     is the default.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     // Streaming, not positional: stdout may be a pipe or a file opened for
     // append (see validate-config).
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writerStreaming(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(global.io(), &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     var stderr_buf: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writerStreaming(&stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(global.io(), &stderr_buf);
     const stderr = &stderr_writer.interface;
 
     const result = runArgs(
@@ -111,7 +112,7 @@ pub fn run(alloc: Allocator) !u8 {
         &iter,
         stdout,
         stderr,
-        std.fs.File.stdout().isTty(),
+        (try std.Io.File.stdout().isTty(global.io())),
         discoverFromConfig,
     );
     try stdout.flush();
@@ -432,7 +433,7 @@ const TestRun = struct {
 };
 
 fn testRun(command_line: []const u8, stdout_is_tty: bool, discover: DiscoverFn) !TestRun {
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, command_line);
     defer iter.deinit();
     var stdout = std.Io.Writer.Allocating.init(testing.allocator);
     defer stdout.deinit();
@@ -723,20 +724,20 @@ test "list-profiles applies the color scheme Windows reports before it asks disc
     // the main file sets none of them. `Config.load` leaves the config in
     // the light state, so without the scheme a dark desktop lists the light
     // theme's profiles.
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "profile-hidden = cmd\nssh-config-hosts = true\nvisual-studio-profiles = none\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "profile-hidden = cmd\nssh-config-hosts = true\nvisual-studio-profiles = none\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dark",
         .data = "profile-command = darkonly: cmd.exe /k dark\nprofile-order = darkonly\n" ++
             "profile-hidden = pwsh\nprofile-hidden = wsl\nssh-config-hosts = false\nvisual-studio-profiles = all\n",
     });
-    const light_path = try tmp.dir.realpathAlloc(alloc, "light");
+    const light_path = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light_path);
-    const dark_path = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark_path = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark_path);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light_path, dark_path });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = text });
-    const main_path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "main.ghostty", .data = text });
+    const main_path = try tmp.dir.realPathFileAlloc(std.testing.io, "main.ghostty", alloc);
     defer alloc.free(main_path);
 
     var config = try configpkg.Config.default(alloc);
@@ -825,6 +826,6 @@ test "every kind of profile has a source" {
         .{ .vs_dev_cmd, "visual-studio" },
         .{ .vs_dev_shell, "visual-studio" },
     };
-    try testing.expectEqual(@typeInfo(Kind).@"enum".fields.len, expected.len);
+    try testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len, expected.len);
     for (expected) |entry| try testing.expectEqualStrings(entry[1], sourceName(entry[0]));
 }

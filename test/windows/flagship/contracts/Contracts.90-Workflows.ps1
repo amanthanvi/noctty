@@ -40,7 +40,7 @@ Invoke-ContractTable -Contracts @(
                     -Name 'Setup Zig' `
                     -Source "$releaseWorkflow :: windows-release")
         }
-        Pattern = '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false'
+        Pattern = '(?ms)with:\s+version: 0\.17\.1\s+.*?use-cache: false'
         Kind = 'Text'
         Description = 'release builds cannot restore failed Zig build caches'
     }
@@ -52,7 +52,7 @@ Invoke-ContractTable -Contracts @(
                     -Name 'Setup Zig' `
                     -Source "$testWorkflow :: windows-interactive")
         }
-        Pattern = '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false'
+        Pattern = '(?ms)with:\s+version: 0\.17\.1\s+.*?use-cache: false'
         Kind = 'Text'
         Description = 'ephemeral interactive retries cannot restore failed Zig build caches'
     }
@@ -260,6 +260,19 @@ $libVtStep = Get-YamlStepBlock -Content $libVtJob -Name 'Run libghostty-vt and C
 if ($libVtStep -notmatch 'run: zig build test-lib-vt -Demit-lib-vt=true --summary all') {
     throw 'CI must run the separate libghostty-vt graph and report its test count.'
 }
+# ZIG017-RUN-ENV-01: CI configures with a sentinel variable and fails if the
+# build cache holds it (the end-to-end half of Contracts.21).
+$sentinelStep = Get-YamlStepBlock -Content $libVtJob -Name 'The build configuration holds no environment copy' -Source $testWorkflow
+if ($sentinelStep -notmatch '(?m)^        run: \./scripts/check-configure-environment\.ps1\s*$') {
+    throw 'CI must check that a configure writes no environment copy into the build cache.'
+}
+# PLAN decision 15: the kept examples build on Windows (upstream's
+# build-examples-cmake-windows, with the Zig examples).
+$examplesJob = Get-YamlJobText -Content $testWorkflowText -Name 'windows-examples' -Source $testWorkflow
+$examplesStep = Get-YamlStepBlock -Content $examplesJob -Name 'Build the libghostty-vt examples' -Source $testWorkflow
+if ($examplesStep -notmatch '(?m)^        run: \./scripts/build-examples-windows\.ps1\s*$') {
+    throw 'CI must build the libghostty-vt examples on Windows.'
+}
 # Required coverage must execute and propagate failures at both YAML levels.
 # The experimental ConPTY job is intentionally excluded from this contract.
 function Test-MandatoryWorkflowCoverage {
@@ -356,7 +369,8 @@ $filteredJobs = @(
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'build'; Flag = 'build'; Steps = @('Build executable', 'Verify default source-build shader mode', 'Verify source build stages the pinned ConPTY', 'Build without D3D11 beta') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'renderer-smoke'; Flag = 'renderer_smoke'; Steps = @('Build D3D11 lifecycle smoke tools', 'Hidden-desktop x64 WARP lifecycle smoke') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'cross-arm64'; Flag = 'cross_arm64'; Steps = @('Build ARM64 executable', 'Verify ARM64 source build stages the pinned ConPTY') }
-    @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-lib-vt'; Flag = 'lib_vt'; Steps = @('Run libghostty-vt and C API tests') }
+    @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-lib-vt'; Flag = 'lib_vt'; Steps = @('The build configuration holds no environment copy', 'Run libghostty-vt and C API tests') }
+    @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-examples'; Flag = 'lib_vt'; Steps = @('Build the libghostty-vt examples') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-portable-smoke'; Flag = 'portable_smoke'; Steps = @('Run portable package CLI smoke') }
     @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Job = 'arm64-tests'; Flag = 'arm64_tests'; Steps = @('Verify native ARM64 runner', 'Run ARM64 Zig tests') }
     @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Job = 'arm64-build'; Flag = 'arm64_build'; Steps = @('Verify native ARM64 runner', 'Build and package ARM64 binaries', 'Run ARM64 CLI smoke', 'Build ARM64 D3D11 smoke tools', 'Hidden-desktop ARM64 WARP lifecycle smoke', 'Run packaged ARM64 CLI smoke') }
@@ -390,13 +404,13 @@ Write-Host "Filtered job coverage: $filteredMutationCount/$filteredMutationCount
 # Every Zig job restores only verified dependency packages, never build output
 # (a failed or cancelled job can save incomplete generated files).
 foreach ($zigJob in @(
-        @{ Workflow = $testWorkflow; Text = $testWorkflowText; Jobs = @('tests', 'bench', 'build', 'renderer-smoke', 'cross-arm64', 'windows-lib-vt', 'windows-conpty-probes', 'windows-portable-smoke', 'bench-trend') }
+        @{ Workflow = $testWorkflow; Text = $testWorkflowText; Jobs = @('tests', 'bench', 'build', 'renderer-smoke', 'cross-arm64', 'windows-lib-vt', 'windows-examples', 'windows-conpty-probes', 'windows-portable-smoke', 'bench-trend') }
         @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Jobs = @('arm64-tests', 'arm64-build') }
     )) {
     foreach ($jobName in $zigJob.Jobs) {
         $jobText = Get-YamlJobText -Content $zigJob.Text -Name $jobName -Source $zigJob.Workflow
         $setup = Get-YamlStepBlock -Content $jobText -Name 'Setup Zig' -Source "$($zigJob.Workflow) :: $jobName"
-        if ($setup -notmatch '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false') {
+        if ($setup -notmatch '(?ms)with:\s+version: 0\.17\.1\s+.*?use-cache: false') {
             throw "$($zigJob.Workflow) job '$jobName': Zig builds must not restore failed Zig build caches."
         }
         $cache = Get-YamlStepBlock -Content $jobText -Name 'Cache Zig dependency packages' -Source "$($zigJob.Workflow) :: $jobName"
@@ -2947,9 +2961,9 @@ if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
 # job change, needs no re-pin (Opus on #740: the whole-file pin failed every such edit), and neither does another
 # manual input beside it (Sol on #740: the pin covered the whole `workflow_dispatch` block).
 $frozenSetSha256 = [ordered]@{
-    '.github/workflows/test.yml#windows-interactive' = '44c05e4dac25e44cefaffa5922d191a8674dc4c349af08c18151bb3979adef70'
+    '.github/workflows/test.yml#windows-interactive' = '58e386fb04f90d48ea19665efda93d22812e977c8c78903555bafb67fe705c37'
     '.github/workflows/test.yml#run_interactive_win11' = '8110a2478d5a88e5efbb6abeb16b4da1a44255ff7489b1f18c2e99ef8820750f'
-    '.github/workflows/release.yml' = '0d204a0cde96d60e5a38eb2294d1030c6b2cc67b8b3baeee66706a99216871d2'
+    '.github/workflows/release.yml' = 'decce3c03743bc63867c85a5a83a3011d3cc16cc21793dda8796d3b5ca194388'
     'test/windows/interactive-win11-job.ps1' = '8cf5b41cba40803748b193c09a9e19d42b47e5ece2e0262cd2c9f497a2cb0253'
     'test/windows/interactive-win11-validate.ps1' = 'cf24651acd8cf091201fc2f81ad1286f389543502c76124c8d2d08d97d0d4d66'
     'test/windows/flagship/Invoke-InteractiveWin11.ps1' = '189560bc3bc0f67fd26937fd31084176dafe60352703505e26eea5f39459e7ff'

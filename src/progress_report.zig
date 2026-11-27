@@ -23,7 +23,7 @@ pub const Report = struct {
 
     pub fn cval(self: Report) C {
         return .{
-            .state = @intFromEnum(self.state),
+            .state = @backingInt(self.state),
             .progress = if (self.progress) |progress| @intCast(std.math.clamp(
                 progress,
                 0,
@@ -39,7 +39,7 @@ test "progress report C value preserves state and clamps progress" {
         .progress = 255,
     };
     const c = report.cval();
-    try std.testing.expectEqual(@intFromEnum(State.set), c.state);
+    try std.testing.expectEqual(@backingInt(State.set), c.state);
     try std.testing.expectEqual(@as(i8, 100), c.progress);
 
     const indeterminate: Report = .{ .state = .indeterminate };

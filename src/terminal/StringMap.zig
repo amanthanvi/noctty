@@ -6,9 +6,9 @@ const std = @import("std");
 const build_options = @import("terminal_options");
 const oni = @import("oniguruma");
 const point = @import("point.zig");
+const PinMap = @import("formatter.zig").PinMap;
 const Selection = @import("Selection.zig");
 const Screen = @import("Screen.zig");
-const Pin = @import("PageList.zig").Pin;
 const Allocator = std.mem.Allocator;
 
 // Retry budget for StringMap regex searches.
@@ -18,11 +18,15 @@ const Allocator = std.mem.Allocator;
 const oni_search_retry_limit = 100_000;
 
 string: [:0]const u8,
-map: []Pin,
+
+/// Mapping of string byte offsets to pins. See PinMap for the
+/// storage details.
+map: PinMap.Map,
 
 pub fn deinit(self: StringMap, alloc: Allocator) void {
     alloc.free(self.string);
-    alloc.free(self.map);
+    var map = self.map;
+    map.deinit(alloc);
 }
 
 /// Returns an iterator that yields the next match of the given regex.
@@ -106,8 +110,8 @@ pub const Match = struct {
     pub fn selection(self: Match) Selection {
         const start_idx: usize = @intCast(self.region.starts()[0]);
         const end_idx: usize = @intCast(self.region.ends()[0] - 1);
-        const start_pt = self.map.map[self.offset + start_idx];
-        const end_pt = self.map.map[self.offset + end_idx];
+        const start_pt = self.map.map.get(self.offset + start_idx).?;
+        const end_pt = self.map.map.get(self.offset + end_idx).?;
         return .init(start_pt, end_pt, false);
     }
 };
@@ -117,6 +121,7 @@ test "StringMap searchIterator" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
     // Initialize our regex
     try oni.testing.ensureInit();
@@ -130,7 +135,7 @@ test "StringMap searchIterator" {
     defer re.deinit();
 
     // Initialize our screen
-    var s = try Screen.init(alloc, .{ .cols = 5, .rows = 5, .max_scrollback = 0 });
+    var s = try Screen.init(io, alloc, .{ .cols = 5, .rows = 5, .max_scrollback_bytes = 0 });
     defer s.deinit();
     const str = "1ABCD2EFGH\n3IJKL";
     try s.testWriteString(str);
@@ -140,13 +145,10 @@ test "StringMap searchIterator" {
             .y = 1,
         } }).?,
     }).?;
-    var map: StringMap = undefined;
-    const sel_str = try s.selectionString(alloc, .{
+    const map = try s.selectionStringMap(alloc, .{
         .sel = line,
         .trim = false,
-        .map = &map,
     });
-    alloc.free(sel_str);
     defer map.deinit(alloc);
 
     // Get our iterator
@@ -174,6 +176,7 @@ test "StringMap searchIterator URL detection" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
     const url = @import("../config/url.zig");
 
     // Initialize URL regex
@@ -188,7 +191,7 @@ test "StringMap searchIterator URL detection" {
     defer re.deinit();
 
     // Initialize our screen with text containing a URL
-    var s = try Screen.init(alloc, .{ .cols = 40, .rows = 5, .max_scrollback = 0 });
+    var s = try Screen.init(io, alloc, .{ .cols = 40, .rows = 5, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello https://example.com/path world");
 
@@ -199,13 +202,10 @@ test "StringMap searchIterator URL detection" {
             .y = 0,
         } }).?,
     }).?;
-    var map: StringMap = undefined;
-    const sel_str = try s.selectionString(alloc, .{
+    const map = try s.selectionStringMap(alloc, .{
         .sel = line,
         .trim = false,
-        .map = &map,
     });
-    alloc.free(sel_str);
     defer map.deinit(alloc);
 
     // Search for URL match
@@ -244,7 +244,7 @@ test "StringMap searchIterator Windows path with click position" {
     var re = try oni.Regex.init(url.regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
     defer re.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 60, .rows = 5, .max_scrollback = 0 });
+    var s = try Screen.init(std.testing.io, alloc, .{ .cols = 60, .rows = 5, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("see C:\\Users\\amant\\file.txt:12:5 end");
 
@@ -252,8 +252,7 @@ test "StringMap searchIterator Windows path with click position" {
     for ([_]u16{ 4, 5, 14, 31 }) |x| {
         const click_pin = s.pages.pin(.{ .active = .{ .x = x, .y = 0 } }).?;
         const line = s.selectLine(.{ .pin = click_pin }).?;
-        var map: StringMap = undefined;
-        alloc.free(try s.selectionString(alloc, .{ .sel = line, .trim = false, .map = &map }));
+        const map = try s.selectionStringMap(alloc, .{ .sel = line, .trim = false });
         defer map.deinit(alloc);
 
         var it = map.searchIterator(re);
@@ -277,6 +276,7 @@ test "StringMap searchIterator URL with click position" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
     const url = @import("../config/url.zig");
 
     // Initialize URL regex
@@ -291,7 +291,7 @@ test "StringMap searchIterator URL with click position" {
     defer re.deinit();
 
     // Initialize our screen with text containing a URL
-    var s = try Screen.init(alloc, .{ .cols = 40, .rows = 5, .max_scrollback = 0 });
+    var s = try Screen.init(io, alloc, .{ .cols = 40, .rows = 5, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello https://example.com world");
 
@@ -305,13 +305,10 @@ test "StringMap searchIterator URL with click position" {
     const line = s.selectLine(.{
         .pin = click_pin,
     }).?;
-    var map: StringMap = undefined;
-    const sel_str = try s.selectionString(alloc, .{
+    const map = try s.selectionStringMap(alloc, .{
         .sel = line,
         .trim = false,
-        .map = &map,
     });
-    alloc.free(sel_str);
     defer map.deinit(alloc);
 
     // Search for URL match and verify click position is within URL

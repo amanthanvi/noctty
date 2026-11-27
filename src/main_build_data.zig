@@ -31,14 +31,14 @@ pub const Action = enum {
     @"terminfo-database",
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.c_allocator;
-    const action_ = try cli.action.detectArgs(Action, alloc);
+    const action_ = try cli.action.detectArgs(Action, alloc, init.minimal.args);
     const action = action_ orelse return error.NoAction;
 
     // Our output always goes to stdout, except for the terminfo database.
     var buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writerStreaming(&buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const writer = &stdout_writer.interface;
     switch (action) {
         .bash => try writer.writeAll(@import("extra/bash.zig").completions),
@@ -50,19 +50,19 @@ pub fn main() !void {
         .@"vim-ftplugin" => try writer.writeAll(@import("extra/vim.zig").ftplugin),
         .@"vim-compiler" => try writer.writeAll(@import("extra/vim.zig").compiler),
         .terminfo => try @import("terminfo/ghostty.zig").ghostty.encode(writer),
-        .@"terminfo-database" => try writeTerminfoDatabase(alloc),
+        .@"terminfo-database" => try writeTerminfoDatabase(init, alloc),
     }
     try stdout_writer.end();
 }
 
-fn writeTerminfoDatabase(alloc: Allocator) !void {
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+fn writeTerminfoDatabase(init: std.process.Init, alloc: Allocator) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 3) return error.MissingOutputDirectory;
 
-    var dir = try std.fs.cwd().makeOpenPath(args[args.len - 1], .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(init.io, args[args.len - 1], .{});
+    defer dir.close(init.io);
     try @import("terminfo/compiled.zig").writeDatabase(
+        init.io,
         alloc,
         @import("terminfo/ghostty.zig").ghostty,
         dir,

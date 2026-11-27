@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 /// Builder for constructing space-separated shell command strings.
-/// Uses a caller-provided allocator (typically with stackFallback).
+/// Uses a caller-provided allocator (typically a stack-first `std.heap.BufferFirstAllocator`).
 pub const ShellCommandBuilder = struct {
     buffer: std.Io.Writer.Allocating,
 

@@ -276,7 +276,7 @@ fn betterClassicPixelFormatCandidate(
     current: ClassicPixelFormatCandidate,
 ) bool {
     if (candidate.acceleration != current.acceleration) {
-        return @intFromEnum(candidate.acceleration) > @intFromEnum(current.acceleration);
+        return @backingInt(candidate.acceleration) > @backingInt(current.acceleration);
     }
     const candidate_accum_free = candidate.provenance.accum_bits == 0;
     const current_accum_free = current.provenance.accum_bits == 0;
@@ -1123,7 +1123,7 @@ fn chooseClassicCompatibilityPixelFormat(hdc: HDC) !WglPixelFormatSelection {
     const requested = compatibilityPixelFormatDescriptor();
     const pixel_format = ChoosePixelFormat(hdc, &requested);
     if (pixel_format == 0) {
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         gl_startup.recordOpenGLStartupWin32Failure(.choose_pixel_format, err);
         return windows.unexpectedError(err);
     }
@@ -1134,7 +1134,7 @@ fn chooseClassicCompatibilityPixelFormat(hdc: HDC) !WglPixelFormatSelection {
         @sizeOf(PIXELFORMATDESCRIPTOR),
         &descriptor,
     ) == 0) {
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         gl_startup.recordOpenGLStartupWin32Failure(.describe_pixel_format, err);
         return windows.unexpectedError(err);
     }
@@ -1206,7 +1206,7 @@ fn enumerateClassicPixelFormat(hdc: HDC) !WglPixelFormatSelection {
             @sizeOf(PIXELFORMATDESCRIPTOR),
             &descriptor,
         ) == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             gl_startup.recordOpenGLStartupWin32Failure(.describe_pixel_format, err);
             return windows.unexpectedError(err);
         }
@@ -1251,7 +1251,7 @@ pub fn chooseRealPixelFormat(
     if (GetWindowRect(hwnd, &child_rect) == 0) {
         log.warn(
             "unable to anchor a display-local WGL bootstrap; retaining classic selection err={}",
-            .{windows.kernel32.GetLastError()},
+            .{std.os.windows.GetLastError()},
         );
         return enumerateClassicPixelFormat(hdc);
     }
@@ -1774,10 +1774,10 @@ test "win32 WGL bootstrap keeps exact sRGB API families and valid procs" {
 }
 
 test "win32 WGL sRGB family order covers every pairing exactly once" {
-    const fields = @typeInfo(WglSrgbApiFamily).@"enum".fields;
-    try std.testing.expectEqual(fields.len, wgl_srgb_api_family_order.len);
-    inline for (fields) |field| {
-        const family: WglSrgbApiFamily = @enumFromInt(field.value);
+    const values = @typeInfo(WglSrgbApiFamily).@"enum".field_values;
+    try std.testing.expectEqual(values.len, wgl_srgb_api_family_order.len);
+    inline for (values) |value| {
+        const family: WglSrgbApiFamily = @fromBackingInt(@intCast(value));
         var seen: usize = 0;
         for (wgl_srgb_api_family_order) |candidate| {
             if (candidate == family) seen += 1;

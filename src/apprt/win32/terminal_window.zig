@@ -69,6 +69,7 @@ const imeWindowForms = win32.imeWindowForms;
 const input = @import("../../input.zig");
 const inspectorChromeVisible = win32.inspectorChromeVisible;
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const isAutomaticSshCommandTitle = win32.isAutomaticSshCommandTitle;
 const isHighContrastActive = win32.isHighContrastActive;
 const lParamBits = win32.lParamBits;
@@ -452,7 +453,11 @@ pub const Surface = struct {
     /// of this terminal (`Host.tabBackground`). Only this terminal's own
     /// config sets it (`setTabBackground`); background colors a program sets
     /// at run time (OSC 11) are not followed.
-    tab_background: u32 = colorRefFromConfig(std.meta.fieldInfo(configpkg.Config, .background).defaultValue().?),
+    tab_background: u32 = colorRefFromConfig(default_background: {
+        // 0.17's fieldInfo gives the attributes, whose defaultValue takes the type.
+        const info = std.meta.fieldInfo(configpkg.Config, .background);
+        break :default_background info.attrs.defaultValue(info.type).?;
+    }),
     scrollbar_config: configpkg.Config.Scrollbar = .system,
     secure_input: bool = false,
     secure_input_ever_engaged: bool = false,
@@ -533,8 +538,8 @@ pub const Surface = struct {
     search_bar_case_hwnd: ?HWND = null,
     search_bar_word_hwnd: ?HWND = null,
     search_bar_close_hwnd: ?HWND = null,
-    search_bar_button_prev_procs: [6]?*const anyopaque = [_]?*const anyopaque{null} ** 6,
-    search_bar_button_uia_providers: [6]?*win32_uia.ChromeControlProvider = [_]?*win32_uia.ChromeControlProvider{null} ** 6,
+    search_bar_button_prev_procs: [6]?*const anyopaque = @as([6]?*const anyopaque, @splat(null)),
+    search_bar_button_uia_providers: [6]?*win32_uia.ChromeControlProvider = @as([6]?*win32_uia.ChromeControlProvider, @splat(null)),
     search_bar_prev_placement: ChildPlacement = .{},
     search_bar_next_placement: ChildPlacement = .{},
     search_bar_regex_placement: ChildPlacement = .{},
@@ -1062,7 +1067,7 @@ pub const Surface = struct {
                 // title, and a button with a UIA provider for the new tab.
                 // `syncTabButtons` cannot make the button here, since the
                 // test executable has no manifest for the layered chrome.
-                surface.title = try surface.app.core_app.alloc.dupeZ(u8, "PKG-05");
+                surface.title = try surface.app.core_app.alloc.dupeSentinel(u8, "PKG-05", 0);
                 const owner = surface.host.?;
                 const tab = &owner.tabs.items[owner.tabs.items.len - 1];
                 tab.button_hwnd = sys.CreateWindowExW(
@@ -1468,7 +1473,7 @@ pub const Surface = struct {
 
         self.undo_stack.discardExpired(self.app.undoCutoffTimestampMs());
         const captured = captured: {
-            self.core_surface.renderer_state.mutex.lock();
+            self.core_surface.renderer_state.mutex.lockUncancelable();
             defer self.core_surface.renderer_state.mutex.unlock();
             break :captured .{
                 .bytes = try captureTerminalUndoStateBytes(
@@ -1508,7 +1513,7 @@ pub const Surface = struct {
         var restored: RestoredTerminalUndoState = .{};
 
         {
-            self.core_surface.renderer_state.mutex.lock();
+            self.core_surface.renderer_state.mutex.lockUncancelable();
             defer self.core_surface.renderer_state.mutex.unlock();
             restored = restoreTerminalUndoState(
                 self.core_surface.renderer_state.terminal,
@@ -1568,7 +1573,7 @@ pub const Surface = struct {
         switch (kind) {
             .clear_screen => {
                 {
-                    self.core_surface.renderer_state.mutex.lock();
+                    self.core_surface.renderer_state.mutex.lockUncancelable();
                     defer self.core_surface.renderer_state.mutex.unlock();
                     if (self.core_surface.io.terminal.screens.active_key == .alternate) return false;
                 }
@@ -1589,7 +1594,7 @@ pub const Surface = struct {
                 };
                 var scrollbar: terminal.Scrollbar = .zero;
                 {
-                    self.core_surface.renderer_state.mutex.lock();
+                    self.core_surface.renderer_state.mutex.lockUncancelable();
                     defer self.core_surface.renderer_state.mutex.unlock();
                     scrollbar = self.core_surface.renderer_state.terminal.screens.active.pages.scrollbar();
                 }
@@ -1617,7 +1622,7 @@ pub const Surface = struct {
     fn canReapplyUndoableAction(self: *Surface, kind: win32_undo.Kind) bool {
         switch (kind) {
             .clear_screen => {
-                self.core_surface.renderer_state.mutex.lock();
+                self.core_surface.renderer_state.mutex.lockUncancelable();
                 defer self.core_surface.renderer_state.mutex.unlock();
                 return self.core_surface.io.terminal.screens.active_key != .alternate;
             },
@@ -1757,12 +1762,123 @@ pub const Surface = struct {
         return clipboard_type == .standard;
     }
 
+    /// Core's clipboard read (`Surface.startClipboardRequest`). Started means
+    /// it was served, here before this returns; a request it does not serve
+    /// was not started.
     pub fn clipboardRequest(
         self: *Surface,
         clipboard_type: apprt.Clipboard,
         state: apprt.ClipboardRequest,
-    ) !bool {
-        if (clipboard_type != .standard) return false;
+    ) !apprt.ClipboardReadResult {
+        // Windows has no selection or primary clipboard.
+        if (clipboard_type != .standard) return .unsupported;
+        switch (state) {
+            .paste, .osc_52_read => {},
+            // Upstream 1.4's Kitty clipboard protocol (OSC 5522): a user's
+            // paste into a program that turned paste events on (mode 5522),
+            // and the program's read that follows it.
+            .list => return self.sendPasteEvent(state),
+            .kitty_read => return try self.serveKittyClipboardRead(state),
+            // A program's OSC 5522 write is not served yet: core answers it
+            // ENOSYS. OSC 52 writes never come here (setClipboard).
+            .kitty_write, .osc_52_write => return .unsupported,
+        }
+        return if (try self.clipboardRequestStarted(state)) .started else .unavailable;
+    }
+
+    /// A user's paste into a program that turned on Kitty paste events
+    /// (mode 5522), which core asks for as `.list` instead of `.paste`: the
+    /// program gets a paste event naming the clipboard's types
+    /// (`ClipboardSource.mimes`) and a one-time password for the read that
+    /// follows (`serveKittyClipboardRead`). No clipboard data is read. As in
+    /// upstream's GTK and macOS runtimes, the event is sent even when the
+    /// clipboard holds nothing this can serve, and the paste counts as done.
+    fn sendPasteEvent(self: *Surface, state: apprt.ClipboardRequest) apprt.ClipboardReadResult {
+        // A user's paste, as `.paste` is.
+        self.noteProgramInput();
+        const source = self.app.test_clipboard_source orelse system_clipboard;
+        self.core_surface.completeClipboardRequest(state, .{
+            .available = source.mimes(),
+        }) catch |err| {
+            log.warn("mode 5522 paste event failed err={}", .{err});
+        };
+        return .started;
+    }
+
+    /// A program's Kitty clipboard protocol (OSC 5522) read, served before
+    /// this returns, as upstream's GTK and macOS runtimes serve it: the
+    /// clipboard's text for a text type it asks for
+    /// (`terminal.clipboard.isTextMime`), and the type listing
+    /// (`ClipboardSource.mimes`) when it asks for one. Nothing else is
+    /// served: no other format, and never copied files. The read that
+    /// follows a paste event carries that event's one-time password, so it
+    /// arrives granted and needs no prompt.
+    fn serveKittyClipboardRead(self: *Surface, state: apprt.ClipboardRequest) !apprt.ClipboardReadResult {
+        const kitty = state.kitty_read;
+        // A read that would ask first (`clipboard-read = ask`, no grant from
+        // a paste event or a remembered answer, a data type asked for; core's
+        // test in `completeClipboardRequest`): Win32 has no prompt for one
+        // yet, so it is not served and core answers ENOSYS. Decided before
+        // the clipboard is read, as for an OSC 52 read that would be
+        // declined.
+        if (self.core_surface.config.clipboard_read == .ask and
+            !kitty.granted and
+            !terminal.kitty.clipboard.readPromptExempt(kitty.mimes.len))
+        {
+            return .unsupported;
+        }
+
+        const wants_text = for (kitty.mimes) |mime| {
+            if (terminal.clipboard.isTextMime(mime)) break true;
+        } else false;
+        // Nothing asked for can be served and no listing either: core
+        // answers with no data, which is how the protocol says unavailable.
+        if (!wants_text and !kitty.list) return .unavailable;
+
+        const alloc = self.app.core_app.alloc;
+        // Text only: a program's read never takes copied files.
+        const contents: ClipboardContents = if (!wants_text)
+            .none
+        else if (self.app.test_clipboard_source) |source|
+            try selectClipboardContents(alloc, false, source)
+        else
+            try self.readClipboard(false);
+        const text: ?[:0]u8 = switch (contents) {
+            .none => null,
+            .text => |held| held,
+            .files => |paths| files: {
+                alloc.free(paths);
+                break :files null;
+            },
+        };
+        defer if (text) |held| alloc.free(held);
+
+        if (text == null and !kitty.list) return .unavailable;
+        const source = self.app.test_clipboard_source orelse system_clipboard;
+        const available: []const []const u8 = if (kitty.list) source.mimes() else &.{};
+        var served: [1]terminal.clipboard.Content = undefined;
+        const served_len: usize = if (text) |held| len: {
+            served[0] = .{ .mime = "text/plain", .data = held };
+            break :len 1;
+        } else 0;
+
+        self.core_surface.completeClipboardRequest(state, .{
+            .contents = served[0..served_len],
+            .available = available,
+        }) catch |err| switch (err) {
+            // Core would ask first after all, and kept the request: answered
+            // as above (ENOSYS).
+            error.UnauthorizedPaste => return .unsupported,
+            // Past its prompt test core owns the request and freed it, so it
+            // counts as served; returning the error would free it again.
+            else => log.warn("kitty clipboard read failed err={}", .{err}),
+        };
+        return .started;
+    }
+
+    /// The Win32 clipboard read behind `clipboardRequest`, true when the
+    /// request was served.
+    fn clipboardRequestStarted(self: *Surface, state: apprt.ClipboardRequest) !bool {
         // A paste, from any key, menu or palette; a program's own read is not.
         if (state == .paste) self.noteProgramInput();
         // A program's read that would only be declined does not read the
@@ -1816,8 +1932,11 @@ pub const Surface = struct {
             // as Windows Terminal does. A program's OSC 52 read gets the
             // empty reply below and never an empty paste.
             .paste => return try self.core_surface.completeClipboardPasteWithoutText(),
-            .osc_52_read => try self.app.core_app.alloc.dupeZ(u8, ""),
+            .osc_52_read => try self.app.core_app.alloc.dupeSentinel(u8, "", 0),
             .osc_52_write => unreachable,
+            // Served by `sendPasteEvent` and `serveKittyClipboardRead`, or
+            // never started (`clipboardRequest`).
+            .kitty_read, .kitty_write, .list => return false,
         };
         defer self.app.core_app.alloc.free(str);
 
@@ -1826,11 +1945,9 @@ pub const Surface = struct {
             return try self.core_surface.completeClipboardPasteWithoutText();
         }
 
-        self.core_surface.completeClipboardRequest(
-            state,
-            str,
-            false,
-        ) catch |err| switch (err) {
+        self.core_surface.completeClipboardRequest(state, .{
+            .contents = &.{.{ .mime = "text/plain", .data = str }},
+        }) catch |err| switch (err) {
             error.UnsafePaste,
             error.UnauthorizedPaste,
             => {
@@ -1896,14 +2013,16 @@ pub const Surface = struct {
         }
     }
 
-    pub fn defaultTermioEnv(self: *const Surface) !std.process.EnvMap {
-        var env = try internal_os.getEnvMap(self.app.core_app.alloc);
+    pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
+        // The process environment, as 0.15's `internal_os.getEnvMap` read it
+        // on Windows (its Flatpak arm is Linux's).
+        var env = try global.environ().createMap(self.app.core_app.alloc);
         errdefer env.deinit();
 
         if (env.get("USERPROFILE") == null) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (try internal_os.windows.knownFolderPathUtf8(
-                &internal_os.windows.FOLDERID_Profile,
+            if (try internal_os.windows_ext.knownFolderPathUtf8(
+                &internal_os.windows_ext.FOLDERID_Profile,
                 &buf,
             )) |profile| {
                 try env.put("USERPROFILE", profile);
@@ -1912,8 +2031,8 @@ pub const Surface = struct {
 
         if (env.get("LOCALAPPDATA") == null) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (try internal_os.windows.knownFolderPathUtf8(
-                &internal_os.windows.FOLDERID_LocalAppData,
+            if (try internal_os.windows_ext.knownFolderPathUtf8(
+                &internal_os.windows_ext.FOLDERID_LocalAppData,
                 &buf,
             )) |local_appdata| {
                 try env.put("LOCALAPPDATA", local_appdata);
@@ -1921,6 +2040,14 @@ pub const Surface = struct {
         }
 
         return env;
+    }
+
+    /// The app-wide render device's options, which core `Surface.init` asks
+    /// for: nothing on Windows, where each pane's renderer makes its own GPU
+    /// context (`renderer.Device`).
+    pub fn renderDeviceOptions(self: *const Surface) !rendererpkg.Device.Options {
+        _ = self;
+        return .{};
     }
 
     pub fn redrawInspector(self: *Surface) void {
@@ -2106,7 +2233,7 @@ pub const Surface = struct {
         }
 
         if (sys.wglMakeCurrent(hdc, hglrc) == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             recordOpenGLStartupWin32Failure(.make_current, err);
             return windows.unexpectedError(err);
         }
@@ -2141,7 +2268,7 @@ pub const Surface = struct {
         if (sys.wglMakeCurrent(null, null) == 0) {
             log.warn(
                 "win32 wglMakeCurrent(null, null) failed during GL teardown err={}",
-                .{windows.kernel32.GetLastError()},
+                .{std.os.windows.GetLastError()},
             );
             return false;
         }
@@ -2153,7 +2280,7 @@ pub const Surface = struct {
         _ = self.hglrc orelse return error.NoOpenGLContext;
 
         if (sys.SwapBuffers(hdc) == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             return windows.unexpectedError(err);
         }
         self.noteSuccessfulPresent();
@@ -2260,12 +2387,12 @@ pub const Surface = struct {
                 owner.refreshSurfaceVisibility();
                 for (surfaces) |surface| {
                     const queue = surface.core_surface.io.mailbox.spsc.queue;
-                    const message = queue.pop() orelse return error.MissingVisibilitySignal;
+                    const message = queue.pop(std.testing.io) orelse return error.MissingVisibilitySignal;
                     try std.testing.expectEqual(expected, message.pty_visibility);
-                    try std.testing.expect(queue.pop() == null);
+                    try std.testing.expect(queue.pop(std.testing.io) == null);
                 }
                 owner.refreshSurfaceVisibility();
-                for (surfaces) |surface| try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop() == null);
+                for (surfaces) |surface| try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
             }
             fn request(surface: *Surface, visible: bool) !void {
                 try surface.core_surface.handleMessage(.{ .window_visibility = visible });
@@ -2349,10 +2476,10 @@ pub const Surface = struct {
         }
         const Queue = struct {
             fn expectNext(surface: *Surface) !termio.Message {
-                return surface.core_surface.io.mailbox.spsc.queue.pop() orelse error.MissingPtyMessage;
+                return surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) orelse error.MissingPtyMessage;
             }
             fn expectEmpty(surface: *Surface) !void {
-                try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop() == null);
+                try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
             }
         };
 
@@ -2489,6 +2616,10 @@ pub const Surface = struct {
         const mode: HostOverlayMode = switch (kind) {
             .surface => .surface_title,
             .tab => .tab_title,
+            // Upstream 1.4's window-title prompt: Win32 has no window title
+            // override to prompt for, and `App.performAction` answers it
+            // false before it gets here.
+            .window => return,
         };
         if (host.overlay_mode == mode) {
             host.hideOverlay();
@@ -2885,7 +3016,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         var render_state: terminal.RenderState = .empty;
         defer render_state.deinit(alloc);
-        self.core_surface.renderer_state.mutex.lock();
+        self.core_surface.renderer_state.mutex.lockUncancelable();
         render_state.update(
             alloc,
             self.core_surface.renderer_state.terminal,
@@ -2990,7 +3121,7 @@ pub const Surface = struct {
         const parent = self.hwnd orelse return error.NoSurfaceWindow;
         var rect: RECT = undefined;
         if (sys.GetClientRect(parent, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
 
         self.quick_select_hwnd = sys.CreateWindowExW(
@@ -3006,7 +3137,7 @@ pub const Surface = struct {
             null,
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return windows.unexpectedError(std.os.windows.GetLastError());
         const hwnd = self.quick_select_hwnd.?;
         _ = sys.SetWindowLongPtrW(
             hwnd,
@@ -3022,7 +3153,7 @@ pub const Surface = struct {
             _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
             _ = sys.DestroyWindow(hwnd);
             self.quick_select_hwnd = null;
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
     }
 
@@ -3177,7 +3308,7 @@ pub const Surface = struct {
 
         var render_state: terminal.RenderState = .empty;
         defer render_state.deinit(alloc);
-        self.core_surface.renderer_state.mutex.lock();
+        self.core_surface.renderer_state.mutex.lockUncancelable();
         render_state.update(
             alloc,
             self.core_surface.renderer_state.terminal,
@@ -3204,7 +3335,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         const session = if (self.quick_select_session) |*value| value else return;
         if (index >= session.scan.matches.len) return;
-        const payload = try alloc.dupeZ(u8, session.scan.matchText(index));
+        const payload = try alloc.dupeSentinel(u8, session.scan.matchText(index), 0);
         defer alloc.free(payload);
 
         // Re-verify against the LIVE viewport before acting.
@@ -3249,12 +3380,14 @@ pub const Surface = struct {
                         @tagName(verdict.severity),
                         verdict.reason,
                     });
-                    try self.requestPasteConfirm(.paste, payload);
+                    try self.requestPasteConfirm(.{ .paste = .standard }, payload);
                     return;
                 }
             }
-            self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
-                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.paste, payload),
+            self.core_surface.completeClipboardRequest(.{ .paste = .standard }, .{
+                .contents = &.{.{ .mime = "text/plain", .data = payload }},
+            }) catch |err| switch (err) {
+                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.{ .paste = .standard }, payload),
                 else => return err,
             };
             return;
@@ -4350,7 +4483,7 @@ pub const Surface = struct {
         defer role_scope.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
-        surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
+        surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 10 });
         defer surface.core_surface.io.terminal.deinit(std.testing.allocator);
         surface.core_surface.mouse = .{ .link_point = .{ .x = 4, .y = 4 } };
         surface.core_surface.renderer_state = .{
@@ -4903,7 +5036,7 @@ pub const Surface = struct {
         if (self.pending_clipboard_op) |*old| old.deinit(alloc);
         self.pending_clipboard_op = null;
 
-        const data_copy = try alloc.dupeZ(u8, data);
+        const data_copy = try alloc.dupeSentinel(u8, data, 0);
         // Single errdefer — if showConfirm fails we free the buffer
         // and leave `pending_clipboard_op` untouched (still null from
         // the defensive clear above). Committing the op BEFORE
@@ -4964,9 +5097,9 @@ pub const Surface = struct {
             alloc.free(owned);
         }
         for (contents) |content| {
-            const mime_copy = try alloc.dupeZ(u8, content.mime);
+            const mime_copy = try alloc.dupeSentinel(u8, content.mime, 0);
             errdefer alloc.free(mime_copy);
-            const data_copy = try alloc.dupeZ(u8, content.data);
+            const data_copy = try alloc.dupeSentinel(u8, content.data, 0);
             // Both dupes succeeded — commit atomically into owned[]
             // and advance filled. The per-iter mime errdefer goes
             // out of scope without firing.
@@ -5055,11 +5188,17 @@ pub const Surface = struct {
         return try selectClipboardContents(self.app.core_app.alloc, include_files, system_clipboard);
     }
 
-    /// The open system clipboard, for `selectClipboardContents`.
+    /// The system clipboard, for `selectClipboardContents` (open) and
+    /// `ClipboardSource.mimes` (open or not).
     const system_clipboard: ClipboardSource = .{
         .text = &readOpenClipboardText,
         .hdrop = &readOpenClipboardHdrop,
+        .has_text = &clipboardHasText,
     };
+
+    fn clipboardHasText() bool {
+        return sys.IsClipboardFormatAvailable(c.CF_UNICODETEXT) != 0;
+    }
 
     fn readOpenClipboardHdrop() ?*anyopaque {
         if (sys.IsClipboardFormatAvailable(c.CF_HDROP) == 0) return null;
@@ -5197,7 +5336,7 @@ pub const Surface = struct {
             if (!deleted) {
                 log.warn(
                     "win32 wglDeleteContext failed during surface teardown err={}",
-                    .{windows.kernel32.GetLastError()},
+                    .{std.os.windows.GetLastError()},
                 );
             }
             // Drop our reference either way. The Surface is freed moments
@@ -5215,7 +5354,7 @@ pub const Surface = struct {
             if (!released) {
                 log.warn(
                     "win32 ReleaseDC failed during surface teardown had_hwnd={} err={}",
-                    .{ self.hwnd != null, windows.kernel32.GetLastError() },
+                    .{ self.hwnd != null, std.os.windows.GetLastError() },
                 );
             }
             self.hdc = null;
@@ -5711,8 +5850,8 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
     // on this thread, so that boundary genuinely holds.
     {
         const sub_path = "teardown-failed.jsonl";
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
-        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, sub_path, alloc);
         defer alloc.free(path);
 
         surface.* = uninitializedInertStorage(Surface);
@@ -5723,7 +5862,7 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
 
         surface.destroyGL();
 
-        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, sub_path, alloc, .limited(16 * 1024));
         defer alloc.free(contents);
         try std.testing.expect(
             std.mem.indexOf(u8, contents, "\"stage\":\"wgl_context_unbound\"") != null,
@@ -5743,8 +5882,8 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
     // so the fail-closed rule does not break the ordinary teardown path.
     {
         const sub_path = "teardown-released.jsonl";
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
-        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, sub_path, alloc);
         defer alloc.free(path);
 
         const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
@@ -5774,7 +5913,7 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
 
         surface.destroyGL();
 
-        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, sub_path, alloc, .limited(16 * 1024));
         defer alloc.free(contents);
         try std.testing.expect(
             std.mem.indexOf(u8, contents, "\"stage\":\"dc_released\"") != null,
@@ -5814,7 +5953,7 @@ test "isolated: Win32 surface key demand records the key-message options read fr
         defer role.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
-        var term = try terminal.Terminal.init(testing.allocator, .{ .cols = 10, .rows = 3 });
+        var term = try terminal.Terminal.init(std.testing.io, testing.allocator, .{ .cols = 10, .rows = 3 });
         defer term.deinit(testing.allocator);
         surface.core_surface.renderer_state = .{ .mutex = &mutex, .terminal = &term };
 

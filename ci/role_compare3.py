@@ -334,6 +334,14 @@ for name in sorted(os.listdir(dump_dir)):
             if "." not in symbol and len(container_names[(file, symbol)]) > 1:
                 failures.append(f"AMBIGUOUS-KEY {name}: {pair_key} names more than one reviewed function")
                 continue
+            # DbgHelp names a container's function bare, as it does a plain one (src/sync/symbolise.zig's doc;
+            # its site-shape test names `Shapes.Holder.Inner.symboliseNestedSite` `symboliseNestedSite`), so a
+            # bare key takes the key of the one reviewed function of that name in its file, a container's
+            # (`Compression.step` in renderer/Thread.zig, which a composite with compression live records as
+            # `step`). Two such functions are the AMBIGUOUS-KEY above; that no unreviewed function of the name
+            # acquires is the lock inventory's gate (lock_inventory20.py), not this compare's.
+            if "." not in symbol and len(container_names[(file, symbol)]) == 1:
+                pair_key = f"{file}:{next(iter(container_names[(file, symbol)]))}"
         seen.add((pair_key, role))
         if (pair_key, role) not in allowed:
             failures.append(f"PAIR-OUTSIDE-TABLE {name}: ({fn}, {role})")

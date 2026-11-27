@@ -1,9 +1,11 @@
 const std = @import("std");
+const win32_sys = @import("apprt/win32/sys.zig");
+const win32_types = @import("apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 
 const cli = @import("cli.zig");
-const state = &@import("global.zig").state;
+const global = @import("global.zig");
 
 /// Enable Ctrl+C in children of the Windows GUI before any are started.
 ///
@@ -15,7 +17,7 @@ const state = &@import("global.zig").state;
 /// https://github.com/microsoft/terminal/blob/3b8c5606ee1866e7bf5c4e84e962798492282097/src/cascadia/WindowsTerminal/main.cpp#L97-L102
 pub fn enableGuiChildCtrlC() !void {
     if (comptime builtin.os.tag != .windows) return;
-    try windows.SetConsoleCtrlHandler(null, false);
+    try win32_sys.setConsoleCtrlHandler(null, false);
 }
 
 test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
@@ -26,9 +28,9 @@ test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
     // fails, so this test cannot affect a later console-control test.
     const flags = &windows.peb().ProcessParameters.ConsoleFlags;
     const before = flags.*;
-    defer windows.SetConsoleCtrlHandler(null, before & 1 != 0) catch unreachable;
+    defer win32_sys.setConsoleCtrlHandler(null, before & 1 != 0) catch unreachable;
 
-    try windows.SetConsoleCtrlHandler(null, true);
+    try win32_sys.setConsoleCtrlHandler(null, true);
     try std.testing.expect(flags.* & 1 != 0);
     try enableGuiChildCtrlC();
     try std.testing.expectEqual(before & ~@as(windows.ULONG, 1), flags.*);
@@ -52,9 +54,9 @@ test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
 pub fn attachParentConsole() void {
     if (comptime builtin.os.tag != .windows) return;
 
-    const std_in = -10;
-    const std_out = -11;
-    const std_err = -12;
+    const std_in = win32_types.STD_INPUT_HANDLE;
+    const std_out = win32_types.STD_OUTPUT_HANDLE;
+    const std_err = win32_types.STD_ERROR_HANDLE;
 
     // ATTACH_PARENT_PROCESS. Fails when the launcher has no console (started
     // from Explorer, a service, or a detached process), which is fine. A GUI
@@ -69,22 +71,22 @@ pub fn attachParentConsole() void {
 
 /// Both helpers below are only ever reached from attachParentConsole, which has
 /// already established that this is Windows.
-fn stdHandleUsable(id: i32) bool {
-    const handle = GetStdHandle(id);
+fn stdHandleUsable(id: win32_types.DWORD) bool {
+    const handle = win32_sys.GetStdHandle(id);
     if (handle == null or handle == windows.INVALID_HANDLE_VALUE) return false;
     // FILE_TYPE_UNKNOWN (0) is both the error return and a legitimate answer
     // for a valid handle whose type Windows cannot classify. `GetFileType`
     // documents the difference as "clear the last error first; on success it
     // is left at NO_ERROR", so a device redirection we cannot classify must
     // stay untouched rather than be replaced with CONOUT$.
-    SetLastError(0);
+    win32_sys.SetLastError(0);
     if (GetFileType(handle.?) != 0) return true;
     return GetLastError() == 0;
 }
 
-fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
+fn bindStdHandleToConsole(id: win32_types.DWORD, comptime name: []const u8) void {
     const path = std.unicode.utf8ToUtf16LeStringLiteral(name);
-    const handle = CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path,
         0x80000000 | 0x40000000, // GENERIC_READ | GENERIC_WRITE
         0x00000001 | 0x00000002, // FILE_SHARE_READ | FILE_SHARE_WRITE
@@ -97,26 +99,18 @@ fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
     _ = SetStdHandle(id, handle);
 }
 
-extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?windows.HANDLE;
-extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) win32_types.BOOL;
+// GetStdHandle, SetLastError and CreateFileW are win32/sys.zig's (council P6:
+// this file's GetStdHandle took an i32, the SDK's takes a DWORD).
+extern "kernel32" fn SetStdHandle(nStdHandle: win32_types.DWORD, hHandle: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) u32;
-extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(.winapi) void;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
-extern "kernel32" fn CreateFileW(
-    lpFileName: [*:0]const u16,
-    dwDesiredAccess: u32,
-    dwShareMode: u32,
-    lpSecurityAttributes: ?*anyopaque,
-    dwCreationDisposition: u32,
-    dwFlagsAndAttributes: u32,
-    hTemplateFile: ?windows.HANDLE,
-) callconv(.winapi) windows.HANDLE;
 
 pub fn reportStateInitError(err: anyerror) !void {
     attachParentConsole();
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    // The global state failed to initialize, so its Io may not exist.
+    var stderr_writer = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &buffer);
     const stderr = &stderr_writer.interface;
 
     const ErrSet = @TypeOf(err) || error{Unknown};
@@ -179,7 +173,7 @@ fn formatCliActionFailureMessage(
 
 fn writePlainStderr(message: []const u8) bool {
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
     const stderr = &stderr_writer.interface;
     stderr.writeAll(message) catch return false;
     stderr.flush() catch return false;
@@ -228,15 +222,19 @@ fn logFn(
     args: anytype,
 ) void {
     stderr: {
-        if (comptime builtin.mode != .Debug and level == .debug) break :stderr;
-        if (!state.logging.stderr) break :stderr;
+        if (comptime builtin.mode != .debug and level == .debug) break :stderr;
+        // A line logged before `global.init` (process-origin capture, the
+        // portable update helper) has no state to read: Zig 0.15's zeroed
+        // `state` read false there, so it skips stderr as it did.
+        const logging = global.loggingIfInitialized() orelse break :stderr;
+        if (!logging.stderr) break :stderr;
 
         var buf: [64]u8 = undefined;
-        const stderr = std.debug.lockStderrWriter(&buf);
-        defer std.debug.unlockStderrWriter();
+        const stderr = std.debug.lockStderr(&buf);
+        defer std.debug.unlockStderr();
 
-        nosuspend stderr.print(comptime logPrefix(level, scope) ++ format ++ "\n", args) catch break :stderr;
-        nosuspend stderr.flush() catch break :stderr;
+        nosuspend stderr.file_writer.interface.print(comptime logPrefix(level, scope) ++ format ++ "\n", args) catch break :stderr;
+        nosuspend stderr.file_writer.interface.flush() catch break :stderr;
     }
 }
 
@@ -256,7 +254,7 @@ test "log prefixes the hidden-desktop suite reads" {
 
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
-        .Debug => .debug,
+        .debug => .debug,
         else => .info,
     },
     .logFn = logFn,
@@ -272,16 +270,18 @@ pub const std_options: std.Options = .{
 /// trace: debug info stripped". The trap raises an exception, so the minidump
 /// filter still writes a dump, and the dump is what the symbols zip reads.
 pub const panic = switch (builtin.mode) {
-    .Debug, .ReleaseSafe => std.debug.FullPanic(std.debug.defaultPanic),
-    .ReleaseFast, .ReleaseSmall => std.debug.FullPanic(releasePanic),
+    .debug, .safe => std.debug.FullPanic(std.debug.defaultPanic),
+    .fast, .small => std.debug.FullPanic(releasePanic),
 };
 
 fn releasePanic(msg: []const u8, _: ?usize) noreturn {
     @branchHint(.cold);
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll("panic: ") catch {};
-    stderr.writeAll(msg) catch {};
-    stderr.writeAll("\n") catch {};
+    // A panic can come from any thread, before or after the global state.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const stderr = std.Io.File.stderr();
+    stderr.writeStreamingAll(io, "panic: ") catch {};
+    stderr.writeStreamingAll(io, msg) catch {};
+    stderr.writeStreamingAll(io, "\n") catch {};
     @trap();
 }
 
@@ -291,12 +291,12 @@ fn releasePanic(msg: []const u8, _: ?usize) noreturn {
 test "cli console attach leaves working std handles alone" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const std_out = -11;
+    const std_out = win32_types.STD_OUTPUT_HANDLE;
     try std.testing.expect(stdHandleUsable(std_out));
 
-    const before = GetStdHandle(std_out);
+    const before = win32_sys.GetStdHandle(std_out);
     attachParentConsole();
-    try std.testing.expectEqual(before, GetStdHandle(std_out));
+    try std.testing.expectEqual(before, win32_sys.GetStdHandle(std_out));
 }
 
 test "cli help output failures get a text output hint" {

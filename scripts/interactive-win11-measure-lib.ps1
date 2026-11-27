@@ -56,6 +56,9 @@ function Get-InteractiveWin11MeasureLayout {
         Receipt = Join-Path $root 'build.json'
         Prefix = Join-Path $root 'prefix'
         Cache = Join-Path $root '.zig-cache'
+        # Zig 0.17 unpacks each package into the build root's `zig-pkg\` unless told otherwise, which would put files
+        # in the source tree the archive does not hold (ZIG017-MEASURE-PKG-01 in docs/agents/log/test-harnesses.md).
+        PkgDir = Join-Path $root 'zig-pkg'
         Exe = Join-Path $root 'prefix\bin\noctty.exe'
         Cli = Join-Path $root 'prefix\bin\noctty.com'
     }
@@ -392,7 +395,7 @@ function Invoke-InteractiveWin11MeasureBuild {
         $runPath = Join-Path $layout.Root 'run-build.cmd'
         $launchPath = Join-Path $layout.Root 'launch-build.cmd'
         $logPath = Join-Path $layout.Root 'build.log'
-        foreach ($path in @($layout.Prefix, $layout.Cache, $runPath, $launchPath, $logPath)) { Assert-InteractiveWin11MeasurePlainPath $path }
+        foreach ($path in @($layout.Prefix, $layout.Cache, $layout.PkgDir, $runPath, $launchPath, $logPath)) { Assert-InteractiveWin11MeasurePlainPath $path }
         $buildArguments = (Get-InteractiveWin11MeasureBuildArguments $Optimize) -join ' '
         $run = @"
 @echo off
@@ -414,6 +417,8 @@ exit /b %errorlevel%
         $info.CreateNoWindow = $true
         $info.RedirectStandardInput = $true
         $info.EnvironmentVariables['ZIG_LOCAL_CACHE_DIR'] = $layout.Cache
+        # Beside the cache, outside the source tree (Zig 0.17: `ZIG_LOCAL_PKG_DIR`, `lib/compiler/Maker.zig:259`).
+        $info.EnvironmentVariables['ZIG_LOCAL_PKG_DIR'] = $layout.PkgDir
         # A redirected LOCALAPPDATA must never relocate the global Zig cache.
         if ([string]::IsNullOrWhiteSpace($info.EnvironmentVariables['ZIG_GLOBAL_CACHE_DIR'])) {
             $info.EnvironmentVariables['ZIG_GLOBAL_CACHE_DIR'] = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'zig'

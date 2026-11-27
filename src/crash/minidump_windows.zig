@@ -5,6 +5,10 @@
 //! a small `.dmp` next to any other local crash artifacts.
 
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const windows = std.os.windows;
 const dir = @import("dir.zig");
 
@@ -27,7 +31,7 @@ const MiniDumpType =
 const MINIDUMP_EXCEPTION_INFORMATION = extern struct {
     ThreadId: windows.DWORD,
     ExceptionPointers: *windows.EXCEPTION_POINTERS align(4),
-    ClientPointers: windows.BOOL,
+    ClientPointers: win32_types.BOOL,
 };
 
 comptime {
@@ -41,7 +45,7 @@ extern "kernel32" fn SetUnhandledExceptionFilter(
     lpTopLevelExceptionFilter: ExceptionFilter,
 ) callconv(.winapi) ExceptionFilter;
 
-extern "kernel32" fn DeleteFileW(path: windows.LPCWSTR) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn DeleteFileW(path: windows.LPCWSTR) callconv(.winapi) win32_types.BOOL;
 
 extern "dbghelp" fn MiniDumpWriteDump(
     hProcess: windows.HANDLE,
@@ -51,37 +55,45 @@ extern "dbghelp" fn MiniDumpWriteDump(
     ExceptionParam: ?*MINIDUMP_EXCEPTION_INFORMATION,
     UserStreamParam: ?*anyopaque,
     CallbackParam: ?*anyopaque,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 var installed = false;
 var previous_filter: ExceptionFilter = null;
 var writing = std.atomic.Value(bool).init(false);
 var crash_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 var crash_dir: []const u8 = "";
-var crash_dir_w: windows.PathSpace = undefined;
+var crash_dir_w: prefixed_path.PathSpace = undefined;
 // Static rather than on the stack: the filter runs on the faulting thread,
 // which may be a driver thread with a small stack. `writing` serializes use.
 var dump_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 var dump_path_w: [windows.PATH_MAX_WIDE:0]u16 = undefined;
 
-pub fn init(alloc: std.mem.Allocator) !void {
+pub fn init(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) !void {
     // Preserve the original exception filter across repeated crash init calls.
     if (installed) return;
 
-    const crash = try dir.defaultDir(alloc);
+    const crash = try dir.defaultDir(io, alloc, environ_map);
     defer alloc.free(crash.path);
 
-    try initIn(crash.path);
+    try initIn(io, crash.path);
 }
 
-fn initIn(path: []const u8) !void {
+fn initIn(io: std.Io, path: []const u8) !void {
     if (installed) return;
 
     if (path.len > crash_dir_buf.len) return error.NameTooLong;
     // Normalize and convert on the healthy startup stack, before the filter
     // is installed. The filter only appends its ASCII filename.
     crash_dir_w = try dumpDirectoryW(path);
-    try std.fs.cwd().makePath(path);
+    // Zig 0.17's `createDirPath` does not follow a link it finds on the way
+    // (0.15's `makePath` did), so an existing directory, a link to one
+    // included, is opened first and created only when it is missing.
+    if (std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = true })) |existing| {
+        existing.close(io);
+    } else |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createDirPath(io, path),
+        else => |e| return e,
+    }
 
     @memcpy(crash_dir_buf[0..path.len], path);
     crash_dir = crash_dir_buf[0..path.len];
@@ -95,18 +107,18 @@ test "minidump init creates missing parent directories" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fs.path.join(alloc, &.{ root, "absent", "noctty", "crash" });
     defer alloc.free(path);
 
-    try initIn(path);
+    try initIn(std.testing.io, path);
     defer deinit();
-    var created = try std.fs.openDirAbsolute(path, .{});
-    defer created.close();
+    var created = try std.Io.Dir.openDirAbsolute(std.testing.io, path, .{});
+    defer created.close(std.testing.io);
     try std.testing.expect(installed);
     try std.testing.expectEqualStrings(path, crash_dir);
-    try initIn(path);
+    try initIn(std.testing.io, path);
 }
 
 pub fn deinit() void {
@@ -139,9 +151,9 @@ fn writeMinidump(info: *windows.EXCEPTION_POINTERS) !void {
     try writeMinidumpIn(crash_dir, crash_dir_w.span(), info);
 }
 
-fn dumpDirectoryW(path: []const u8) !windows.PathSpace {
+fn dumpDirectoryW(path: []const u8) !prefixed_path.PathSpace {
     if (!std.fs.path.isAbsolute(path)) return error.InvalidDirectory;
-    var result = try windows.sliceToPrefixedFileW(null, path);
+    var result = try prefixed_path.sliceToPrefixedFileW(path);
     // Zig normalizes absolute paths to the NT namespace (\??\). Change it
     // to the equivalent Win32 extended prefix (\\?\) for CreateFileW,
     // retaining normalized separators, UNC paths and long-path support.
@@ -155,7 +167,7 @@ fn writeMinidumpIn(base_dir: []const u8, base_dir_w: [:0]const u16, info: *windo
         &dump_path_buf,
         base_dir,
         windows.GetCurrentProcessId(),
-        std.time.milliTimestamp(),
+        std.Io.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .real).toMilliseconds(),
     );
 
     const filename = std.fs.path.basename(path);
@@ -168,18 +180,18 @@ fn writeMinidumpIn(base_dir: []const u8, base_dir_w: [:0]const u16, info: *windo
     for (filename, base_dir_w.len + sep_len..) |c, i| dump_path_w[i] = c;
     dump_path_w[wide_len] = 0;
 
-    const handle = windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         &dump_path_w,
-        windows.GENERIC_WRITE,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_WRITE,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
         null,
-        windows.CREATE_ALWAYS,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.CREATE_ALWAYS,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
-    if (handle == windows.INVALID_HANDLE_VALUE) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (handle == windows.INVALID_HANDLE_VALUE) return windows.unexpectedError(std.os.windows.GetLastError());
     errdefer if (DeleteFileW(&dump_path_w) == 0) {
-        log.warn("failed to delete incomplete windows minidump path={s} err={}", .{ path, windows.kernel32.GetLastError() });
+        log.warn("failed to delete incomplete windows minidump path={s} err={}", .{ path, std.os.windows.GetLastError() });
     };
     defer windows.CloseHandle(handle);
 
@@ -198,7 +210,7 @@ fn writeMinidumpIn(base_dir: []const u8, base_dir_w: [:0]const u16, info: *windo
         null,
         null,
     ) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
 
     log.warn("windows minidump written path={s}", .{path});
@@ -249,7 +261,7 @@ test "writeMinidumpIn writes a dump that carries the exception" {
         .ExceptionRecord = null,
         .ExceptionAddress = @ptrFromInt(@returnAddress()),
         .NumberParameters = 2,
-        .ExceptionInformation = [_]usize{ 0, 0x10 } ++ [_]usize{0} ** 13,
+        .ExceptionInformation = [_]usize{ 0, 0x10 } ++ @as([13]usize, @splat(0)),
     };
     var context: windows.CONTEXT = undefined;
     windows.ntdll.RtlCaptureContext(&context);
@@ -263,41 +275,41 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     // Twelve components are 300 characters on their own, so the path passes
     // MAX_PATH however short the checkout is. The limit counts UTF-16 units.
-    const sub_path = "用户-Ü/" ++ "long-directory-component/" ** 12;
-    try tmp.dir.makePath(sub_path);
-    var dump_dir = try tmp.dir.openDir(sub_path, .{ .iterate = true });
-    defer dump_dir.close();
-    const dir_path = try dump_dir.realpath(".", &dir_buf);
+    const sub_path = "用户-Ü/" ++ comptime win32_repeat.repeat("long-directory-component/", 12);
+    try tmp.dir.createDirPath(std.testing.io, sub_path);
+    var dump_dir = try tmp.dir.openDir(std.testing.io, sub_path, .{ .iterate = true });
+    defer dump_dir.close(std.testing.io);
+    const dir_path = dir_buf[0..try dump_dir.realPathFile(std.testing.io, ".", &dir_buf)];
     try std.testing.expect(try std.unicode.calcWtf16LeLen(dir_path) > windows.MAX_PATH);
     const dir_w = try dumpDirectoryW(dir_path);
 
     try writeMinidumpIn(dir_path, dir_w.span(), &pointers);
 
     var it = dump_dir.iterate();
-    const entry = (try it.next()) orelse return error.TestExpectedDump;
+    const entry = (try it.next(std.testing.io)) orelse return error.TestExpectedDump;
     try std.testing.expect(std.mem.endsWith(u8, entry.name, ".dmp"));
-    try std.testing.expect((try it.next()) == null);
+    try std.testing.expect((try it.next(std.testing.io)) == null);
 
     // MINIDUMP_HEADER starts with "MDMP". The exception stream (type 6)
     // must carry this thread and the record above, which proves dbghelp
     // read our exception pointers rather than something else.
-    var file = try dump_dir.openFile(entry.name, .{});
-    defer file.close();
+    var file = try dump_dir.openFile(std.testing.io, entry.name, .{});
+    defer file.close(std.testing.io);
     var header: [32]u8 = undefined;
-    try std.testing.expectEqual(header.len, try file.preadAll(&header, 0));
+    try std.testing.expectEqual(header.len, try file.readPositionalAll(std.testing.io, &header, 0));
     try std.testing.expectEqualStrings("MDMP", header[0..4]);
     const stream_count = std.mem.readInt(u32, header[8..12], .little);
     const directory_rva = std.mem.readInt(u32, header[12..16], .little);
     const stream_rva = for (0..stream_count) |i| {
         var dir_entry: [12]u8 = undefined;
-        try std.testing.expectEqual(dir_entry.len, try file.preadAll(&dir_entry, directory_rva + i * dir_entry.len));
+        try std.testing.expectEqual(dir_entry.len, try file.readPositionalAll(std.testing.io, &dir_entry, directory_rva + i * dir_entry.len));
         if (std.mem.readInt(u32, dir_entry[0..4], .little) == 6) break std.mem.readInt(u32, dir_entry[8..12], .little);
     } else return error.TestExpectedExceptionStream;
 
     // MINIDUMP_EXCEPTION_STREAM: ThreadId, padding, then MINIDUMP_EXCEPTION
     // (code, flags, record, address, parameter count, padding, parameters).
     var stream: [56]u8 = undefined;
-    try std.testing.expectEqual(stream.len, try file.preadAll(&stream, stream_rva));
+    try std.testing.expectEqual(stream.len, try file.readPositionalAll(std.testing.io, &stream, stream_rva));
     try std.testing.expectEqual(windows.GetCurrentThreadId(), std.mem.readInt(u32, stream[0..4], .little));
     try std.testing.expectEqual(record.ExceptionCode, std.mem.readInt(u32, stream[8..12], .little));
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, stream[32..36], .little));

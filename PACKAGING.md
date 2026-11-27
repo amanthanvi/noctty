@@ -31,7 +31,7 @@ noctty releases use plain semver tags such as `v1.3.100`:
 
 The exact upstream base release is stored in
 `dist/windows/release-metadata.json`. For example, a release tagged
-`v1.3.105` can still declare `upstreamBaseVersion = 1.3.2`.
+`v1.4.105` can still declare `upstreamBaseVersion = 1.4.0`.
 
 The bundled ConPTY redistributable is independently pinned in
 `dist/windows/conpty-redist.json`. The current pin is
@@ -60,17 +60,21 @@ then produces:
 7. Generated package-manager metadata
 
 The symbols ZIP holds one `symbols` folder with `noctty.pdb`,
-`noctty-command.pdb` (for `noctty.com`), `ghostty-vt.pdb` (for the portable
-ZIP's `ghostty-vt.dll` placeholder, until v1.4.100; see
-[Library consumers](#library-consumers)) and
-`noctty-terminal-handoff-proxy.pdb`. Release builds therefore pass
-`-Dstrip=false` (`scripts/build-package-windows.ps1` does). Left alone,
+`noctty-command.pdb` (for `noctty.com`) and
+`noctty-terminal-handoff-proxy.pdb`. (Releases from 1.3.137 before v1.4.100
+also held `ghostty-vt.pdb`, for the portable ZIP's `ghostty-vt.dll`
+placeholder; see [Library consumers](#library-consumers).) Release builds
+therefore pass `-Dstrip=false` (`scripts/build-package-windows.ps1` does).
+Left alone,
 that would have grown `noctty.exe` by 2.1 MB and `noctty.com` by 1.4 MB, so
 three things keep the shipped binaries the size of a stripped release: frame
 pointers are still omitted and unwind tables kept (`src/build/Config.zig`);
-`build.zig` adds `-OPT:REF` to lld's `_LINK_` environment variable, because
-lld-link defaults to `/OPT:NOREF` when it writes a PDB and Zig has no COFF
-switch for it (this is the 2 MB of dead code); and release builds panic with
+`scripts/package-windows.ps1` adds `-OPT:REF` to lld's `_LINK_` environment
+variable for its build, because lld-link defaults to `/OPT:NOREF` when it
+writes a PDB and Zig has no COFF switch for it (this is the 2 MB of dead code;
+`build.zig` fails the install of a release build with `-Dstrip=false` that
+lacks it, since on Zig 0.17 a build script can no longer set its links'
+environment); and release builds panic with
 the message and a trap instead of Zig's default handler (`panic` in
 `src/process_shared.zig`), which would drag std.debug's whole symbolizer into
 any image that keeps debug info (about 114 KB). The PDBs then describe the
@@ -175,6 +179,12 @@ To refresh the pin:
    encoding.
 5. Package both architectures with `-RequireConPty`; the packager re-verifies
    the archive, each extracted file, and both PE machine types before staging.
+6. Build (it stages the new pair) and run
+   `test/windows/hidden-win11-conpty-width.ps1` and
+   `test/windows/hidden-win11-conpty-passthru.ps1` against `zig-out\bin`;
+   ship the pin only when both pass. They check that the new pair gives each
+   code point the width noctty does and still passes the prompt-time mode
+   resets on to noctty.
 
 Microsoft's MIT text is committed as `dist/windows/LICENSE-conpty.txt` and is
 staged beside noctty's `LICENSE` in every portable and installer package.
@@ -575,7 +585,7 @@ stays a co-maintainer of the id.
 
 ## Zig version
 
-This repo is pinned to Zig `0.15.2` in CI, and packaging should use the same
+This repo is pinned to Zig `0.17.1` in CI, and packaging should use the same
 Zig version unless the repo is intentionally updated to a newer one. The
 full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
@@ -599,16 +609,17 @@ Neither package carries `share/pkgconfig/libghostty-vt.pc` any more, and
 Setup deletes that file too. (The updater replaces a portable copy's `share`
 folder as a whole.)
 
-From 1.3.137, the portable ZIP's `ghostty-vt.dll` is a placeholder that
-noctty builds (`src/ghostty_vt_stub/`), not libghostty-vt, and the symbols
-ZIP's `ghostty-vt.pdb` is the placeholder's. The placeholder exports and
-imports nothing, and its `DllMain` refuses to initialise, so `LoadLibrary`
-fails with `ERROR_DLL_INIT_FAILED` instead of handing a program an old ABI.
-Its version resource describes it as "noctty placeholder for the retired
-ghostty-vt.dll; not libghostty-vt". There is one per architecture, and it is
-signed in the same packaging step as noctty's other binaries.
+From v1.4.100 the portable ZIP carries no `ghostty-vt.dll` and the symbols
+ZIP no `ghostty-vt.pdb`. From 1.3.137 until then, the portable ZIP's
+`ghostty-vt.dll` was a placeholder that noctty built, not libghostty-vt, and
+the symbols ZIP's `ghostty-vt.pdb` was the placeholder's. The placeholder
+exported and imported nothing, and its `DllMain` refused to initialise, so
+`LoadLibrary` failed with `ERROR_DLL_INIT_FAILED` instead of handing a
+program an old ABI. Its version resource described it as "noctty placeholder
+for the retired ghostty-vt.dll; not libghostty-vt". There was one per
+architecture, signed in the same packaging step as noctty's other binaries.
 
-It is there for the portable updater of noctty 1.3.125 to 1.3.136, which
+It was there for the portable updater of noctty 1.3.125 to 1.3.136, which
 refuses a portable update whose payload lacks any file it manages,
 `ghostty-vt.dll` included. It checks that in the running copy when it stages
 the update, and again in the swap, which runs from a copy of the same old
@@ -620,9 +631,9 @@ applies one, it moves the copy aside with the other files it replaces, so a
 rollback puts it back and a confirmed update deletes it (`retired_entries` in
 `src/update/portable_apply.zig`).
 
-**Manual update at v1.4.100.** v1.4.100 drops the placeholder from the
+**Manual update at v1.4.100.** v1.4.100 dropped the placeholder from the
 portable and symbols ZIPs. A portable copy on 1.3.125 to 1.3.136 that has
-not installed a release from 1.3.137 on by then cannot stage that update: its
+not installed a release from 1.3.137 on cannot stage that update: its
 update notice offers the release page, and the copy has to be updated by
 hand from there. A portable copy that has installed 1.3.137 or later keeps
 updating in-app. Releases up to 1.3.124 never updated a portable copy

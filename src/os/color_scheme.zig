@@ -9,6 +9,8 @@
 //! reads: it creates no window and starts no COM.
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 
@@ -37,14 +39,14 @@ fn readAppsUseLightTheme() ?u32 {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
     var hkey: windows.HKEY = undefined;
-    if (windows.advapi32.RegOpenKeyExW(windows.HKEY_CURRENT_USER, subkey, 0, windows.KEY_READ, &hkey) != 0) return null;
-    defer _ = windows.advapi32.RegCloseKey(hkey);
+    if (win32_sys.RegOpenKeyExW(windows.HKEY_CURRENT_USER, subkey, 0, win32_types.KEY_READ, &hkey) != 0) return null;
+    defer _ = win32_sys.RegCloseKey(hkey);
 
     var data: u32 = 0;
     var data_size: windows.DWORD = @sizeOf(u32);
     var reg_type: windows.DWORD = 0;
-    if (windows.advapi32.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != 0) return null;
-    if (reg_type != windows.REG.DWORD or data_size != @sizeOf(u32)) return null;
+    if (win32_sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != 0) return null;
+    if (reg_type != @backingInt(windows.REG.ValueType.DWORD) or data_size != @sizeOf(u32)) return null;
     return data;
 }
 

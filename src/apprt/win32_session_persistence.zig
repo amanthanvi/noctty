@@ -1,9 +1,14 @@
 //! Windows session-state file I/O and recovery policy.
 
 const std = @import("std");
+const prefixed_path = @import("win32_prefixed_path.zig");
+const win32_sys = @import("win32/sys.zig");
+const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const consts = @import("win32/consts.zig");
 const schema = @import("win32_session_state.zig");
+const global = @import("../global.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const Allocator = std.mem.Allocator;
 
 pub const max_layout_state_bytes: usize = 1024 * 1024;
@@ -86,22 +91,24 @@ pub fn quarantineFileAlloc(
     suffix: []const u8,
     when_full: WhenFull,
 ) ![]u8 {
+    const io = global.io();
     var oldest_index: usize = 0;
-    var oldest_mtime: i128 = std.math.maxInt(i128);
+    var oldest_mtime: i96 = std.math.maxInt(i96);
     for (0..max_quarantined_copies) |index| {
         const destination = try quarantineSlotPathAlloc(alloc, absolute_path, suffix, index);
         errdefer alloc.free(destination);
-        if (renameNoReplace(absolute_path, destination)) {
+        if (renameNoReplace(io, absolute_path, destination)) {
             return destination;
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         }
         if (when_full == .replace_oldest) {
-            const stat = try std.fs.cwd().statFile(destination);
-            if (stat.mtime < oldest_mtime) {
+            const stat = try std.Io.Dir.cwd().statFile(io, destination, .{});
+            const mtime = stat.mtime.toNanoseconds();
+            if (mtime < oldest_mtime) {
                 oldest_index = index;
-                oldest_mtime = stat.mtime;
+                oldest_mtime = mtime;
             }
         }
         alloc.free(destination);
@@ -109,15 +116,20 @@ pub fn quarantineFileAlloc(
     if (when_full == .keep_source) return error.QuarantineFull;
     const destination = try quarantineSlotPathAlloc(alloc, absolute_path, suffix, oldest_index);
     errdefer alloc.free(destination);
-    try std.fs.renameAbsolute(absolute_path, destination);
+    try std.Io.Dir.renameAbsolute(absolute_path, destination, io);
     return destination;
 }
 
-/// `std.fs.renameAbsolute` replaces an existing target on Windows.
-fn renameNoReplace(old_path: []const u8, new_path: []const u8) !void {
-    const old_w = try std.os.windows.sliceToPrefixedFileW(null, old_path);
-    const new_w = try std.os.windows.sliceToPrefixedFileW(null, new_path);
-    try std.posix.renameatW(std.fs.cwd().fd, old_w.span(), std.fs.cwd().fd, new_w.span(), std.os.windows.FALSE);
+/// `std.Io.Dir.renameAbsolute` replaces an existing target on Windows; this
+/// fails with `error.PathAlreadyExists` instead. `renamePreserve` is 0.15's
+/// `std.posix.renameatW(..., FALSE)` path: the same open of the source and
+/// the same `FileRenameInformationEx` without `REPLACE_IF_EXISTS`. The fork's
+/// conversion runs first so a path that is not WTF-8 still fails with
+/// `error.InvalidWtf8`, as it did.
+fn renameNoReplace(io: std.Io, old_path: []const u8, new_path: []const u8) !void {
+    _ = try prefixed_path.sliceToPrefixedFileW(old_path);
+    _ = try prefixed_path.sliceToPrefixedFileW(new_path);
+    try std.Io.Dir.cwd().renamePreserve(old_path, std.Io.Dir.cwd(), new_path, io);
 }
 
 fn quarantineSlotPathAlloc(alloc: Allocator, absolute_path: []const u8, suffix: []const u8, index: usize) ![]u8 {
@@ -128,7 +140,7 @@ fn quarantineSlotPathAlloc(alloc: Allocator, absolute_path: []const u8, suffix: 
 }
 
 pub fn deleteFileIfPresent(absolute_path: []const u8) !void {
-    std.fs.deleteFileAbsolute(absolute_path) catch |err| switch (err) {
+    std.Io.Dir.deleteFileAbsolute(global.io(), absolute_path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -139,11 +151,12 @@ pub fn writeFileAtomic(absolute_path: []const u8, temporary_path: []const u8, by
     errdefer if (temporary_created) deleteFileIfPresent(temporary_path) catch {};
 
     {
-        var file = try std.fs.createFileAbsolute(temporary_path, .{ .truncate = true });
+        const io = global.io();
+        var file = try std.Io.Dir.createFileAbsolute(io, temporary_path, .{ .truncate = true });
         temporary_created = true;
-        defer file.close();
-        try file.writeAll(bytes);
-        try file.sync();
+        defer file.close(io);
+        try file.writeStreamingAll(io, bytes);
+        try file.sync(io);
     }
 
     if (try replaceFileAtomic(absolute_path, temporary_path)) |failure| {
@@ -151,7 +164,7 @@ pub fn writeFileAtomic(absolute_path: []const u8, temporary_path: []const u8, by
             "win32 atomic replace failed replace_win32_error={d} move_win32_error={d}",
             .{ failure.replace_error, failure.move_error },
         );
-        return std.os.windows.unexpectedError(@enumFromInt(failure.move_error));
+        return std.os.windows.unexpectedError(@fromBackingInt(@intCast(failure.move_error)));
     }
     temporary_created = false;
 }
@@ -183,11 +196,12 @@ pub fn writeFileAtomicOrInPlace(
     };
 
     {
-        var file = try std.fs.createFileAbsolute(temporary_path, .{ .truncate = true });
+        const io = global.io();
+        var file = try std.Io.Dir.createFileAbsolute(io, temporary_path, .{ .truncate = true });
         temporary_created = true;
-        defer file.close();
-        try file.writeAll(bytes);
-        try file.sync();
+        defer file.close(io);
+        try file.writeStreamingAll(io, bytes);
+        try file.sync(io);
     }
 
     const failure = (try replaceFileAtomic(absolute_path, temporary_path)) orelse {
@@ -205,24 +219,32 @@ pub fn writeFileAtomicOrInPlace(
     return .{ .in_place = failure };
 }
 
+/// The startup ledger's fallback once its atomic replace failed, on the UI
+/// thread. One attempt (re-check item 34): the holder that refused the
+/// replace usually refuses this open too, and std 0.17 would wait about four
+/// seconds for it first; `FileBusy` (a holder that denies writes, or a
+/// pending delete) is retried by the ready marker on a later tick.
 pub fn writeFileInPlace(absolute_path: []const u8, bytes: []const u8) !void {
-    var file = try std.fs.createFileAbsolute(absolute_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
-    try file.sync();
+    const io = global.io();
+    var file = try sys.dirCreateFileOnce(std.Io.Dir.cwd(), absolute_path, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, bytes);
+    try file.sync(io);
 }
 
 pub fn readFileBoundedAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) ![]u8 {
-    var file = try std.fs.openFileAbsolute(absolute_path, .{});
-    defer file.close();
-    const stat = try file.stat();
+    const io = global.io();
+    // `allow_directory = false` keeps 0.15's file-only open (`error.IsDir`).
+    var file = try std.Io.Dir.openFileAbsolute(io, absolute_path, .{ .allow_directory = false });
+    defer file.close(io);
+    const stat = try file.stat(io);
     if (stat.size > max_bytes) return error.FileTooBig;
-    return try file.readToEndAlloc(alloc, max_bytes);
+    return try compat_file.readToEndAlloc(file, alloc, max_bytes);
 }
 
 fn replaceFileAtomic(absolute_path: []const u8, temporary_path: []const u8) !?AtomicReplaceFailure {
     if (@import("builtin").os.tag == .windows) return replaceFileAtomicWindows(absolute_path, temporary_path);
-    try std.fs.renameAbsolute(temporary_path, absolute_path);
+    try std.Io.Dir.renameAbsolute(temporary_path, absolute_path, global.io());
     return null;
 }
 
@@ -233,9 +255,9 @@ fn replaceFileAtomicWindows(absolute_path: []const u8, temporary_path: []const u
     defer std.heap.page_allocator.free(temporary_w);
 
     if (sys.ReplaceFileW(target_w.ptr, temporary_w.ptr, null, 0, null, null) != 0) return null;
-    const replace_error: u32 = @intFromEnum(std.os.windows.kernel32.GetLastError());
+    const replace_error: u32 = @backingInt(std.os.windows.GetLastError());
     if (sys.MoveFileExW(temporary_w.ptr, target_w.ptr, MOVEFILE_REPLACE_EXISTING) != 0) return null;
-    const move_error: u32 = @intFromEnum(std.os.windows.kernel32.GetLastError());
+    const move_error: u32 = @backingInt(std.os.windows.GetLastError());
     return .{
         .replace_error = replace_error,
         .move_error = move_error,
@@ -252,7 +274,7 @@ const MOVEFILE_REPLACE_EXISTING: u32 = consts.MOVEFILE_REPLACE_EXISTING;
 test "win32 session persistence load distinguishes missing corrupt oversized and transient reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root_path);
     const missing_path = try std.fs.path.join(std.testing.allocator, &.{ root_path, "missing.json" });
     defer std.testing.allocator.free(missing_path);
@@ -261,11 +283,11 @@ test "win32 session persistence load distinguishes missing corrupt oversized and
     try std.testing.expectEqual(std.meta.Tag(LoadResult).missing, std.meta.activeTag(missing));
 
     {
-        var file = try tmp.dir.createFile("corrupt.json", .{});
-        defer file.close();
-        try file.writeAll("{not json");
+        var file = try tmp.dir.createFile(std.testing.io, "corrupt.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "{not json");
     }
-    const corrupt_path = try tmp.dir.realpathAlloc(std.testing.allocator, "corrupt.json");
+    const corrupt_path = try tmp.dir.realPathFileAlloc(std.testing.io, "corrupt.json", std.testing.allocator);
     defer std.testing.allocator.free(corrupt_path);
     var corrupt = loadAlloc(std.testing.allocator, corrupt_path, default_max_state_bytes);
     defer corrupt.deinit();
@@ -275,17 +297,17 @@ test "win32 session persistence load distinguishes missing corrupt oversized and
     try std.testing.expect(std.mem.endsWith(u8, quarantine_path, ".corrupt"));
 
     {
-        var file = try tmp.dir.createFile("oversized.json", .{});
-        defer file.close();
-        try file.writeAll("12345");
+        var file = try tmp.dir.createFile(std.testing.io, "oversized.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "12345");
     }
-    const oversized_path = try tmp.dir.realpathAlloc(std.testing.allocator, "oversized.json");
+    const oversized_path = try tmp.dir.realPathFileAlloc(std.testing.io, "oversized.json", std.testing.allocator);
     defer std.testing.allocator.free(oversized_path);
     var oversized = loadAlloc(std.testing.allocator, oversized_path, 4);
     defer oversized.deinit();
     try std.testing.expectEqual(std.meta.Tag(LoadResult).oversized, std.meta.activeTag(oversized));
-    var still_present = try std.fs.openFileAbsolute(oversized_path, .{});
-    still_present.close();
+    var still_present = try std.Io.Dir.openFileAbsolute(std.testing.io, oversized_path, .{});
+    still_present.close(std.testing.io);
 
     var transient = loadAlloc(std.testing.allocator, root_path, default_max_state_bytes);
     defer transient.deinit();
@@ -297,11 +319,11 @@ test "win32 session persistence reads a newer schema as newer, not corrupt, and 
     defer tmp.cleanup();
     const newer_text = "{\"schema_version\":2,\"windows\":[{\"layout_v2\":true}]}";
     const extra_text = "{\"schema_version\":1,\"added_later\":1,\"windows\":[]}";
-    try tmp.dir.writeFile(.{ .sub_path = "newer.json", .data = newer_text });
-    try tmp.dir.writeFile(.{ .sub_path = "extra.json", .data = extra_text });
-    const newer_path = try tmp.dir.realpathAlloc(std.testing.allocator, "newer.json");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "newer.json", .data = newer_text });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "extra.json", .data = extra_text });
+    const newer_path = try tmp.dir.realPathFileAlloc(std.testing.io, "newer.json", std.testing.allocator);
     defer std.testing.allocator.free(newer_path);
-    const extra_path = try tmp.dir.realpathAlloc(std.testing.allocator, "extra.json");
+    const extra_path = try tmp.dir.realPathFileAlloc(std.testing.io, "extra.json", std.testing.allocator);
     defer std.testing.allocator.free(extra_path);
 
     inline for (.{ loadAlloc, loadLayoutAlloc }) |load| {
@@ -314,29 +336,29 @@ test "win32 session persistence reads a newer schema as newer, not corrupt, and 
     try std.testing.expectEqual(std.meta.Tag(LoadResult).loaded, std.meta.activeTag(extra));
 
     // Loading touches neither file.
-    const after = try tmp.dir.readFileAlloc(std.testing.allocator, "newer.json", 256);
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "newer.json", std.testing.allocator, .limited(256));
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(newer_text, after);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("newer.json.corrupt", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "newer.json.corrupt", .{}));
 }
 
 test "win32 session persistence atomic write replaces existing file and delete is idempotent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var file = try tmp.dir.createFile("session-state.json", .{});
-        defer file.close();
-        try file.writeAll("old");
+        var file = try tmp.dir.createFile(std.testing.io, "session-state.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "old");
     }
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const temporary = try std.mem.concat(std.testing.allocator, u8, &.{ path, ".tmp" });
     defer std.testing.allocator.free(temporary);
     try writeFileAtomic(path, temporary, "new");
-    const contents = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 16);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("new", contents);
-    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(temporary, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(std.testing.io, temporary, .{}));
     try deleteFileIfPresent(path);
     try deleteFileIfPresent(path);
 }
@@ -347,18 +369,18 @@ test "win32 recovery persistence falls back in place when delete sharing blocks 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var file = try tmp.dir.createFile("startup-attempts.json", .{});
-        defer file.close();
-        try file.writeAll("old");
+        var file = try tmp.dir.createFile(std.testing.io, "startup-attempts.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "old");
     }
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "startup-attempts.json");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "startup-attempts.json", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const temporary = try std.mem.concat(std.testing.allocator, u8, &.{ path, ".tmp" });
     defer std.testing.allocator.free(temporary);
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
     defer std.testing.allocator.free(path_w);
 
-    const held = std.os.windows.kernel32.CreateFileW(
+    const held = win32_sys.CreateFileW(
         path_w.ptr,
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -379,10 +401,10 @@ test "win32 recovery persistence falls back in place when delete sharing blocks 
             try std.testing.expectEqual(@as(u32, 5), failure.move_error);
         },
     }
-    const contents = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 16);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("new", contents);
-    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(temporary, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(std.testing.io, temporary, .{}));
 }
 
 test "win32 recovery persistence retains temp evidence when fallback also fails" {
@@ -390,8 +412,8 @@ test "win32 recovery persistence retains temp evidence when fallback also fails"
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("startup-attempts.json");
-    const target = try tmp.dir.realpathAlloc(std.testing.allocator, "startup-attempts.json");
+    try tmp.dir.createDir(std.testing.io, "startup-attempts.json", .default_dir);
+    const target = try tmp.dir.realPathFileAlloc(std.testing.io, "startup-attempts.json", std.testing.allocator);
     defer std.testing.allocator.free(target);
     const temporary = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".tmp" });
     defer std.testing.allocator.free(temporary);
@@ -401,7 +423,7 @@ test "win32 recovery persistence retains temp evidence when fallback also fails"
         return error.TestExpectedError;
     } else |_| {}
     try std.testing.expect(atomic_failure != null);
-    const contents = try std.fs.cwd().readFileAlloc(std.testing.allocator, temporary, 32);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, temporary, std.testing.allocator, .limited(32));
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("diagnosis", contents);
 }
@@ -410,21 +432,21 @@ test "win32 session persistence quarantine preserves existing collision" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var file = try tmp.dir.createFile("session-state.json", .{});
-        defer file.close();
-        try file.writeAll("new corrupt state");
+        var file = try tmp.dir.createFile(std.testing.io, "session-state.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "new corrupt state");
     }
     {
-        var file = try tmp.dir.createFile("session-state.json.corrupt", .{});
-        defer file.close();
-        try file.writeAll("previous corrupt state");
+        var file = try tmp.dir.createFile(std.testing.io, "session-state.json.corrupt", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "previous corrupt state");
     }
-    const source = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    const source = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(source);
     const destination = try quarantineCorruptFileAlloc(std.testing.allocator, source);
     defer std.testing.allocator.free(destination);
     try std.testing.expect(std.mem.endsWith(u8, destination, ".corrupt.1"));
-    const previous = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json.corrupt", 64);
+    const previous = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json.corrupt", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(previous);
     try std.testing.expectEqualStrings("previous corrupt state", previous);
 }
@@ -441,29 +463,30 @@ test "win32 session persistence quarantine keeps a bounded number of copies" {
     };
     const day_ns: i128 = std.time.ns_per_day;
     for (slots, 0..) |name, i| {
-        var file = try tmp.dir.createFile(name, .{});
-        defer file.close();
-        try file.writeAll(name);
+        var file = try tmp.dir.createFile(std.testing.io, name, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, name);
         // `.corrupt.2` holds the oldest copy.
         const age: i128 = if (i == 2) 30 else 10 - @as(i128, @intCast(i));
-        const when = std.time.nanoTimestamp() - age * day_ns;
-        try file.updateTimes(when, when);
+        const now = std.Io.Timestamp.now(std.testing.io, .real).toNanoseconds();
+        const when: std.Io.Timestamp = .fromNanoseconds(@intCast(now - age * day_ns));
+        try file.setTimestamps(std.testing.io, .{ .access_timestamp = .{ .new = when }, .modify_timestamp = .{ .new = when } });
     }
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = "newest corrupt state" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = "newest corrupt state" });
 
-    const source = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    const source = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(source);
     const destination = try quarantineCorruptFileAlloc(std.testing.allocator, source);
     defer std.testing.allocator.free(destination);
 
     // The oldest copy makes room; the directory does not grow.
     try std.testing.expect(std.mem.endsWith(u8, destination, ".corrupt.2"));
-    const replaced = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json.corrupt.2", 64);
+    const replaced = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json.corrupt.2", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(replaced);
     try std.testing.expectEqualStrings("newest corrupt state", replaced);
     var count: usize = 0;
     var names = tmp.dir.iterate();
-    while (try names.next()) |_| count += 1;
+    while (try names.next(std.testing.io)) |_| count += 1;
     try std.testing.expectEqual(slots.len, count);
 }
 
@@ -477,62 +500,62 @@ test "win32 session persistence quarantine that keeps its source never replaces 
         "session-state.json.kept.3",
         "session-state.json.kept.4",
     };
-    for (slots) |name| try tmp.dir.writeFile(.{ .sub_path = name, .data = name });
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = "current" });
-    const source = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    for (slots) |name| try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = name });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = "current" });
+    const source = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(source);
 
     try std.testing.expectError(
         error.QuarantineFull,
         quarantineFileAlloc(std.testing.allocator, source, ".kept", .keep_source),
     );
-    const current = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 64);
+    const current = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(current);
     try std.testing.expectEqualStrings("current", current);
     for (slots) |name| {
-        const kept = try tmp.dir.readFileAlloc(std.testing.allocator, name, 64);
+        const kept = try tmp.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(64));
         defer std.testing.allocator.free(kept);
         try std.testing.expectEqualStrings(name, kept);
     }
 
     // With a slot free again, it moves there.
-    try tmp.dir.deleteFile("session-state.json.kept.3");
+    try tmp.dir.deleteFile(std.testing.io, "session-state.json.kept.3");
     const destination = try quarantineFileAlloc(std.testing.allocator, source, ".kept", .keep_source);
     defer std.testing.allocator.free(destination);
     try std.testing.expect(std.mem.endsWith(u8, destination, ".kept.3"));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "session-state.json", .{}));
 }
 
 test "win32 session persistence atomic write removes temp after replace failure" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("target");
-    const target = try tmp.dir.realpathAlloc(std.testing.allocator, "target");
+    try tmp.dir.createDir(std.testing.io, "target", .default_dir);
+    const target = try tmp.dir.realPathFileAlloc(std.testing.io, "target", std.testing.allocator);
     defer std.testing.allocator.free(target);
     const temporary = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".tmp" });
     defer std.testing.allocator.free(temporary);
     if (writeFileAtomic(target, temporary, "state")) {
         return error.TestExpectedError;
     } else |_| {}
-    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(temporary, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(std.testing.io, temporary, .{}));
 }
 
 test "win32 session persistence OOM load is transient and leaves source present" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var file = try tmp.dir.createFile("session-state.json", .{});
-        defer file.close();
-        try file.writeAll("{\"schema_version\":1,\"windows\":[]}");
+        var file = try tmp.dir.createFile(std.testing.io, "session-state.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "{\"schema_version\":1,\"windows\":[]}");
     }
-    const source = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    const source = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(source);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var result = loadAlloc(failing.allocator(), source, default_max_state_bytes);
     defer result.deinit();
     try std.testing.expectEqual(std.meta.Tag(LoadResult).transient, std.meta.activeTag(result));
-    var file = try std.fs.openFileAbsolute(source, .{});
-    file.close();
+    var file = try std.Io.Dir.openFileAbsolute(std.testing.io, source, .{});
+    file.close(std.testing.io);
 }
 
 test "win32 session persistence schema round-trips multi-window selected indices" {
@@ -565,11 +588,11 @@ test "win32 session persistence named layout load owns pane strings after the re
         \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:/src/noctty","profile":"pwsh.exe","title_override":"Build","tab_title_override":"Project"}}]}}]}]}
     ;
     {
-        var file = try tmp.dir.createFile("layout.json", .{});
-        defer file.close();
-        try file.writeAll(raw);
+        var file = try tmp.dir.createFile(std.testing.io, "layout.json", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, raw);
     }
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.json");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "layout.json", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var result = loadAlloc(std.testing.allocator, path, default_max_state_bytes);
@@ -608,9 +631,9 @@ test "win32 session persistence load owns pane scrollback after the read buffer 
     const windows = [_]schema.Window{.{ .selected_tab = 0, .tabs = &tabs }};
     const encoded = try schema.encodeAlloc(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(encoded);
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = encoded });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = encoded });
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(path);
     var result = loadAlloc(std.testing.allocator, path, default_max_state_bytes);
     defer result.deinit();

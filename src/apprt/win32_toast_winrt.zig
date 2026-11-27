@@ -7,11 +7,13 @@
 //! S_OK or S_FALSE.
 
 const std = @import("std");
+const win32_sys = @import("win32/sys.zig");
+const win32_types = @import("win32_types.zig");
 const consts = @import("win32/consts.zig");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const GUID = windows.GUID;
 const HSTRING = *opaque {};
 
@@ -293,21 +295,21 @@ const CombaseFns = struct {
 };
 
 fn loadCombase() InitError!CombaseFns {
-    const combase = windows.kernel32.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("combase.dll")) orelse
+    const combase = win32_sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("combase.dll")) orelse
         return InitError.RuntimeMissing;
 
     return .{
-        .ro_init = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoInitialize") orelse
+        .ro_init = @ptrCast(@alignCast(win32_sys.GetProcAddress(combase, "RoInitialize") orelse
             return InitError.RuntimeMissing)),
-        .ro_uninit = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoUninitialize") orelse
+        .ro_uninit = @ptrCast(@alignCast(win32_sys.GetProcAddress(combase, "RoUninitialize") orelse
             return InitError.RuntimeMissing)),
-        .ro_get_factory = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoGetActivationFactory") orelse
+        .ro_get_factory = @ptrCast(@alignCast(win32_sys.GetProcAddress(combase, "RoGetActivationFactory") orelse
             return InitError.RuntimeMissing)),
-        .ro_activate = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoActivateInstance") orelse
+        .ro_activate = @ptrCast(@alignCast(win32_sys.GetProcAddress(combase, "RoActivateInstance") orelse
             return InitError.RuntimeMissing)),
-        .create_string = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "WindowsCreateString") orelse
+        .create_string = @ptrCast(@alignCast(win32_sys.GetProcAddress(combase, "WindowsCreateString") orelse
             return InitError.RuntimeMissing)),
-        .delete_string = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "WindowsDeleteString") orelse
+        .delete_string = @ptrCast(@alignCast(win32_sys.GetProcAddress(combase, "WindowsDeleteString") orelse
             return InitError.RuntimeMissing)),
     };
 }
@@ -439,11 +441,11 @@ fn roInitializeNeedsUninitialize(hr: HRESULT) bool {
 
 fn notificationSettingFromInt(value: i32) ?NotificationSetting {
     return switch (value) {
-        @intFromEnum(NotificationSetting.Enabled) => .Enabled,
-        @intFromEnum(NotificationSetting.DisabledForApplication) => .DisabledForApplication,
-        @intFromEnum(NotificationSetting.DisabledForUser) => .DisabledForUser,
-        @intFromEnum(NotificationSetting.DisabledByGroupPolicy) => .DisabledByGroupPolicy,
-        @intFromEnum(NotificationSetting.DisabledByManifest) => .DisabledByManifest,
+        @backingInt(NotificationSetting.Enabled) => .Enabled,
+        @backingInt(NotificationSetting.DisabledForApplication) => .DisabledForApplication,
+        @backingInt(NotificationSetting.DisabledForUser) => .DisabledForUser,
+        @backingInt(NotificationSetting.DisabledByGroupPolicy) => .DisabledByGroupPolicy,
+        @backingInt(NotificationSetting.DisabledByManifest) => .DisabledByManifest,
         else => null,
     };
 }

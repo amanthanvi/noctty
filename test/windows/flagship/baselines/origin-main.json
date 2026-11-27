@@ -12,14 +12,14 @@
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "de66d7d1c3859a56540d4dc8b67080befc1a52a46e53baafc07e7a84699fd11d",
+      "sha256": "2599d4fe5a5b7c892dc4806bfeedf406612a45a0ad78a54a452916765d17f33a",
       "scenario_id": null
     },
     {
       "id": "portable-cli-harness",
       "kind": "contract",
       "path": "test/windows/package-portable-cli.ps1",
-      "sha256": "ffcba2b3c6b617a3952e5dcccf2742ad2967f6c7346fb4843d4f03cf953de88a",
+      "sha256": "edc0919e5e2951aba80f461be21cf8ba19911810454af00e6508c6c6af0b6f2b",
       "scenario_id": "windows.portable-cli.x64"
     }
   ]

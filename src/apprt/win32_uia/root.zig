@@ -702,7 +702,7 @@ pub const CaptionButtonProvider = struct {
             _ = RootProvider.AddRef(&self.parent.base);
             return com.S_OK;
         }
-        const ordinal: i32 = @intFromEnum(self.kind);
+        const ordinal: i32 = @backingInt(self.kind);
         const sibling: i32 = switch (direction) {
             com.NavigateDirection_NextSibling => ordinal + 1,
             com.NavigateDirection_PreviousSibling => ordinal - 1,
@@ -727,7 +727,7 @@ pub const CaptionButtonProvider = struct {
         const self = fromFragment(p);
         out.* = null;
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        return object.runtimeId(&.{ com.UiaAppendRuntimeId, caption_runtime_id_tag, @intFromEnum(self.kind) }, out);
+        return object.runtimeId(&.{ com.UiaAppendRuntimeId, caption_runtime_id_tag, @backingInt(self.kind) }, out);
     }
 
     pub fn GetBoundingRectangle(
@@ -870,7 +870,7 @@ const TestCaption = struct {
     fn boundsFn(ctx: *anyopaque, kind: CaptionButtonKind) ?com.UiaRect {
         const self = fromCtx(ctx);
         if (self.offscreen) return null;
-        const ordinal: f64 = @floatFromInt(@intFromEnum(kind));
+        const ordinal: f64 = @floatFromInt(@backingInt(kind));
         return .{ .left = 100 + ordinal * 46, .top = 8, .width = 46, .height = 40 };
     }
     fn invokeFn(ctx: *anyopaque, kind: CaptionButtonKind) bool {
@@ -1232,8 +1232,8 @@ test "caption button runtime id is stable per kind" {
         com.S_OK,
         com.SafeArrayGetElement(close_id.?, &index, @ptrCast(&close_kind)),
     );
-    try std.testing.expectEqual(@intFromEnum(CaptionButtonKind.minimize), minimize_kind);
-    try std.testing.expectEqual(@intFromEnum(CaptionButtonKind.close), close_kind);
+    try std.testing.expectEqual(@backingInt(CaptionButtonKind.minimize), minimize_kind);
+    try std.testing.expectEqual(@backingInt(CaptionButtonKind.close), close_kind);
 
     // The window's own id is appended by UIA, and the root itself defers
     // to the host provider for its runtime id.

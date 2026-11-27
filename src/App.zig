@@ -15,6 +15,7 @@ const Config = configpkg.Config;
 const BlockingQueue = @import("datastruct/main.zig").BlockingQueue;
 const renderer = @import("renderer.zig");
 const font = @import("font/main.zig");
+const global = @import("global.zig");
 
 const log = std.log.scoped(.app);
 
@@ -59,10 +60,13 @@ modal_tick_active: bool = false,
 /// same font configuration.
 font_grid_set: font.SharedGridSet,
 
+/// The app-scoped render device, shared by the renderers of all surfaces.
+device: ?*renderer.Device,
+
 // Used to rate limit desktop notifications. Some platforms (notably macOS) will
 // run out of resources if desktop notifications are sent too fast and the OS
 // will kill Ghostty.
-last_notification_time: ?std.time.Instant = null,
+last_notification_time: ?std.Io.Timestamp = null,
 last_notification_digest: u64 = 0,
 
 /// The conditional state of the configuration. See the equivalent field
@@ -102,16 +106,17 @@ pub fn init(
 
     self.* = .{
         .alloc = alloc,
-        .surfaces = .{},
+        .surfaces = .empty,
         .mailbox = .{},
         .font_grid_set = font_grid_set,
+        .device = null,
         .config_conditional_state = .{},
     };
 }
 
 pub fn deinit(self: *App) void {
     self.modal_mailbox.deinit(self.alloc);
-    while (self.mailbox.pop()) |message| message.deinit(self.alloc);
+    while (self.mailbox.pop(global.io())) |message| message.deinit(self.alloc);
 
     // Clean up all our surfaces
     for (self.surfaces.items) |surface| surface.deinit();
@@ -123,6 +128,10 @@ pub fn deinit(self: *App) void {
     // should gracefully close all surfaces.
     assert(self.font_grid_set.count() == 0);
     self.font_grid_set.deinit();
+
+    // Clean up our render device. This must happen after all surfaces
+    // are gone since their renderers borrow it.
+    if (self.device) |dev| dev.deinit(self.alloc);
 }
 
 pub fn destroy(self: *App) void {
@@ -314,9 +323,10 @@ test "automation-action safety rejects end_key_sequence parsed from IPC text" {
 fn testAutomationApp() App {
     return .{
         .alloc = std.testing.allocator,
-        .surfaces = .{},
+        .surfaces = .empty,
         .mailbox = .{},
         .font_grid_set = undefined,
+        .device = null,
         .config_conditional_state = .{},
     };
 }
@@ -383,8 +393,14 @@ fn fuzzAutomationActionParser(_: void, data: []const u8) !void {
     }
 }
 
+fn fuzzAutomationActionParserSmith(_: void, smith: *std.testing.Smith) !void {
+    var buf: [4096]u8 = undefined;
+    const bounded_fuzz = @import("testing/bounded_fuzz.zig");
+    try fuzzAutomationActionParser({}, bounded_fuzz.smithBytes(smith, &buf));
+}
+
 test "fuzz automation action parser safety" {
-    try std.testing.fuzz({}, fuzzAutomationActionParser, .{ .corpus = &.{
+    try std.testing.fuzz({}, fuzzAutomationActionParserSmith, .{ .corpus = &.{
         "new_tab",
         "text:echo unsafe",
         "csi:0m",
@@ -440,12 +456,19 @@ fn drainMailbox(self: *App, rt_app: *apprt.App, mode: MailboxTickMode) !void {
         if (comptime std.log.logEnabled(.debug, .app)) {
             switch (message) {
                 // these tend to be way too verbose for normal debugging
-                .redraw_surface => {},
                 else => log.debug("mailbox message={t}", .{message}),
             }
         }
         const handled = switch (message) {
-            .open_config => self.performAction(rt_app, .open_config),
+            .open_config => |v| self.performAction(
+                rt_app,
+                .{
+                    .open_config = switch (v) {
+                        .os_open => .os_open,
+                        .new_window => .new_window,
+                    },
+                },
+            ),
             .new_window => |msg| new_window: {
                 defer msg.deinit(self.alloc);
                 break :new_window self.newWindow(rt_app, msg);
@@ -525,8 +548,8 @@ const ModalMailbox = struct {
 
     fn needsModalWake(self: *const ModalMailbox, mailbox: *Mailbox.Queue) bool {
         if (self.modal_remaining != 0) return false;
-        mailbox.mutex.lock();
-        defer mailbox.mutex.unlock();
+        mailbox.mutex.lockUncancelable(global.io());
+        defer mailbox.mutex.unlock(global.io());
         return mailbox.len != 0;
     }
 
@@ -558,7 +581,7 @@ const ModalMailbox = struct {
                     self.overflow = null;
                     return message;
                 }
-                return mailbox.pop();
+                return mailbox.pop(global.io());
             },
             .modal => {
                 if (self.overflow) |message| {
@@ -566,7 +589,7 @@ const ModalMailbox = struct {
                     self.overflow = null;
                 }
                 while (self.modal_remaining != 0) {
-                    const message = mailbox.pop() orelse return null;
+                    const message = mailbox.pop(global.io()) orelse return null;
                     self.modal_remaining -= 1;
                     if (messageSafeDuringModal(message)) return message;
                     self.deferred.append(alloc, message) catch |err| {
@@ -607,6 +630,12 @@ fn messageSafeDuringModal(message: Message) bool {
             .search_viewport_matches,
             .search_selected_match,
             .search_clear,
+            // Upstream 1.4.0's: a window resize the program asks for, and
+            // the Kitty clipboard protocol's reads and writes, as the
+            // clipboard messages above.
+            .resize_window,
+            .kitty_clipboard_read,
+            .kitty_clipboard_write,
             => false,
             .set_title,
             .set_mouse_shape,
@@ -623,6 +652,8 @@ fn messageSafeDuringModal(message: Message) bool {
             .search_total,
             .search_selected,
             .search_match_rows,
+            // Upstream 1.4.0's frame-present redraw, as `.redraw_surface`.
+            .redraw,
             => true,
         },
     };
@@ -635,20 +666,20 @@ test "modal mailbox drains past unsafe messages in a full producer queue" {
 
     for (0..63) |i| {
         const surface: *Surface = @ptrFromInt((i + 1) * @alignOf(Surface));
-        try std.testing.expect(queue.push(.{ .close = surface }, .instant) != 0);
+        try std.testing.expect(queue.push(std.testing.io, .{ .close = surface }, .instant) != 0);
     }
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
-    try std.testing.expect(queue.push(.{ .surface_message = .{
+    try std.testing.expect(queue.push(std.testing.io, .{ .surface_message = .{
         .surface = surface,
         .message = .ring_bell,
     } }, .instant) != 0);
-    try std.testing.expectEqual(@as(Mailbox.Queue.Size, 0), queue.push(.quit, .instant));
+    try std.testing.expectEqual(@as(Mailbox.Queue.Size, 0), queue.push(std.testing.io, .quit, .instant));
 
     const safe = (try pending.next(std.testing.allocator, &queue, .modal)).?;
     try std.testing.expect(safe.surface_message.message == .ring_bell);
     // Space is available before the native loop returns, even though the
     // first 63 messages all require the outer loop.
-    try std.testing.expect(queue.push(.quit, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .quit, .instant) != 0);
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
 
     for (0..63) |i| {
@@ -669,7 +700,7 @@ test "modal mailbox bounds continuously refilled safe messages and requests foll
         .surface = surface,
         .message = .ring_bell,
     } };
-    try std.testing.expect(queue.push(message, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, message, .instant) != 0);
 
     for (0..3) |_| {
         pending.beginModalBatch();
@@ -677,13 +708,13 @@ test "modal mailbox bounds continuously refilled safe messages and requests foll
             try std.testing.expect((try pending.next(std.testing.allocator, &queue, .modal)).?.surface_message.message == .ring_bell);
             // The producer replaces each consumed message before the next
             // pop. Empty-queue draining would never yield in this scenario.
-            try std.testing.expect(queue.push(message, .instant) != 0);
+            try std.testing.expect(queue.push(std.testing.io, message, .instant) != 0);
         }
         try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
         try std.testing.expect(pending.needsModalWake(&queue));
         try std.testing.expectEqual(@as(Mailbox.Queue.Size, 1), queue.len);
     }
-    _ = queue.pop();
+    _ = queue.pop(std.testing.io);
     try std.testing.expect(!pending.needsModalWake(&queue));
 }
 
@@ -692,7 +723,7 @@ test "modal mailbox budget counts deferred messages without replay wakes" {
     var pending: ModalMailbox = .{};
     defer pending.deinit(std.testing.allocator);
     for (0..ModalMailbox.modal_batch_limit) |_| {
-        try std.testing.expect(queue.push(.quit, .instant) != 0);
+        try std.testing.expect(queue.push(std.testing.io, .quit, .instant) != 0);
     }
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
     try std.testing.expectEqual(@as(usize, 0), pending.modal_remaining);
@@ -701,7 +732,7 @@ test "modal mailbox budget counts deferred messages without replay wakes" {
 
     // A newer producer message requires a follow-up, but draining it into
     // the deferred FIFO must end the wake chain until the outer loop runs.
-    try std.testing.expect(queue.push(.quit, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .quit, .instant) != 0);
     try std.testing.expect(pending.needsModalWake(&queue));
     pending.beginModalBatch();
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
@@ -720,7 +751,7 @@ test "modal mailbox retains unsafe FIFO order under an active outer handler" {
         @ptrFromInt(4 * @alignOf(Surface)),
     };
     for (surfaces[0..2]) |surface| {
-        try std.testing.expect(queue.push(.{ .close = surface }, .instant) != 0);
+        try std.testing.expect(queue.push(std.testing.io, .{ .close = surface }, .instant) != 0);
     }
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
     const active = (try pending.next(std.testing.allocator, &queue, .outer)).?;
@@ -729,12 +760,12 @@ test "modal mailbox retains unsafe FIFO order under an active outer handler" {
     // The first outer handler enters a native loop while the second
     // deferred message is still pending. Newly arriving unsafe work goes
     // after that second message, even if a safe message overtakes it.
-    try std.testing.expect(queue.push(.{ .close = surfaces[2] }, .instant) != 0);
-    try std.testing.expect(queue.push(.{ .surface_message = .{
+    try std.testing.expect(queue.push(std.testing.io, .{ .close = surfaces[2] }, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .{ .surface_message = .{
         .surface = surfaces[0],
         .message = .ring_bell,
     } }, .instant) != 0);
-    try std.testing.expect(queue.push(.{ .close = surfaces[3] }, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .{ .close = surfaces[3] }, .instant) != 0);
     pending.beginModalBatch();
     try std.testing.expect((try pending.next(std.testing.allocator, &queue, .modal)).?.surface_message.message == .ring_bell);
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
@@ -755,9 +786,9 @@ test "modal mailbox retains owned automation on allocation failure" {
     var queue: Mailbox.Queue = .{};
     var pending: ModalMailbox = .{};
     defer pending.deinit(std.testing.allocator);
-    try std.testing.expect(queue.push(.{ .automation_window_list = request }, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .{ .automation_window_list = request }, .instant) != 0);
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
-    try std.testing.expect(queue.push(.{ .surface_message = .{
+    try std.testing.expect(queue.push(std.testing.io, .{ .surface_message = .{
         .surface = surface,
         .message = .ring_bell,
     } }, .instant) != 0);
@@ -782,9 +813,9 @@ test "modal tick drains safely under an outer tick and rejects recursive modal d
     defer app.modal_mailbox.deinit(app.alloc);
     const rt_app: *apprt.App = @ptrFromInt(@alignOf(apprt.App));
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
-    try std.testing.expect(app.mailbox.push(.quit, .instant) != 0);
-    const payload = try apprt.surface.Message.WriteReq.init(app.alloc, &([_]u8{'x'} ** 300));
-    try std.testing.expect(app.mailbox.push(.{ .surface_message = .{
+    try std.testing.expect(app.mailbox.push(std.testing.io, .quit, .instant) != 0);
+    const payload = try apprt.surface.Message.WriteReq.init(app.alloc, &@as([300]u8, @splat('x')));
+    try std.testing.expect(app.mailbox.push(std.testing.io, .{ .surface_message = .{
         .surface = surface,
         .message = .{ .pwd_change = payload },
     } }, .instant) != 0);
@@ -827,20 +858,6 @@ pub fn closeSurface(self: *App, surface: *Surface) void {
 pub fn focusSurface(self: *App, surface: *Surface) void {
     if (!self.hasSurface(surface)) return;
     self.focused_surface = surface;
-}
-
-fn redrawSurface(
-    self: *App,
-    rt_app: *apprt.App,
-    surface: *apprt.Surface,
-) !void {
-    if (!self.hasRtSurface(surface)) return;
-
-    _ = try rt_app.performAction(
-        .{ .surface = surface.core() },
-        .render,
-        {},
-    );
 }
 
 /// Create a new window
@@ -1018,7 +1035,14 @@ pub fn performAction(
             null,
             profile_key,
         ),
-        .open_config => _ = try rt_app.performAction(.app, .open_config, {}),
+        .open_config => |v| _ = try rt_app.performAction(
+            .app,
+            .open_config,
+            switch (v) {
+                .os_open => .os_open,
+                .new_window => .new_window,
+            },
+        ),
         .reload_config => _ = try rt_app.performAction(.app, .reload_config, .{}),
         .close_all_windows => _ = try rt_app.performAction(.app, .close_all_windows, {}),
         .toggle_quick_terminal => _ = try rt_app.performAction(.app, .toggle_quick_terminal, {}),
@@ -1133,6 +1157,16 @@ fn receivesAppWideActions(surface: *apprt.Surface) bool {
         return surface.receivesAppWideActions();
     }
     return true;
+}
+
+test "the Win32 runtime declares every hook this file probes by name" {
+    // `@hasDecl` is false for a declaration that is not `pub`, so a hook
+    // that loses `pub`, or its name, turns its call off without a compile
+    // error (tooling.md: 2026-11-06 FACADE-S8-HASDECL, 2026-11-26
+    // HASDECL-PRIVATE-017).
+    if (comptime @import("build_config.zig").app_runtime != .win32) return error.SkipZigTest;
+    try std.testing.expect(@hasDecl(apprt.App, "holdLastWindowQuit"));
+    try std.testing.expect(@hasDecl(apprt.Surface, "receivesAppWideActions"));
 }
 
 /// Calls `visitor.visit(item)` for each item of `list` as it stood at the
@@ -1388,8 +1422,8 @@ pub fn performAllAction(
 
                 fn visit(v: @This(), surface: *apprt.Surface) void {
                     _ = surface.core().performBindingAction(v.action) catch |err| {
-                        log.warn("error performing binding action on surface ptr={X} err={}", .{
-                            @intFromPtr(surface),
+                        log.warn("error performing binding action on surface id={x} err={}", .{
+                            surface.core().id,
                             err,
                         });
                     };
@@ -1408,7 +1442,6 @@ fn performAutomationAction(
 ) !void {
     const action = input.Binding.Action.parse(action_text) catch |err| switch (err) {
         error.InvalidAction, error.InvalidFormat => return error.InvalidAutomationAction,
-        else => return err,
     };
     if (!isSafeAutomationAction(action)) return error.UnsafeAutomationAction;
     if (automationActionTargetError(target, action)) |err| return err;
@@ -1552,6 +1585,22 @@ test "named layout automation save requires the focused target" {
     );
 }
 
+/// Redraw a surface on runtimes that draw on the UI thread (the fork's
+/// handler; the 1.4 merge dropped it with upstream's GTK GL-area removal).
+fn redrawSurface(
+    self: *App,
+    rt_app: *apprt.App,
+    surface: *apprt.Surface,
+) !void {
+    if (!self.hasRtSurface(surface)) return;
+
+    _ = try rt_app.performAction(
+        .{ .surface = surface.core() },
+        .render,
+        {},
+    );
+}
+
 /// Handle a window message
 fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !void {
     // We want to ensure our window is still active. Window messages
@@ -1608,7 +1657,7 @@ fn hasRtSurface(self: *const App, surface: *apprt.Surface) bool {
 /// The message types that can be sent to the app thread.
 pub const Message = union(enum) {
     // Open the configuration file
-    open_config: void,
+    open_config: OpenConfig,
 
     /// Create a new terminal window.
     new_window: NewWindow,
@@ -1669,20 +1718,20 @@ pub const Message = union(enum) {
 
         pub fn init(deadline_ms: u64, now_ms: *const fn () u64) @This() {
             return .{
-                .state = .init(@intFromEnum(State.pending)),
+                .state = .init(@backingInt(State.pending)),
                 .deadline_ms = deadline_ms,
                 .now_ms = now_ms,
             };
         }
 
         pub fn load(self: *const @This()) State {
-            return @enumFromInt(self.state.load(.acquire));
+            return @fromBackingInt(@intCast(self.state.load(.acquire)));
         }
 
         pub fn claim(self: *@This()) bool {
             if (self.state.cmpxchgStrong(
-                @intFromEnum(State.pending),
-                @intFromEnum(State.claimed),
+                @backingInt(State.pending),
+                @backingInt(State.claimed),
                 .acq_rel,
                 .acquire,
             ) != null) return false;
@@ -1692,8 +1741,8 @@ pub const Message = union(enum) {
             // Equality is the documented zero-timeout one-attempt window.
             if (self.now_ms() <= self.deadline_ms) return true;
             const observed = self.state.cmpxchgStrong(
-                @intFromEnum(State.claimed),
-                @intFromEnum(State.cancelled),
+                @backingInt(State.claimed),
+                @backingInt(State.cancelled),
                 .acq_rel,
                 .acquire,
             );
@@ -1703,8 +1752,8 @@ pub const Message = union(enum) {
 
         pub fn cancel(self: *@This()) bool {
             return self.state.cmpxchgStrong(
-                @intFromEnum(State.pending),
-                @intFromEnum(State.cancelled),
+                @backingInt(State.pending),
+                @backingInt(State.cancelled),
                 .acq_rel,
                 .acquire,
             ) == null;
@@ -1712,7 +1761,7 @@ pub const Message = union(enum) {
 
         pub fn complete(self: *@This()) void {
             std.debug.assert(self.load() == .claimed);
-            self.state.store(@intFromEnum(State.completed), .release);
+            self.state.store(@backingInt(State.completed), .release);
         }
     };
 
@@ -1860,6 +1909,13 @@ pub const Message = union(enum) {
             }
         }
     };
+
+    pub const OpenConfig = enum {
+        /// Open the config in the OS default editor.
+        os_open,
+        /// Open the config in a new window using $EDITOR or $VISUAL
+        new_window,
+    };
 };
 
 test "queued automation messages release consumer ownership during teardown" {
@@ -1991,7 +2047,7 @@ pub const Mailbox = struct {
 
     /// Send a message to the surface.
     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
-        const result = self.mailbox.push(msg, timeout);
+        const result = self.mailbox.push(global.io(), msg, timeout);
 
         // Wake up our app loop
         self.rt_app.wakeup();

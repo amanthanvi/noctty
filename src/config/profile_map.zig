@@ -19,6 +19,7 @@
 //! checked by `Config.finalize`, since a file may set a field before the line
 //! that defines the profile, or in another file.
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 
 const RepeatableStringMap = @import("RepeatableStringMap.zig");
@@ -285,7 +286,7 @@ pub fn ProfileMap(comptime kind: Kind) type {
                     // A removal of a profile not defined yet: a later file
                     // may define it, and must not bring it back.
                     if (kind == .command) try self.entries.append(alloc, .{
-                        .id = try alloc.dupeZ(u8, id),
+                        .id = try alloc.dupeSentinel(u8, id, 0),
                         .value = "",
                         .removed = true,
                     });
@@ -301,13 +302,13 @@ pub fn ProfileMap(comptime kind: Kind) type {
 
             switch (kind) {
                 .command, .name, .text => {
-                    const copy = try alloc.dupeZ(u8, text);
+                    const copy = try alloc.dupeSentinel(u8, text, 0);
                     if (self.indexOf(id)) |index| {
                         self.entries.items[index].value = copy;
                         self.entries.items[index].removed = false;
                         return;
                     }
-                    try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = copy });
+                    try self.entries.append(alloc, .{ .id = try alloc.dupeSentinel(u8, id, 0), .value = copy });
                 },
                 .env => {
                     const eq = std.mem.indexOfScalar(u8, text, '=').?;
@@ -326,7 +327,7 @@ pub fn ProfileMap(comptime kind: Kind) type {
                     var map: RepeatableStringMap = .{};
                     try map.parseCLI(alloc, text);
                     if (map.count() == 0) return;
-                    try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = map });
+                    try self.entries.append(alloc, .{ .id = try alloc.dupeSentinel(u8, id, 0), .value = map });
                 },
             }
         }
@@ -354,13 +355,13 @@ pub fn ProfileMap(comptime kind: Kind) type {
         /// `.env`, whose values are `parseCLI`'s.
         pub fn put(self: *Self, alloc: Allocator, id: []const u8, text: []const u8) Allocator.Error!void {
             if (kind == .env) @compileError("profile-env values go through parseCLI");
-            const copy = try alloc.dupeZ(u8, text);
+            const copy = try alloc.dupeSentinel(u8, text, 0);
             if (self.indexOf(id)) |index| {
                 self.entries.items[index].value = copy;
                 self.entries.items[index].removed = false;
                 return;
             }
-            try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = copy });
+            try self.entries.append(alloc, .{ .id = try alloc.dupeSentinel(u8, id, 0), .value = copy });
         }
 
         /// Whether a line named `id`, defining or removing it.
@@ -383,9 +384,9 @@ pub fn ProfileMap(comptime kind: Kind) type {
             try out.entries.ensureTotalCapacity(alloc, self.entries.items.len);
             for (self.entries.items) |entry| {
                 out.entries.appendAssumeCapacity(.{
-                    .id = try alloc.dupeZ(u8, entry.id),
+                    .id = try alloc.dupeSentinel(u8, entry.id, 0),
                     .value = switch (kind) {
-                        .command, .name, .text => try alloc.dupeZ(u8, entry.value),
+                        .command, .name, .text => try alloc.dupeSentinel(u8, entry.value, 0),
                         .env => try entry.value.clone(alloc),
                     },
                     .removed = entry.removed,
@@ -651,7 +652,7 @@ test "profile map: lines the loader reports at once" {
         .{ .kind = .command, .value = "pwsh -File D:\\x.ps1", .err = error.InvalidProfileId },
         .{ .kind = .env, .value = "PYTHONHOME=C:\\Python312", .err = error.InvalidProfileId },
         .{ .kind = .command, .value = "caf\xc3\xa9: cmd.exe", .err = error.InvalidProfileId },
-        .{ .kind = .command, .value = ("x" ** 65) ++ ": cmd.exe", .err = error.InvalidProfileId },
+        .{ .kind = .command, .value = (comptime win32_repeat.repeat("x", 65)) ++ ": cmd.exe", .err = error.InvalidProfileId },
         .{ .kind = .command, .value = "CMD.EXE: x", .err = error.ReservedProfileId },
         .{ .kind = .command, .value = "pwsh: x", .err = error.ReservedProfileId },
         .{ .kind = .name, .value = "wsl:Ubuntu: X", .err = error.ReservedProfileId },
@@ -698,8 +699,8 @@ test "profile map: ids" {
     try testing.expect(!isValidId(""));
     try testing.expect(!isValidId("has space"));
     try testing.expect(!isValidId("a/b"));
-    try testing.expect(!isValidId("x" ** 65));
-    try testing.expect(isValidId("x" ** 64));
+    try testing.expect(!isValidId(comptime win32_repeat.repeat("x", 65)));
+    try testing.expect(isValidId(comptime win32_repeat.repeat("x", 64)));
     try testing.expect(isReservedId("CMD.EXE"));
     try testing.expect(isReservedId("wsl-default"));
     try testing.expect(isReservedId("Cmd"));
@@ -762,7 +763,7 @@ test "profile map: a line writeProfileLine writes reads back as its value" {
     try testing.expect(env.get("py") == null);
 
     // A value as long as the reader takes: the compact form.
-    const long = "x" ** (LineIterator.max_line_len - "profile-working-directory=py:".len);
+    const long = comptime win32_repeat.repeat("x", (LineIterator.max_line_len - "profile-working-directory=py:".len));
     out.clearRetainingCapacity();
     try writeProfileLine(&out.writer, .text, "profile-working-directory", "py", long);
     try testing.expectEqual(LineIterator.max_line_len + 1, out.written().len);

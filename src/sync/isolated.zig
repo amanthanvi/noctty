@@ -47,6 +47,8 @@
 //! place that names the tree's scope.
 
 const std = @import("std");
+const win32_types = @import("../apprt/win32_types.zig");
+const win32_sys = @import("../apprt/win32/sys.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const thread_role = @import("thread_role.zig");
@@ -98,16 +100,16 @@ pub fn inChild() bool {
 /// mode, symbolises and ends the process; otherwise returns at once.
 pub fn runChildIfRequested() void {
     if (comptime builtin.os.tag != .windows) return;
-    if (std.process.hasEnvVarConstant(symbolise.raw_env)) symbolise.runFromEnvironment();
+    if (std.testing.environ.containsConstant(symbolise.raw_env)) symbolise.runFromEnvironment();
     var name_buf: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&name_buf);
-    const name = std.process.getEnvVarOwned(fba.allocator(), child_env) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return,
+    // One variable from the live block, as 0.15's `getEnvVarOwned` read it
+    // (a whole-environment map would not fit the fixed buffer).
+    const name_w = std.testing.environ.getWindows(std.unicode.utf8ToUtf16LeStringLiteral(child_env)) orelse return;
+    const name = std.unicode.wtf16LeToWtf8Alloc(fba.allocator(), name_w) catch |err| {
         // A child must never fall through to the rest of the suite.
-        else => {
-            std.debug.print("isolated child: its test's name cannot be read: {s}\n", .{@errorName(err)});
-            std.process.exit(exit_no_test);
-        },
+        std.debug.print("isolated child: its test's name cannot be read: {s}\n", .{@errorName(err)});
+        std.process.exit(exit_no_test);
     };
     for (builtin.test_functions) |test_fn| {
         if (!std.mem.eql(u8, test_fn.name, name)) continue;
@@ -119,16 +121,16 @@ pub fn runChildIfRequested() void {
         // just-in-time debugger. The child exits 3 itself instead, after the
         // panic has printed, and asks Windows for no fault dialog.
         _ = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-        _ = windows.kernel32.AddVectoredExceptionHandler(1, exitOnBreakpoint);
+        _ = win32_sys.AddVectoredExceptionHandler(1, exitOnBreakpoint);
         // Before the first pair, so the dump's header says what it is.
         recorder.setProcessKind(.child) catch std.process.exit(exit_kind_decided);
         running_child = true;
         test_fn.func() catch |err| {
             std.debug.print("isolated child: the test failed: error.{s}\n", .{@errorName(err)});
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             std.process.exit(exit_failed);
         };
-        if (std.testing.allocator_instance.deinit() == .leak) std.process.exit(exit_leaked);
+        if (std.testing.allocator_instance.deinit() != 0) std.process.exit(exit_leaked);
         std.debug.print("isolated child: the test returned\n", .{});
         std.process.exit(exit_passed);
     }
@@ -147,7 +149,7 @@ extern "kernel32" fn SetErrorMode(mode: u32) callconv(.winapi) u32;
 /// next handler.
 fn exitOnBreakpoint(info: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     if (info.ExceptionRecord.ExceptionCode != STATUS_BREAKPOINT) return windows.EXCEPTION_CONTINUE_SEARCH;
-    _ = windows.kernel32.TerminateProcess(windows.GetCurrentProcess(), exit_panicked);
+    _ = win32_sys.TerminateProcess(windows.GetCurrentProcess(), exit_panicked);
     return windows.EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -200,12 +202,12 @@ pub const Child = struct {
 /// The child's environment: this process's, without the build runner's
 /// progress pipe, the symbolise mode or the run's dump directory, with the
 /// test's name, and with `dump_dir` as its dump directory if one is given.
-pub fn childEnvironment(a: Allocator, qualified: []const u8, dump_dir: ?[]const u8) !std.process.EnvMap {
-    var env = try std.process.getEnvMap(a);
+pub fn childEnvironment(a: Allocator, qualified: []const u8, dump_dir: ?[]const u8) !std.process.Environ.Map {
+    var env = try std.testing.environ.createMap(a);
     errdefer env.deinit();
-    env.remove("ZIG_PROGRESS");
-    env.remove(symbolise.raw_env);
-    env.remove(dump.env_var);
+    _ = env.orderedRemove("ZIG_PROGRESS");
+    _ = env.orderedRemove(symbolise.raw_env);
+    _ = env.orderedRemove(dump.env_var);
     try env.put(child_env, qualified);
     if (dump_dir) |dir| try env.put(dump.env_var, dir);
     return env;
@@ -220,9 +222,9 @@ const Deadline = struct {
     fn run(self: *Deadline) void {
         const role_scope = thread_role.enter(.test_support);
         defer role_scope.exit();
-        windows.WaitForSingleObject(self.handle, child_deadline_ms) catch {
+        win32_sys.waitForSingleObject(self.handle, child_deadline_ms) catch {
             self.timed_out = true;
-            windows.TerminateProcess(self.handle, 124) catch {};
+            win32_sys.terminateProcess(self.handle, 124) catch {};
         };
     }
 };
@@ -231,7 +233,7 @@ const Deadline = struct {
 /// it. `src` is the test block's `@src()`.
 pub fn run(src: std.builtin.SourceLocation, dumps: Dumps) !Child {
     const a = std.testing.allocator;
-    if (running_child or std.process.hasEnvVarConstant(child_env)) return error.IsolatedChildStartsNoChild;
+    if (running_child or std.testing.environ.containsConstant(child_env)) return error.IsolatedChildStartsNoChild;
     var name_buf: [1024]u8 = undefined;
     const qualified = try qualifiedName(&name_buf, src);
 
@@ -242,41 +244,59 @@ pub fn run(src: std.builtin.SourceLocation, dumps: Dumps) !Child {
 
     var env = try childEnvironment(a, qualified, dir_utf8);
     defer env.deinit();
-    const exe = try std.fs.selfExePathAlloc(a);
+    const io = std.testing.io;
+    const exe = try std.process.executablePathAlloc(io, a);
     defer a.free(exe);
 
-    var child = std.process.Child.init(&.{exe}, a);
-    child.env_map = &env;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.create_no_window = true;
-    try child.spawn();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{exe},
+        .environ_map = &env,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .create_no_window = true,
+    });
     var waited = false;
-    errdefer if (!waited) {
-        _ = child.kill() catch {};
-    };
-    var deadline: Deadline = .{ .handle = child.id };
+    errdefer if (!waited) child.kill(io);
+    var deadline: Deadline = .{ .handle = child.id.? };
     const watcher = try std.Thread.spawn(.{}, Deadline.run, .{&deadline});
-    var stdout: std.ArrayList(u8) = .empty;
-    defer stdout.deinit(a);
-    var stderr: std.ArrayList(u8) = .empty;
-    defer stderr.deinit(a);
-    const collected = child.collectOutput(a, &stdout, &stderr, 4 << 20);
+    // Both pipes until they end, as 0.15's `collectOutput` with a 4 MiB
+    // limit on each.
+    const collected = collectOutput(io, a, &child, 4 << 20);
+    errdefer if (collected) |s| a.free(s) else |_| {};
     watcher.join();
     // Read before `wait`, which keeps only the low byte and closes the handle.
     var exit_code: windows.DWORD = 0;
-    if (windows.kernel32.GetExitCodeProcess(child.id, &exit_code) == 0) exit_code = 0xffff_ffff;
-    const term = try child.wait();
+    if (win32_sys.GetExitCodeProcess(child.id.?, &exit_code) == 0) exit_code = 0xffff_ffff;
+    const term = try child.wait(io);
     waited = true;
-    try collected;
+    const stderr = try collected;
     return .{
         .term = term,
         .exit_code = exit_code,
-        .stderr = try stderr.toOwnedSlice(a),
+        .stderr = stderr,
         .timed_out = deadline.timed_out,
         .dir = dir,
     };
+}
+
+/// Reads the child's stdout and stderr pipes to their ends and returns its
+/// stderr (stdout is read and dropped), failing as 0.15's
+/// `std.process.Child.collectOutput` did when either passes `max_bytes`.
+fn collectOutput(io: std.Io, a: Allocator, child: *std.process.Child, max_bytes: usize) ![]u8 {
+    var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(a, io, buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+    while (multi_reader.fill(64, .none)) |_| {
+        if (multi_reader.reader(0).buffered().len > max_bytes) return error.StdoutStreamTooLong;
+        if (multi_reader.reader(1).buffered().len > max_bytes) return error.StderrStreamTooLong;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try multi_reader.checkAnyError();
+    return multi_reader.toOwnedSlice(1);
 }
 
 /// Whether the dispatch ran the child's test as its first: the runner's
@@ -510,7 +530,7 @@ pub fn compareChild(child: *Child) !Compared {
         defer session.close();
         const root = try session.sourceRoot(aa);
         const path = try tablePathAlloc(aa, &session);
-        const table = std.fs.cwd().readFileAlloc(aa, path, 16 << 20) catch |err| {
+        const table = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, aa, .limited(16 << 20)) catch |err| {
             std.debug.print("isolated parent: the reviewed table cannot be read ({s}); set " ++ table_env ++
                 " or run from a build whose checkout holds " ++ table_path ++ "\n", .{@errorName(err)});
             return err;
@@ -521,9 +541,9 @@ pub fn compareChild(child: *Child) !Compared {
     var dumps: std.ArrayListUnmanaged(compare.Dump) = .empty;
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     var it = dir.tmp.dir.iterate();
-    while (try it.next()) |entry| try names.append(aa, try aa.dupe(u8, entry.name));
+    while (try it.next(std.testing.io)) |entry| try names.append(aa, try aa.dupe(u8, entry.name));
     for (names.items) |name| {
-        const raw = try dir.tmp.dir.readFileAlloc(aa, name, 16 << 20);
+        const raw = try dir.tmp.dir.readFileAlloc(std.testing.io, name, aa, .limited(16 << 20));
         if (!std.mem.endsWith(u8, name, dump.extension)) continue;
         var s = try symbolise.Session.openSelf(aa);
         defer s.close();
@@ -549,6 +569,7 @@ const StateMutex = state_mutex.StateMutex;
 test {
     _ = compare;
     _ = symbolise;
+    _ = @import("io_tasks.zig");
 }
 
 test "a test's qualified name comes from its block's @src()" {
@@ -609,7 +630,7 @@ test "the table variable must name a drive-absolute path" {
 }
 
 extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buffer: [*]u16, size: u32) callconv(.winapi) u32;
-extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) win32_types.BOOL;
 
 test "the dispatch check reads the runner's header for test 0 and then the marker" {
     try testing.expect(dispatchedFirst("1/6800 main.test_0..." ++ dispatch_marker ++ "a.test.b\nthread 1 panic: x", "a.test.b"));
@@ -823,8 +844,8 @@ test "isolated: a blocking re-entry by lock panics with PN1 (acceptance test 6)"
         m.unlock();
         return;
     }
-    // PN1 is checked before the inner lock, so its text wins over Zig's own
-    // "Deadlock detected".
+    // PN1 is checked before the inner lock, which would wait for itself:
+    // 0.17.1's std.Io.Mutex has no re-entry check.
     try expectPanic(@src(), "thread-role layer: PN1 a blocking re-entry: lock of the renderer-state mutex by " ++
         "the thread that holds it (role ui)");
 }
@@ -982,7 +1003,7 @@ test "isolated: the compare names the acquiring function of every site shape (ac
         }
 
         fn shapeAutoCaller(m: *StateMutex) void {
-            @call(if (builtin.mode == .Debug) .auto else .always_inline, shapeAutoTarget, .{m});
+            @call(if (builtin.mode == .debug) .auto else .always_inline, shapeAutoTarget, .{m});
         }
 
         /// The caller holds the mutex, and the relock is this function's

@@ -1,5 +1,5 @@
 //! The "os" package contains utilities for interfacing with the operating
-//! system. These aren't restricted to syscalls or low-level operations, but
+//! system. These aren't restricted to syscalls or low-level operations, butos/main.zig
 //! also OS-specific features and conventions.
 
 const std = @import("std");
@@ -55,8 +55,8 @@ const kernel_info = if (builtin.os.tag == .linux) @import("kernel_info.zig") els
 };
 
 // Namespaces
-pub const args = @import("args.zig");
 pub const cgroup = @import("cgroup.zig");
+pub const edit = @import("edit.zig");
 pub const hostname = @import("hostname.zig");
 pub const i18n = @import("i18n.zig");
 pub const mach = if (builtin.os.tag.isDarwin()) @import("mach.zig") else struct {};
@@ -67,10 +67,13 @@ pub const passwd = @import("passwd.zig");
 pub const redact = @import("redact.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
+/// The fork's Win32 declarations that upstream's `windows.zig` lacks.
+pub const windows_ext = @import("windows_ext.zig");
 pub const macos = if (builtin.os.tag.isDarwin()) @import("macos.zig") else struct {};
 pub const monotonic = @import("monotonic.zig");
 pub const gui_probe_trace = @import("gui_probe_trace.zig");
 pub const shell = @import("shell.zig");
+pub const stderr = @import("stderr.zig");
 pub const uri = @import("uri.zig");
 
 // Functions and types
@@ -82,6 +85,8 @@ pub const appendEnv = env.appendEnv;
 pub const appendEnvAlways = env.appendEnvAlways;
 pub const prependEnv = env.prependEnv;
 pub const getenv = env.getenv;
+pub const getEnvVarOwned = env.getEnvVarOwned;
+pub const hasEnvVarConstant = env.hasEnvVarConstant;
 pub const getEnvVarOwnedTrimmedNotEmpty = env.getEnvVarOwnedTrimmedNotEmpty;
 pub const setenv = env.setenv;
 pub const unsetenv = env.unsetenv;
@@ -92,8 +97,6 @@ pub const desktopEnvironment = desktop.desktopEnvironment;
 pub const rlimit = file.rlimit;
 pub const fixMaxFiles = file.fixMaxFiles;
 pub const restoreMaxFiles = file.restoreMaxFiles;
-pub const allocTmpDir = file.allocTmpDir;
-pub const freeTmpDir = file.freeTmpDir;
 pub const randomTmpPath = file.randomTmpPath;
 pub const isFlatpak = flatpak.isFlatpak;
 pub const FlatpakHostCommand = flatpak.FlatpakHostCommand;
@@ -108,6 +111,7 @@ pub const resourcesDir = resourcesdir.resourcesDir;
 pub const ResourcesDir = resourcesdir.ResourcesDir;
 pub const ShellEscapeWriter = shell.ShellEscapeWriter;
 pub const getKernelInfo = kernel_info.getKernelInfo;
+pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 /// Per-surface terminal threads are numerous on Windows, where Zig's default
 /// 16 MiB stack is committed by CreateThread. Keep process-global and
@@ -218,9 +222,9 @@ test "Windows surface thread stack carries local_path.open through a junction cy
     // build tree's cache a 31-link chain would run out of names first.
     var tmp = try TempDir.init();
     defer tmp.deinit();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\image.data", .data = "image" });
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(std.testing.io, "real", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real\\image.data", .data = "image" });
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(base);
     var components = std.mem.tokenizeScalar(u8, base[3..], '\\');
     var depth: usize = 0;
@@ -234,13 +238,13 @@ test "Windows surface thread stack carries local_path.open through a junction cy
     var made: usize = 0;
     defer {
         // Links go first, removed as links (never followed).
-        tmp.dir.deleteDir("loop") catch {};
+        tmp.dir.deleteDir(std.testing.io, "loop") catch {};
         for (0..made) |i| {
             var name_buf: [16]u8 = undefined;
-            tmp.dir.deleteDir(std.fmt.bufPrint(&name_buf, "link-{d}", .{i}) catch unreachable) catch {};
+            tmp.dir.deleteDir(std.testing.io, std.fmt.bufPrint(&name_buf, "link-{d}", .{i}) catch unreachable) catch {};
         }
     }
-    try tmp.dir.makeDir("loop");
+    try tmp.dir.createDir(std.testing.io, "loop", .default_dir);
     {
         const loop = try std.fs.path.join(alloc, &.{ base, "loop" });
         defer alloc.free(loop);
@@ -251,7 +255,7 @@ test "Windows surface thread stack carries local_path.open through a junction cy
     while (made < chain_len) : (made += 1) {
         var name_buf: [16]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "link-{d}", .{made});
-        try tmp.dir.makeDir(name);
+        try tmp.dir.createDir(std.testing.io, name, .default_dir);
         const link = try std.fs.path.join(alloc, &.{ base, name });
         defer alloc.free(link);
         const target = if (made + 1 == chain_len)
@@ -289,6 +293,8 @@ test "Windows surface thread stack carries local_path.open through a junction cy
 
 test {
     _ = file;
+    _ = stderr;
+    _ = edit;
     _ = i18n;
     _ = monotonic;
     _ = gui_probe_trace;
@@ -296,9 +302,9 @@ test {
     _ = uri;
     _ = shell;
 
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         _ = kernel_info;
-    } else if (comptime builtin.os.tag.isDarwin()) {
+    } else if (comptime builtin.target.os.tag.isDarwin()) {
         _ = mach;
         _ = macos;
     } else if (comptime builtin.os.tag == .windows) {

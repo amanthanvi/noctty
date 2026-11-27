@@ -2,7 +2,7 @@
     .name = .c_vt_render,
     .version = "0.0.0",
     .fingerprint = 0xb10e18b2fab773c9,
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         // noctty dependency, keyed as `.ghostty` for compatibility. In
         // reality, you'd probably use a URL-based

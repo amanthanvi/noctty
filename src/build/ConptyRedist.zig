@@ -17,11 +17,11 @@
 //! `zig build --system`, no PowerShell) is tolerated: the step warns, removes
 //! any installed pair the pin does not vouch for, and the build continues on
 //! the in-box conhost. `-Dbundled-conpty=false` skips this step.
-const ConptyRedist = @This();
-
+//!
+//! Zig 0.17's build graph has no custom steps, so the check is this file's
+//! `main`, built for the host and run by the install step.
 const std = @import("std");
 const builtin = @import("builtin");
-const Step = std.Build.Step;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Shared with scripts/conpty-redist.ps1 and src/update/conpty_redist.zig.
@@ -36,9 +36,6 @@ const opt_out = "pass -Dbundled-conpty=false to build without the bundled ConPTY
 
 /// Both files are about 1 MB; anything far larger is not the pinned payload.
 const max_file_bytes = 16 * 1024 * 1024;
-
-step: Step,
-arch: Arch,
 
 const Arch = enum { x64, arm64 };
 
@@ -60,31 +57,55 @@ pub fn install(b: *std.Build, target: std.Build.ResolvedTarget) void {
         .aarch64 => .arm64,
         else => return,
     };
-    const self = b.allocator.create(ConptyRedist) catch @panic("OOM");
-    self.* = .{
-        .step = .init(.{
-            .id = .custom,
-            .name = "stage bundled ConPTY",
-            .owner = b,
-            .makeFn = make,
+    const tool = b.addExecutable(.{
+        .name = "stage-bundled-conpty",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/build/ConptyRedist.zig"),
+            .target = b.graph.host,
         }),
-        .arch = arch,
-    };
-    b.getInstallStep().dependOn(&self.step);
+    });
+    const run = b.addRunArtifact(tool);
+    run.setName("stage bundled ConPTY");
+    // It reads and writes the install directory, so it runs every build.
+    run.has_side_effects = true;
+    run.stdio = .inherit;
+    run.addFileArg(b.path(pin_path));
+    run.addFileArg(b.path(stage_script));
+    run.addArg(@tagName(arch));
+    run.addDirectoryArg(b.graph.path(.install_bin, ""));
+    run.addDirectoryArg(b.graph.path(.global_cache, ""));
+    run.addArg(if (b.graph.system_package_mode) "system" else "fetch");
+    b.getInstallStep().dependOn(&run.step);
 }
 
-fn make(step: *Step, options: Step.MakeOptions) !void {
-    _ = options;
-    const b = step.owner;
-    const self: *ConptyRedist = @fieldParentPtr("step", step);
-    const arena = b.allocator;
+/// The host tool: `stage-bundled-conpty <pin> <stage script> <x64|arm64>
+/// <bin dir> <global cache> <system|fetch>`. Exits 0 when the pinned pair is
+/// installed, or when it could not be fetched (after a warning, and after
+/// removing any pair the pin does not vouch for), and 1 on a mismatch or a
+/// helper failure.
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+    if (args.len != 7) fail(
+        "usage: stage-bundled-conpty <pin> <stage script> <x64|arm64> <bin dir> <global cache> <system|fetch>",
+        .{},
+    );
+    const pin_file = args[1];
+    const script = args[2];
+    const arch = std.meta.stringToEnum(Arch, args[3]) orelse
+        fail("unknown architecture '{s}'", .{args[3]});
+    const bin_path = args[4];
+    const cache_root = try std.Io.Dir.path.join(arena, &.{ args[5], "noctty-conpty" });
+    const system_package_mode = std.mem.eql(u8, args[6], "system");
 
-    const pin_text = b.build_root.handle.readFileAlloc(arena, pin_path, 64 * 1024) catch |err|
-        return step.fail("unable to read {s}: {s}", .{ pin_path, @errorName(err) });
+    // readFileAlloc refuses a file that reaches its limit; + 1 accepts exactly 64 KiB, as 0.15 did.
+    const pin_text = std.Io.Dir.cwd().readFileAlloc(io, pin_file, arena, .limited(64 * 1024 + 1)) catch |err|
+        fail("unable to read {s}: {t}", .{ pin_path, err });
     const pin = std.json.parseFromSliceLeaky(Pin, arena, pin_text, .{
         .ignore_unknown_fields = true,
-    }) catch |err| return step.fail("unable to parse {s}: {s}", .{ pin_path, @errorName(err) });
-    const pair = switch (self.arch) {
+    }) catch |err| fail("unable to parse {s}: {t}", .{ pin_path, err });
+    const pair = switch (arch) {
         .x64 => pin.architectures.x64,
         .arm64 => pin.architectures.arm64,
     };
@@ -93,34 +114,30 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
         .{ .name = "OpenConsole.exe", .sha256 = pair.openConsoleExe.sha256 },
     };
 
-    const bin_path = b.getInstallPath(.bin, "");
-    var bin = std.fs.cwd().makeOpenPath(bin_path, .{}) catch |err|
-        return step.fail("unable to open '{s}': {s}", .{ bin_path, @errorName(err) });
-    defer bin.close();
+    var bin = std.Io.Dir.cwd().createDirPathOpen(io, bin_path, .{}) catch |err|
+        fail("unable to open '{s}': {t}", .{ bin_path, err });
+    defer bin.close(io);
 
-    if (installedMatches(arena, bin, &staged)) return;
+    if (installedMatches(io, arena, bin, &staged)) return;
 
     // The helper's own account of a failed download, shown after the warning.
     var detail: []const u8 = "";
     const reason: []const u8 = reason: {
-        if (b.graph.system_package_mode) break :reason "downloads are disabled by --system";
+        if (system_package_mode) break :reason "downloads are disabled by --system";
 
         // A PowerShell 7 parent puts its own modules first in PSModulePath,
         // and Windows PowerShell then loads them instead of its own, losing
         // Get-FileHash. Each PowerShell rebuilds the variable when unset.
-        var env = std.process.getEnvMap(arena) catch |err|
-            return step.fail("unable to read the environment: {s}", .{@errorName(err)});
-        env.remove("PSModulePath");
+        var env = try init.environ_map.clone(arena);
+        _ = env.swapRemove("PSModulePath");
         const powershell = if (builtin.os.tag == .windows)
-            b.fmt("{s}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", .{
+            try std.fmt.allocPrint(arena, "{s}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", .{
                 env.get("SystemRoot") orelse "C:\\Windows",
             })
         else
             "pwsh";
-        const cache_root = b.graph.global_cache_root.join(arena, &.{"noctty-conpty"}) catch @panic("OOM");
-        const result = std.process.Child.run(.{
-            .allocator = arena,
-            .env_map = &env,
+        const result = std.process.run(arena, io, .{
+            .environ_map = &env,
             .argv = &.{
                 powershell,
                 "-NoLogo",
@@ -129,35 +146,35 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                b.pathFromRoot(stage_script),
+                script,
                 "-Architecture",
-                @tagName(self.arch),
+                @tagName(arch),
                 "-Destination",
                 bin_path,
                 "-CacheRoot",
                 cache_root,
             },
         }) catch |err| switch (err) {
-            error.FileNotFound => break :reason b.fmt("{s} is not installed", .{powershell}),
-            else => return step.fail("unable to run {s}: {s}; " ++ opt_out, .{ stage_script, @errorName(err) }),
+            error.FileNotFound => break :reason try std.fmt.allocPrint(arena, "{s} is not installed", .{powershell}),
+            else => fail("unable to run {s}: {t}; " ++ opt_out, .{ stage_script, err }),
         };
         switch (result.term) {
-            .Exited => |code| switch (code) {
+            .exited => |code| switch (code) {
                 0 => {
-                    if (installedMatches(arena, bin, &staged)) return;
-                    return step.fail("{s} reported success, but the pair in '{s}' does not match {s}", .{
+                    if (installedMatches(io, arena, bin, &staged)) return;
+                    fail("{s} reported success, but the pair in '{s}' does not match {s}", .{
                         stage_script, bin_path, pin_path,
                     });
                 },
                 exit_not_downloaded => {
-                    detail = b.fmt("{s}{s}", .{ result.stdout, result.stderr });
+                    detail = try std.fmt.allocPrint(arena, "{s}{s}", .{ result.stdout, result.stderr });
                     break :reason "the package could not be fetched";
                 },
                 else => {},
             },
             else => {},
         }
-        return step.fail("{s} failed ({any}); " ++ opt_out ++ ":\n{s}{s}", .{
+        fail("{s} failed ({any}); " ++ opt_out ++ ":\n{s}{s}", .{
             stage_script, result.term, result.stdout, result.stderr,
         });
     };
@@ -165,21 +182,27 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
     // Leave nothing installed that the pin does not vouch for, so the
     // runtime's fallback matches this warning.
     for (staged) |file| {
-        bin.deleteFile(file.name) catch |err| switch (err) {
+        bin.deleteFile(io, file.name) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => return step.fail("unable to remove '{s}' from '{s}', which does not match {s}: {s}", .{
-                file.name, bin_path, pin_path, @errorName(err),
+            else => fail("unable to remove '{s}' from '{s}', which does not match {s}: {t}", .{
+                file.name, bin_path, pin_path, err,
             }),
         };
     }
-    step.result_stderr = b.fmt(
+    std.debug.print(
         \\warning: the bundled ConPTY was not staged because {s}.
         \\noctty in '{s}' will fall back to Windows' in-box conhost, which re-renders
         \\output, drops OSC 4/10/11/12 and XTGETTCAP replies, and may strip Kitty
         \\graphics and Sixel. Once that is fixed, build again to stage conpty.dll and
         \\OpenConsole.exe from {s}, or pass -Dbundled-conpty=false to stop trying.
         \\{s}
+        \\
     , .{ reason, bin_path, pin.nupkg.url, detail });
+}
+
+fn fail(comptime format: []const u8, args: anytype) noreturn {
+    std.debug.print("error: " ++ format ++ "\n", args);
+    std.process.exit(1);
 }
 
 const Staged = struct {
@@ -190,9 +213,10 @@ const Staged = struct {
 /// Whether every staged file is installed with its pinned SHA-256. The pins
 /// are per architecture, so a match also fixes the PE machine, which
 /// Install-ConPtyRedist checked when it staged the file.
-fn installedMatches(arena: std.mem.Allocator, bin: std.fs.Dir, staged: []const Staged) bool {
+fn installedMatches(io: std.Io, arena: std.mem.Allocator, bin: std.Io.Dir, staged: []const Staged) bool {
     for (staged) |file| {
-        const bytes = bin.readFileAlloc(arena, file.name, max_file_bytes) catch return false;
+        // + 1: a file of exactly max_file_bytes is read, as 0.15 did.
+        const bytes = bin.readFileAlloc(io, file.name, arena, .limited(max_file_bytes + 1)) catch return false;
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(bytes, &digest, .{});
         if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), file.sha256)) return false;

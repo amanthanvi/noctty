@@ -32,7 +32,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !HelpStrings {
 
     const run = b.addRunArtifact(result);
     const wf = b.addWriteFiles();
-    const output = wf.addCopyFile(run.captureStdOut(), "help_strings.zig");
+    const output = wf.addCopyFile(run.captureStdOut(.{}), "help_strings.zig");
 
     return .{
         .exe = if (cfg.emit_helpgen) result else null,

@@ -11,6 +11,13 @@ The two rows marked "current tree" (live OSC 7 pwd, OSC 8 / regex link open) wer
 
 `src/apprt/win32.zig` has since been split (#580-#590) and is now a facade. App, Host and Surface live in `src/apprt/win32/app.zig`, `host.zig` and `terminal_window.zig`, session code in `session.zig`, and the named-pipe server (an earlier extraction) in `ipc_server.zig`. A `src/apprt/win32.zig:<line>` reference before the Findings is a line of that file at the revision its row names (`git show d031dc474:src/apprt/win32.zig`, or `e6dae0919` for the two "current tree" rows), not a line of today's file. The Findings name the file and function where the code lives now.
 
+Toolchain note (added at the Zig 0.17.1 cutover): where this audit names a
+Zig release, it is the one the fork pinned at the revisions above, and the
+statement holds for that release. The cutover did not re-run the audit; a
+fix that does not depend on the release (an explicit `.allocate` option, say)
+still stands, while a statement about the standard library's or the fuzzer's
+behaviour has not been checked on 0.17.1.
+
 ## Result
 
 Both Win32 drag-and-drop paths now use the same core paste encoder and unsafe-paste confirmation route as ordinary clipboard paste. For non-bracketed paste, or when `clipboard-paste-bracketed-safe=false`, the shared paste gate classifies both carriage return and line feed as unsafe. Trusted bracketed paste intentionally preserves CR and LF inside the fenceposts without confirmation because the framing prevents them from submitting input; a pasted closing fence remains unsafe. Live OSC 7 working directories reject all C0 and DEL bytes before reaching terminal pwd/title state and again before `PWD` or `CreateProcessW`. Win32 link opening permits the repository's built-in URL schemes and safe local files while rejecting arbitrary protocol handlers, UNC files, and executable/script files. Session JSON owns decoded strings and rejects control- or newline-bearing pane metadata on load; session snapshots drop only an offending live field so one hostile title cannot deny persistence for every window. The named-pipe server rejects remote clients, installs a protected current-user-only DACL with an explicit mandatory-integrity label, claims the pipe name with `FILE_FLAG_FIRST_PIPE_INSTANCE`, and never releases that name while it runs; clients refuse any server whose owner SID differs or whose integrity level is below their own. Forwarded new-window arguments are constrained by a deny-by-default key allowlist, so `--command`, `-e`, and `--input` no longer forward at all.
@@ -133,7 +140,7 @@ The Win32 OLE classifier is an additional defense, not a replacement for the cor
 
 ### Medium: session parser returns dangling string slices
 
-**Status: fixed in this change.** The full `SessionState` parse uses `.allocate = .alloc_always`; a regression test frees and overwrites the source allocation before reading restored strings.
+**Status: fixed in this change.** The full `SessionState` parse uses `.allocate = .alloc_always`; a regression test frees and overwrites the source allocation before reading restored strings. Re-checked on Zig 0.17.1 (1B.6): `std.json` still parses a slice with `.alloc_if_needed` unless told otherwise (`lib/std/json/static.zig:142-147`), so the option stays load-bearing. Both document parses pass `.alloc_always` (`src/apprt/win32_session_state.zig`, the layout and the full state), the two custom `jsonParse` hooks read only a key or an enum name through `.alloc_if_needed` and keep neither, and the regression test ("security regression win32 session state parse owns restored pane strings") passes on 0.17.1 with the file's other 32 tests.
 
 - **Attacker control:** the on-disk session JSON controls unescaped cwd, profile, and title strings.
 - **Concrete failure:** Zig 0.15.2 `parseFromSlice` defaults to `alloc_if_needed`, so an unescaped JSON string may remain a slice into the raw input. `loadAlloc` defers freeing that input before returning the parsed state (`src/apprt/win32_session_persistence.zig:24-36`), and restore later dereferences the fields (`src/apprt/win32/session.zig`, `restoreSessionPane`). This establishes a use-after-free and possible crash/corrupted restore; reliable code execution was not established.
@@ -199,9 +206,11 @@ Six in-process `std.testing.fuzz` targets run their inline seed corpora during o
 
 Zig 0.15.2 cannot safely register zero-length corpus seeds, and an input shrunk to zero during a long `--fuzz` run can still trigger the same upstream mutator assertion even though ordinary unit-test mode exercises the empty input separately. The bounded campaigns therefore never submit zero-length inputs, use fixed seeds and iteration counts, alternate structured-corpus mutation with random bytes, and complete without the continuous fuzzer or shrinker.
 
+On Zig 0.17.1 the fuzzer is a rewrite (`lib/fuzzer.zig`; a fuzz test draws its input through `std.testing.Smith`, which `src/testing/bounded_fuzz.zig` `smithBytes` turns back into bytes): `fuzzer_new_input` skips a zero-length seed because an empty entry is always present (`lib/fuzzer.zig:2247-2251`), and the test runner's unit-test mode runs every seed and then the empty input (`src/test_runner.zig:754-764`, the stock runner's code). So a zero-length seed is safe to register on 0.17.1 (read in the 0.17.1 source; continuous `--fuzz` was not run). The bounded campaigns keep their non-empty inputs and stay the evidence this audit claims.
+
 Seed-corpus pass: `zig build test -Dtest-filter=fuzz`.
 
-Safe bounded extension pass: `zig build test "-Dtest-filter=bounded fuzz campaign"`. Continuous `--fuzz` remains available for toolchains where the upstream zero-length shrink assertion is fixed; it is not the evidence claimed by this audit.
+Safe bounded extension pass: `zig build test "-Dtest-filter=bounded fuzz campaign"`. Continuous `--fuzz` is not the evidence claimed by this audit, on 0.15.2 (its zero-length shrink assertion) or on 0.17.1 (not run).
 
 The IPC targets write each input into a seekable temporary file and hand its handle to the production `decodeNewWindowPayload` / `decodePerformActionPayload`, so the grammar, allocation bounds, and `readExactUntil` transport loop under test are the ones the pipe server runs; one file is reused for a whole campaign rather than one per iteration. Strict-prefix tests reject every truncation of representative valid payloads. Real-handle tests cover named-pipe EOF, silent-client timeout, one-byte request fragmentation and round trip, a drip-feed that cannot extend one absolute deadline, and the effective current-user-only DACL and mandatory label. Server-mode regressions pin remote-client rejection and first-instance claiming (`src/apprt/win32/ipc_server.zig`, tests "security regression win32 IPC server pipe mode rejects remote clients" and "security regression win32 IPC server claims the first pipe instance"). The fuzz targets do not claim to simulate Win32 pipe scheduling.
 

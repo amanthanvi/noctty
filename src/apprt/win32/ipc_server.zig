@@ -1,9 +1,12 @@
 //! Single-instance IPC transport, authentication, forwarding and server dispatch.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
+const win32_types = @import("../win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const log = std.log.scoped(.win32);
+const global = @import("../../global.zig");
 const apprt = @import("../../apprt.zig");
 const CoreApp = @import("../../App.zig");
 const cli_args = @import("../../cli/args.zig");
@@ -18,16 +21,16 @@ const win32_toast_activation = @import("../win32_toast_activation.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
 const thread_role = @import("../../sync/thread_role.zig");
-const BOOL = windows.BOOL;
+const BOOL = win32_types.BOOL;
 const scanForwardedToastActivation = win32.scanForwardedToastActivation;
 
 /// Blocking (PIPE_WAIT) mode with overlapped instances: the server thread
 /// waits on an event for a client and for each request's bytes, so an idle
 /// server never runs.
-const ipc_server_pipe_mode = windows.PIPE_TYPE_BYTE |
+const ipc_server_pipe_mode = win32_types.PIPE_TYPE_BYTE |
     c.PIPE_READMODE_BYTE |
     c.PIPE_REJECT_REMOTE_CLIENTS;
-const ipc_server_instance_access = c.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVERLAPPED;
+const ipc_server_instance_access = c.PIPE_ACCESS_DUPLEX | win32_types.FILE_FLAG_OVERLAPPED;
 /// The server claims the pipe NAME once, at startup, and never releases it
 /// while it runs. `FILE_FLAG_FIRST_PIPE_INSTANCE` makes that claim fail if
 /// any other process already owns the name, and every replacement instance
@@ -48,7 +51,7 @@ const ForwardedArgIterator = struct {
 };
 
 fn defaultIpcNamespace() []const u8 {
-    return if (builtin.mode == .Debug)
+    return if (builtin.mode == .debug)
         "io.github.amanthanvi.noctty-debug"
     else
         "io.github.amanthanvi.noctty";
@@ -113,7 +116,7 @@ const sid_buffer_align = @alignOf(u32);
 fn currentUserSidBytes(buf: *align(sid_buffer_align) SidBuffer) ![]u8 {
     var token: windows.HANDLE = undefined;
     if (sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) == 0) return error.TokenQueryFailed;
@@ -231,7 +234,7 @@ fn ipcPipeServerIsTrusted(pipe: windows.HANDLE) bool {
     // refused.
     var own_token: windows.HANDLE = undefined;
     if (sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &own_token,
     ) == 0) return false;
@@ -306,12 +309,12 @@ fn connectToIpcPipe(
 ) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
-        const handle = windows.kernel32.CreateFileW(
+        const handle = sys.CreateFileW(
             pipe_name.ptr,
-            windows.GENERIC_READ | windows.GENERIC_WRITE,
+            win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
             0,
             null,
-            windows.OPEN_EXISTING,
+            win32_types.OPEN_EXISTING,
             // Deny impersonation outright rather than relying on the server
             // never having read a message from us. See the constants.
             win32_ipc.client_pipe_open_flags,
@@ -354,7 +357,7 @@ fn connectToIpcPipe(
             return handle;
         }
 
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         switch (err) {
             .FILE_NOT_FOUND => return error.FileNotFound,
 
@@ -382,7 +385,7 @@ fn connectToIpcPipe(
 fn setIpcClientNonblocking(pipe: windows.HANDLE) !void {
     var mode: u32 = c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait;
     if (sys.SetNamedPipeHandleState(pipe, &mode, null, null) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
 }
 
@@ -1090,7 +1093,7 @@ fn normalizeForwardedStartupArg(
     // only a URI that the same parser used by the receiver accepts; malformed
     // lookalikes still fall through to the non-flag rejection below.
     if (win32_toast_activation.parseLaunchArg(arg)) |_| {
-        return try alloc.dupeZ(u8, arg);
+        return try alloc.dupeSentinel(u8, arg, 0);
     } else |_| {}
 
     // Drop anything the running instance would refuse, so an ordinary launch
@@ -1114,14 +1117,16 @@ fn normalizeForwardedStartupArg(
         const raw = arg["--working-directory=".len..];
         const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
         if (std.mem.eql(u8, trimmed, "home") or std.mem.eql(u8, trimmed, "inherit")) {
-            return try alloc.dupeZ(u8, arg);
+            return try alloc.dupeSentinel(u8, arg, 0);
         }
 
-        const cwd = std.fs.cwd();
+        const cwd = std.Io.Dir.cwd();
         var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const expanded = homedir.expandHome(trimmed, &home_buf) catch trimmed;
+        var environ_map = try global.environ().createMap(alloc);
+        defer environ_map.deinit();
+        const expanded = homedir.expandHome(global.io(), &environ_map, trimmed, &home_buf) catch trimmed;
         var realpath_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const normalized = cwd.realpath(expanded, &realpath_buf) catch expanded;
+        const normalized = if (cwd.realPathFile(global.io(), expanded, &realpath_buf)) |len| realpath_buf[0..len] else |_| expanded;
 
         // The key check above is not enough for this one option: the server
         // refuses the ENTIRE argv on a bad working-directory VALUE, and it
@@ -1132,7 +1137,7 @@ fn normalizeForwardedStartupArg(
         return try allocForwardedWorkingDirectoryArg(alloc, normalized);
     }
 
-    return try alloc.dupeZ(u8, arg);
+    return try alloc.dupeSentinel(u8, arg, 0);
 }
 
 fn allocForwardedWorkingDirectoryArg(
@@ -1172,7 +1177,7 @@ pub fn forwardsLauncherDirectory(config: *const configpkg.Config) bool {
 }
 
 fn collectStartupForwardArguments(alloc: Allocator, forward_cwd: bool) !?[]const [:0]const u8 {
-    var iter = try cli_args.argsIterator(alloc);
+    var iter = try cli_args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var argv: std.ArrayList([:0]const u8) = .empty;
@@ -1192,9 +1197,9 @@ fn collectStartupForwardArguments(alloc: Allocator, forward_cwd: bool) !?[]const
     }
 
     if (forward_cwd and !working_directory_seen) {
-        const cwd = std.fs.cwd();
+        const cwd = std.Io.Dir.cwd();
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const wd = try cwd.realpath(".", &cwd_buf);
+        const wd = cwd_buf[0..try cwd.realPathFile(global.io(), ".", &cwd_buf)];
         if (try allocForwardedWorkingDirectoryArg(alloc, wd)) |arg| {
             try argv.insert(alloc, 0, arg);
         }
@@ -1328,7 +1333,7 @@ fn allocIpcPipeIntegritySid(token: windows.HANDLE) ![*:0]u16 {
 fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     var token: windows.HANDLE = undefined;
     if (sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) == 0) return error.IpcSecurityDescriptorFailed;
@@ -1450,7 +1455,7 @@ fn ipcServerMain(
         );
         if (replacement == windows.INVALID_HANDLE_VALUE) {
             log.warn("failed to preserve win32 IPC pipe ownership err={}", .{
-                windows.kernel32.GetLastError(),
+                std.os.windows.GetLastError(),
             });
             return;
         }
@@ -1470,9 +1475,9 @@ fn connectIpcClient(
     io_event: windows.HANDLE,
     stop_event: windows.HANDLE,
 ) !bool {
-    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.hEvent = io_event;
-    if (sys.ConnectNamedPipe(pipe, &overlapped) == 0) switch (windows.kernel32.GetLastError()) {
+    if (sys.ConnectNamedPipe(pipe, &overlapped) == 0) switch (std.os.windows.GetLastError()) {
         .IO_PENDING => {},
         // A client opened the instance before this accept was issued.
         .PIPE_CONNECTED => return true,
@@ -1488,11 +1493,11 @@ fn connectIpcClient(
 }
 
 fn createIpcServerEvent() ?windows.HANDLE {
-    return windows.CreateEventExW(
+    return sys.createEventExW(
         null,
         null,
-        windows.CREATE_EVENT_MANUAL_RESET,
-        windows.EVENT_ALL_ACCESS,
+        win32_types.CREATE_EVENT_MANUAL_RESET,
+        win32_types.EVENT_ALL_ACCESS,
     ) catch |err| {
         log.warn("failed to create win32 IPC server event; continuing without an IPC server err={}", .{err});
         return null;
@@ -1861,7 +1866,7 @@ fn waitForAutomationCompletion(
             // could encourage a duplicate retry.
             .claimed => {},
         }
-        std.Thread.sleep(std.time.ns_per_ms);
+        std.Io.sleep(global.io(), .fromMilliseconds(1), .awake) catch {};
     }
 }
 
@@ -1883,7 +1888,7 @@ fn serverAutomationDeadline(client_deadline_ms: u64) u64 {
 fn coldToastForwardArgument(alloc: Allocator, activation: ?win32_toast_activation.ActivationTarget) ![:0]u8 {
     const launch = try win32_toast_activation.buildLaunchArg(alloc, activation orelse .{});
     defer alloc.free(launch);
-    return alloc.dupeZ(u8, launch);
+    return alloc.dupeSentinel(u8, launch, 0);
 }
 
 test "a cold toast activation start forwards the click, not its argv" {
@@ -1999,7 +2004,7 @@ pub fn startIpcServer(self: *App) !bool {
         true,
     );
     if (first_pipe == windows.INVALID_HANDLE_VALUE) {
-        const create_error = windows.kernel32.GetLastError();
+        const create_error = std.os.windows.GetLastError();
         if (win32_ipc.isIpcPipeClaimConflict(create_error)) {
             log.warn("win32 IPC pipe ownership claim failed err={}; retrying startup forward once", .{create_error});
             const forwarded = tryForwardStartupToExistingInstance(self) catch |err| failed: {
@@ -2333,12 +2338,14 @@ fn testCreateSecuredPipe(name: [:0]const u16, descriptor: *anyopaque) windows.HA
     var security_attributes: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
         .lpSecurityDescriptor = descriptor,
-        .bInheritHandle = windows.FALSE,
+        // std's SECURITY_ATTRIBUTES, which sys.CreateNamedPipeW takes: its
+        // BOOL is an enum on 0.17.
+        .bInheritHandle = .FALSE,
     };
     return sys.CreateNamedPipeW(
         name.ptr,
         c.PIPE_ACCESS_DUPLEX,
-        windows.PIPE_TYPE_BYTE |
+        win32_types.PIPE_TYPE_BYTE |
             c.PIPE_READMODE_BYTE |
             win32_ipc.pipe_nowait |
             c.PIPE_REJECT_REMOTE_CLIENTS,
@@ -2412,7 +2419,7 @@ test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
     // independently from the token's own SID and require an exact match.
     var token: windows.HANDLE = undefined;
     try std.testing.expect(sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) != 0);
@@ -2505,13 +2512,13 @@ test "win32 IPC pipe DACL still admits a same-user client" {
 
     // The CLI verbs reach the server through this same CreateFileW path,
     // so the restrictive DACL must not lock the owning user out.
-    const client = windows.kernel32.CreateFileW(
+    const client = sys.CreateFileW(
         pipe_name.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
@@ -2690,7 +2697,7 @@ test "win32 forwarded rejection reasons are classified and safe to log" {
     try std.testing.expect(!forwardedKeyLoggable("has space"));
     try std.testing.expect(!forwardedKeyLoggable("newline\ninjected"));
     try std.testing.expect(!forwardedKeyLoggable("UPPER"));
-    try std.testing.expect(!forwardedKeyLoggable("a" ** 65));
+    try std.testing.expect(!forwardedKeyLoggable(comptime win32_repeat.repeat("a", 65)));
     try std.testing.expect(forwardedKeyLoggable("window-height"));
 }
 
@@ -2725,7 +2732,7 @@ test "win32 forwarded working-directory rejects UNC syntax and keeps legal forms
     // it has to keep working or single-instance launches break.
     if (builtin.os.tag == .windows) {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+        const cwd = cwd_buf[0..try std.Io.Dir.cwd().realPathFile(std.testing.io, ".", &cwd_buf)];
         try expect(forwardedWorkingDirectoryAllowed(cwd));
     }
 }
@@ -2862,7 +2869,7 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     // across integrity levels.
     var token: windows.HANDLE = undefined;
     try std.testing.expect(sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) != 0);
@@ -2940,7 +2947,7 @@ test "win32 IPC silent synchronous client read is bounded" {
     const server = sys.CreateNamedPipeW(
         pipe_name.ptr,
         c.PIPE_ACCESS_DUPLEX,
-        windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+        win32_types.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
         1,
         1024,
         1024,
@@ -2951,14 +2958,14 @@ test "win32 IPC silent synchronous client read is bounded" {
     defer _ = windows.CloseHandle(server);
 
     try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
-    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
+    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, std.os.windows.GetLastError());
 
-    const client = windows.kernel32.CreateFileW(
+    const client = sys.CreateFileW(
         pipe_name.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         win32_ipc.client_pipe_open_flags,
         null,
     );
@@ -2968,7 +2975,7 @@ test "win32 IPC silent synchronous client read is bounded" {
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
-        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
+        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, std.os.windows.GetLastError());
     }
 
     var byte: [1]u8 = undefined;
@@ -3011,10 +3018,11 @@ const TestIpcServer = struct {
         self.app.config = try configpkg.Config.default(alloc);
         errdefer self.app.config.deinit();
         self.app.config.@"single-instance" = .true;
-        self.app.config.class = try std.fmt.bufPrintZ(
+        self.app.config.class = try std.mem.printSentinel(
             &self.class_buf,
             "noctty-test-pkg67-{d}-{d}",
             .{ sys.GetCurrentProcessId(), next_id.fetchAdd(1, .monotonic) },
+            0,
         );
         self.app.is_elevated = false;
         self.app.ipc_pipe_name = null;
@@ -3052,7 +3060,7 @@ fn testThreadCycles(thread: windows.HANDLE) !u64 {
 
 fn testProcessHandleCount() !u32 {
     var count: u32 = 0;
-    if (GetProcessHandleCount(windows.kernel32.GetCurrentProcess(), &count) == 0) {
+    if (GetProcessHandleCount(sys.GetCurrentProcess(), &count) == 0) {
         return error.TestUnexpectedResult;
     }
     return count;
@@ -3073,7 +3081,7 @@ test "win32 IPC server thread does not busy-poll while it waits for a client" {
     var cycles = try testThreadCycles(thread);
     var cycle_deltas: [10]u64 = undefined;
     for (&cycle_deltas) |*delta| {
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake) catch {};
         const now = try testThreadCycles(thread);
         delta.* = now - cycles;
         if (now == cycles) return;
@@ -3104,12 +3112,12 @@ test "win32 IPC server replaces an instance whose client left before it was acce
     defer if (first_pipe_owned) {
         _ = windows.CloseHandle(first_pipe);
     };
-    const gone = windows.kernel32.CreateFileW(
+    const gone = sys.CreateFileW(
         app.ipc_pipe_name.?.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         win32_ipc.client_pipe_open_flags,
         null,
     );
@@ -3151,7 +3159,7 @@ test "win32 IPC server stops promptly while a client holds a request open" {
     // the request's first bytes when it is asked to stop.
     const client = try server.connect();
     defer _ = windows.CloseHandle(client);
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
 
     const started = sys.GetTickCount64();
     server.stop();
@@ -3297,27 +3305,34 @@ test "win32 startup layout forwarding intercepts before generic argv" {
     );
 }
 
+/// 0.15's `File.seekTo`: Zig 0.17's File has no seek, and a streaming
+/// writer's moves the handle's offset, which the IPC readers read through.
+fn testSeekFile(file: std.Io.File, offset: u64) !void {
+    var writer = file.writerStreaming(std.testing.io, &.{});
+    try writer.seekTo(offset);
+}
+
 test "win32 handleIpcClient bounds truncated request failures with an ack" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var file = try tmp.dir.createFile("ipc-request-truncated.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-request-truncated.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var request: [4]u8 = undefined;
     std.mem.writeInt(u32, request[0..4], win32_ipc.wire_version, .little);
-    try file.writeAll(&request);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &request);
+    try testSeekFile(file, 0);
 
     var app: App = undefined;
     try std.testing.expectError(error.EndOfStream, handleIpcClient(&app, .{ .handle = file.handle }));
 
-    try file.seekTo(request.len);
+    try testSeekFile(file, request.len);
     try std.testing.expectError(
         error.IPCFailed,
         win32_ipc.readDataResponse(std.testing.allocator, file.handle),
@@ -3350,7 +3365,7 @@ fn testDescriptorSddlAlloc(
         information,
         &text,
         null,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
     defer _ = sys.LocalFree(@ptrCast(text.?));
 
     return std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(text.?));

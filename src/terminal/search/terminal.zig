@@ -485,7 +485,8 @@ pub const TerminalSearch = struct {
 
 test "starts feed required and runs to complete" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -515,7 +516,8 @@ test "starts feed required and runs to complete" {
 
 test "viewport matches are cached until the next feed" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 10 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 10 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -539,7 +541,8 @@ test "viewport matches are cached until the next feed" {
 
 test "select after active screen removal" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     _ = try t.switchScreen(.alternate);
@@ -562,10 +565,11 @@ test "select after active screen removal" {
 
 test "select scrolls the viewport only when needed" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
 
@@ -622,10 +626,11 @@ test "select scrolls the viewport only when needed" {
 
 test "deinit after the terminal is gone" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
 
     var stream = t.vtStream();
@@ -653,7 +658,8 @@ test "deinit after the terminal is gone" {
 
 test "no matches selects nothing" {
     const alloc = testing.allocator;
-    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{ .cols = 10, .rows = 2 });
     defer t.deinit(alloc);
 
     var search: TerminalSearch = try .init(alloc, "Fizz");
@@ -669,10 +675,10 @@ test "initPattern lends one Pattern to the viewport and every screen" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var t: Terminal = try .init(alloc, .{
+    var t: Terminal = try .init(testing.io, alloc, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer t.deinit(alloc);
     const list = &t.screens.get(.primary).?.pages;
@@ -708,4 +714,116 @@ test "initPattern lends one Pattern to the viewport and every screen" {
         // reload; the new one borrows the pattern too.
         try t.resize(alloc, .{ .cols = 12, .rows = 2 });
     }
+}
+
+test "feed after complete discovers prepended snapshot history" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    const snapshot = @import("../snapshot/main.zig");
+
+    // A source terminal with several pages of scrollback where every line
+    // is a match, so the expected total is simply the number of lines.
+    var source: Terminal = try .init(io, alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback_bytes = std.math.maxInt(usize),
+    });
+    defer source.deinit(alloc);
+    var needle_count: usize = 0;
+    {
+        var stream = source.vtStream();
+        defer stream.deinit();
+        const list = &source.screens.active.pages;
+        while (list.totalPages() < 4) : (needle_count += 1) {
+            stream.nextSlice("needle\r\n");
+        }
+    }
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try snapshot.encode(alloc, &encoded.writer, &source, .{
+        .continuation = .ground,
+    });
+
+    // Restore only through READY. The terminal is usable while its history
+    // pages are still in flight.
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    var decoder: snapshot.Decoder = .init(&reader);
+    var decoded = try decoder.ready(alloc, io, .{
+        .max_continuation_bytes = 0,
+    });
+    defer decoded.deinit(alloc);
+    var t = decoded.toOwned();
+    defer t.deinit(alloc);
+    const pages_at_ready = t.screens.active.pages.totalPages();
+
+    const Pump = struct {
+        fn run(search: *TerminalSearch, term: *Terminal) void {
+            while (search.status() != .complete) {
+                switch (search.status()) {
+                    .feed_required => search.feed(term, true),
+                    .running => _ = search.tick(),
+                    .complete => unreachable,
+                }
+            }
+        }
+    };
+
+    // Search the READY state to completion and select the oldest match.
+    var search: TerminalSearch = try .init(alloc, "needle");
+    defer search.deinit(&t);
+    Pump.run(&search, &t);
+    const partial = search.activeScreenSearch().?.matchesLen();
+    try testing.expect(partial > 0);
+    try testing.expect(partial < needle_count);
+    try testing.expect(try search.select(&t, .prev, .none));
+    const selected_idx = search.activeScreenSearch().?.selected.?.idx;
+    try testing.expectEqual(partial - 1, selected_idx);
+    const selected_before = search.activeScreenSearch().?.selectedMatch().?.untracked();
+
+    // Restore every history page below the live terminal.
+    var restored_pages: usize = 0;
+    while (try decoder.next(alloc, &t)) |progress| : (restored_pages += 1) {
+        try testing.expect(progress.page.rows > 0);
+    }
+    try testing.expect(restored_pages > 0);
+    try testing.expectEqual(
+        pages_at_ready + restored_pages,
+        t.screens.active.pages.totalPages(),
+    );
+
+    // Refresh the existing search the way ghostty_search_run does: feed,
+    // then tick to completion. It must now cover the restored history.
+    search.feed(&t, true);
+    Pump.run(&search, &t);
+    const screen_search = search.activeScreenSearch().?;
+    try testing.expectEqual(needle_count, screen_search.matchesLen());
+
+    // Restored results are older than everything already cached, so the
+    // selection keeps both its index and its target.
+    try testing.expectEqual(selected_idx, screen_search.selected.?.idx);
+    const selected_after = screen_search.selectedMatch().?.untracked();
+    try testing.expect(selected_before.start.eql(selected_after.start));
+    try testing.expect(selected_before.end.eql(selected_after.end));
+
+    // Results stay ordered newest to oldest, ending at the very first line.
+    const matches = try screen_search.matches(alloc);
+    defer alloc.free(matches);
+    const pages = &t.screens.active.pages;
+    var prev_y: ?usize = null;
+    for (matches) |hl| {
+        const pt = pages.pointFromPin(.screen, hl.startPin()).?;
+        if (prev_y) |y| try testing.expect(pt.screen.y < y);
+        prev_y = pt.screen.y;
+    }
+    try testing.expectEqual(0, prev_y.?);
+
+    // A search created after the restore agrees with the refreshed one.
+    var fresh: TerminalSearch = try .init(alloc, "needle");
+    defer fresh.deinit(&t);
+    Pump.run(&fresh, &t);
+    try testing.expectEqual(
+        needle_count,
+        fresh.activeScreenSearch().?.matchesLen(),
+    );
 }

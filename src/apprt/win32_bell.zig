@@ -21,6 +21,8 @@
 //! - `border` is not implemented on Windows.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
+const win32_sys = @import("win32/sys.zig");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const configpkg = @import("../config.zig");
@@ -145,25 +147,25 @@ const FLASHWINFO = extern struct {
 
 const DRIVE_REMOTE: u32 = 4;
 
-extern "user32" fn FlashWindowEx(pfwi: *FLASHWINFO) callconv(.winapi) windows.BOOL;
+extern "user32" fn FlashWindowEx(pfwi: *FLASHWINFO) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetDriveTypeW(lpRootPathName: [*:0]const u16) callconv(.winapi) u32;
 const MciApi = struct {
     send: *const fn ([*:0]const u16, ?[*]u16, u32, ?windows.HWND) callconv(.winapi) u32,
-    error_string: *const fn (u32, [*]u16, u32) callconv(.winapi) windows.BOOL,
+    error_string: *const fn (u32, [*]u16, u32) callconv(.winapi) win32_types.BOOL,
 
     fn load() !MciApi {
         // Audio is off by default. Load its optional DLL on the sound worker,
         // from System32 only, and retain it until process exit.
-        const module = windows.kernel32.LoadLibraryExW(
+        const module = win32_sys.LoadLibraryExW(
             std.unicode.utf8ToUtf16LeStringLiteral("winmm.dll"),
             null,
             0x00000800, // LOAD_LIBRARY_SEARCH_SYSTEM32
         ) orelse return error.AudioUnavailable;
-        errdefer _ = windows.kernel32.FreeLibrary(module);
+        errdefer _ = win32_sys.FreeLibrary(module);
         return .{
-            .send = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(module, "mciSendStringW") orelse
+            .send = @ptrCast(@alignCast(win32_sys.GetProcAddress(module, "mciSendStringW") orelse
                 return error.AudioUnavailable)),
-            .error_string = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(module, "mciGetErrorStringW") orelse
+            .error_string = @ptrCast(@alignCast(win32_sys.GetProcAddress(module, "mciGetErrorStringW") orelse
                 return error.AudioUnavailable)),
         };
     }
@@ -204,7 +206,7 @@ const AudioWarnings = struct {
     const Kind = enum(u3) { path, unavailable, playback };
 
     fn first(self: *AudioWarnings, kind: Kind) bool {
-        const mask = @as(u8, 1) << @intFromEnum(kind);
+        const mask = @as(u8, 1) << @backingInt(kind);
         return self.seen.fetchOr(mask, .monotonic) & mask == 0;
     }
 };
@@ -458,7 +460,7 @@ test "win32 bell localized MCI errors can fill the UTF-16 buffer" {
             }
         }.call,
         .error_string = struct {
-            fn call(_: u32, text: [*]u16, count: u32) callconv(.winapi) windows.BOOL {
+            fn call(_: u32, text: [*]u16, count: u32) callconv(.winapi) win32_types.BOOL {
                 @memset(text[0 .. count - 1], 0x8b66);
                 text[count - 1] = 0;
                 return 1;

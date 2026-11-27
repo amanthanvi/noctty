@@ -18,6 +18,7 @@ const Library = font.Library;
 const opentype = @import("../opentype.zig");
 const quirks = @import("../../quirks.zig");
 const config = @import("../../config/Config.zig");
+const global = @import("../../global.zig");
 
 const F26Dot6 = opentype.sfnt.F26Dot6;
 
@@ -41,7 +42,7 @@ pub const Face = struct {
     ///
     /// This means that anywhere where `self.face.loadGlyph`
     /// is called, this mutex must be held.
-    ft_mutex: *std.Thread.Mutex,
+    ft_mutex: *std.Io.Mutex,
 
     /// Harfbuzz font corresponding to this face.
     hb_font: harfbuzz.Font,
@@ -68,8 +69,8 @@ pub const Face = struct {
         index: i32,
         opts: font.face.Options,
     ) !Face {
-        lib.mutex.lock();
-        defer lib.mutex.unlock();
+        lib.mutex.lockUncancelable(global.io());
+        defer lib.mutex.unlock(global.io());
         const face = try lib.lib.initFace(path, index);
         errdefer face.deinit();
         return try initFace(lib, face, opts);
@@ -81,8 +82,8 @@ pub const Face = struct {
         source: [:0]const u8,
         opts: font.face.Options,
     ) !Face {
-        lib.mutex.lock();
-        defer lib.mutex.unlock();
+        lib.mutex.lockUncancelable(global.io());
+        defer lib.mutex.unlock(global.io());
         const face = try lib.lib.initMemoryFace(source, 0);
         errdefer face.deinit();
         return try initFace(lib, face, opts);
@@ -99,9 +100,9 @@ pub const Face = struct {
         var hb_font = try harfbuzz.freetype.createFont(face.handle);
         errdefer hb_font.destroy();
 
-        const ft_mutex = try lib.alloc.create(std.Thread.Mutex);
+        const ft_mutex = try lib.alloc.create(std.Io.Mutex);
         errdefer lib.alloc.destroy(ft_mutex);
-        ft_mutex.* = .{};
+        ft_mutex.* = .init;
 
         var result: Face = .{
             .lib = lib,
@@ -115,7 +116,7 @@ pub const Face = struct {
 
         // In debug mode, we output information about available variation axes,
         // if they exist.
-        if (comptime builtin.mode == .Debug) mm: {
+        if (comptime builtin.mode == .debug) mm: {
             if (!face.hasMultipleMasters()) break :mm;
             var buf: [1024]u8 = undefined;
             log.debug("variation axes font={s}", .{try result.name(&buf)});
@@ -142,8 +143,8 @@ pub const Face = struct {
     pub fn deinit(self: *Face) void {
         self.lib.alloc.destroy(self.ft_mutex);
         {
-            self.lib.mutex.lock();
-            defer self.lib.mutex.unlock();
+            self.lib.mutex.lockUncancelable(global.io());
+            defer self.lib.mutex.unlock(global.io());
 
             self.face.deinit();
         }
@@ -380,13 +381,16 @@ pub const Face = struct {
     }
 
     test "face name keeps the raw bytes of a malformed name" {
+        // Zig 0.17's `std.simd.repeat` builds its index vector at comptime,
+        // one branch per byte.
+        @setEvalBranchQuota(4096);
         const malformed = [_][]const u8{
             "", // empty
             "\x00A\x00", // odd length
             "\xd8\x00\x00\x41", // high surrogate without its partner
             "\xdc\x00\x00\x41", // low surrogate on its own
             "\x00\x41\xd8\x00", // high surrogate cut off at the end
-            "\x00a" ** 513, // 1,026 bytes: more than 512 code units
+            &@as(["\x00a".len * 513]u8, std.simd.repeat("\x00a".len * 513, "\x00a".*)), // 1,026 bytes: more than 512 code units
         };
         for (malformed) |bytes| {
             for (utf16_kinds) |kind| {
@@ -411,15 +415,18 @@ pub const Face = struct {
         // 342 x U+4E00 is 684 bytes of UTF-16, under the 1,024-byte input
         // limit, and 1,026 bytes of UTF-8: one character more than the 1,024
         // bytes `+show-face` passes. 341 fill it to 1,023 bytes.
-        try expectUtf16Family("一" ** 341, true, 1024);
-        try expectUtf16Family("一" ** 342, false, 1024);
-        try expectUtf16Family("a" ** 512, true, 1024);
+        // Zig 0.17's `std.simd.repeat` builds its index vector at comptime,
+        // one branch per byte.
+        @setEvalBranchQuota(4096);
+        try expectUtf16Family(&@as(["一".len * 341]u8, std.simd.repeat("一".len * 341, "一".*)), true, 1024);
+        try expectUtf16Family(&@as(["一".len * 342]u8, std.simd.repeat("一".len * 342, "一".*)), false, 1024);
+        try expectUtf16Family(&@as([512]u8, @splat('a')), true, 1024);
 
         // The synthetic bold and italic paths pass 256 bytes: 85 characters are
         // 255 bytes of UTF-8, 86 are 258.
-        try expectUtf16Family("一" ** 85, true, 256);
-        try expectUtf16Family("一" ** 86, false, 256);
-        try expectUtf16Family("a" ** 300, false, 256);
+        try expectUtf16Family(&@as(["一".len * 85]u8, std.simd.repeat("一".len * 85, "一".*)), true, 256);
+        try expectUtf16Family(&@as(["一".len * 86]u8, std.simd.repeat("一".len * 86, "一".*)), false, 256);
+        try expectUtf16Family(&@as([300]u8, @splat('a')), false, 256);
 
         // A buffer of exactly the UTF-8 length is enough; one byte less is not.
         try expectUtf16Family("一", true, 3);
@@ -562,8 +569,8 @@ pub const Face = struct {
 
     /// Returns true if the given glyph ID is colorized.
     pub fn isColorGlyph(self: *const Face, glyph_id: u32) bool {
-        self.ft_mutex.lock();
-        defer self.ft_mutex.unlock();
+        self.ft_mutex.lockUncancelable(global.io());
+        defer self.ft_mutex.unlock(global.io());
 
         // Load the glyph and see what pixel mode it renders with.
         // All modes other than BGRA are non-color.
@@ -661,8 +668,8 @@ pub const Face = struct {
         glyph_index: u32,
         opts: font.Glyph.RenderOptions,
     ) !Glyph {
-        self.ft_mutex.lock();
-        defer self.ft_mutex.unlock();
+        self.ft_mutex.lockUncancelable(global.io());
+        defer self.ft_mutex.unlock(global.io());
 
         // Load the glyph.
         try self.face.loadGlyph(glyph_index, self.glyphLoadFlags(opts.constraint.doesAnything()));
@@ -791,7 +798,7 @@ pub const Face = struct {
                     else
                         0.0;
 
-                const outline = &glyph.*.outline;
+                const outline: *freetype.c.FT_Outline = &glyph.*.outline;
                 for (outline.points[0..@intCast(outline.n_points)]) |*p| {
                     // Convert to f64 for processing
                     var px = f26dot6ToF64(p.x);
@@ -1226,8 +1233,8 @@ pub const Face = struct {
         // the metrics provided by FreeType, and set ascii_height to null as
         // it's optional.
         const cell_width: f64, const ascii_height: ?f64 = measurements: {
-            self.ft_mutex.lock();
-            defer self.ft_mutex.unlock();
+            self.ft_mutex.lockUncancelable(global.io());
+            defer self.ft_mutex.unlock(global.io());
 
             var max: f64 = 0.0;
             var top: f64 = 0.0;
@@ -1279,8 +1286,8 @@ pub const Face = struct {
 
             break :heights .{
                 cap: {
-                    self.ft_mutex.lock();
-                    defer self.ft_mutex.unlock();
+                    self.ft_mutex.lockUncancelable(global.io());
+                    defer self.ft_mutex.unlock(global.io());
                     if (face.getCharIndex('H')) |glyph_index| {
                         if (face.loadGlyph(glyph_index, self.glyphLoadFlags(false))) {
                             break :cap getGlyphSize(face.handle.*.glyph).height;
@@ -1289,8 +1296,8 @@ pub const Face = struct {
                     break :cap null;
                 },
                 ex: {
-                    self.ft_mutex.lock();
-                    defer self.ft_mutex.unlock();
+                    self.ft_mutex.lockUncancelable(global.io());
+                    defer self.ft_mutex.unlock(global.io());
                     if (face.getCharIndex('x')) |glyph_index| {
                         if (face.loadGlyph(glyph_index, self.glyphLoadFlags(false))) {
                             break :ex getGlyphSize(face.handle.*.glyph).height;
@@ -1303,8 +1310,8 @@ pub const Face = struct {
 
         // Measure "水" (CJK water ideograph, U+6C34) for our ic width.
         const ic_width: ?f64 = ic_width: {
-            self.ft_mutex.lock();
-            defer self.ft_mutex.unlock();
+            self.ft_mutex.lockUncancelable(global.io());
+            defer self.ft_mutex.unlock(global.io());
 
             const glyph = face.getCharIndex('水') orelse break :ic_width null;
 
@@ -1506,8 +1513,8 @@ fn fontThickenSample(face: *Face, cp: u21, thicken: bool, strength: u8, format: 
     };
     // FT_Render_Glyph preserves the loaded outline while adding its bitmap.
     // Measure the actual production outline, not a separate embolden call.
-    face.ft_mutex.lock();
-    defer face.ft_mutex.unlock();
+    face.ft_mutex.lockUncancelable(std.testing.io);
+    defer face.ft_mutex.unlock(std.testing.io);
     const outline = &face.face.handle.*.glyph.*.outline;
     if (outline.n_points > 0) {
         var box: freetype.c.FT_BBox = undefined;

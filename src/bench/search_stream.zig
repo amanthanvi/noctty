@@ -73,13 +73,13 @@ const Args = struct {
     rate_mib_s: f64 = 0,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const args_alloc = arena.allocator();
 
-    const args_raw = try std.process.argsAlloc(args_alloc);
-    defer std.process.argsFree(args_alloc, args_raw);
+    const args_raw = try init.minimal.args.toSlice(args_alloc);
     const args = try parseArgs(args_raw);
 
     const alloc = std.heap.c_allocator;
@@ -90,8 +90,8 @@ pub fn main() !void {
     defer alloc.free(streamed);
 
     switch (args.mode) {
-        .feed => try runFeed(alloc, args, history, streamed),
-        .thread => try runThread(alloc, args, history, streamed),
+        .feed => try runFeed(io, alloc, args, history, streamed),
+        .thread => try runThread(io, alloc, args, history, streamed),
     }
 }
 
@@ -128,11 +128,11 @@ fn buildLines(
     return out;
 }
 
-fn initTerminal(alloc: std.mem.Allocator, args: Args) !Terminal {
-    return try .init(alloc, .{
+fn initTerminal(io: std.Io, alloc: std.mem.Allocator, args: Args) !Terminal {
+    return try .init(io, alloc, .{
         .rows = args.rows,
         .cols = args.cols,
-        .max_scrollback = args.scrollback_mib * 1024 * 1024,
+        .max_scrollback_bytes = args.scrollback_mib * 1024 * 1024,
     });
 }
 
@@ -155,6 +155,7 @@ fn nextSliceChunked(stream: anytype, bytes: []const u8) void {
 /// Stands in for the surface's search callback: the surface copies every
 /// match-row snapshot into a message for the app thread.
 const Sink = struct {
+    io: std.Io,
     alloc: std.mem.Allocator,
     row_messages: usize = 0,
     row_values: usize = 0,
@@ -162,17 +163,17 @@ const Sink = struct {
     total: usize = 0,
     /// The query did not compile; the search reports nothing more.
     invalid: bool = false,
-    complete: std.Thread.ResetEvent = .{},
+    complete: std.Io.Event = .unset,
 
     fn callback(event: SearchThread.Event, _: u64, ud: ?*anyopaque) void {
         const self: *Sink = @ptrCast(@alignCast(ud.?));
         switch (event) {
             .match_rows => |rows| self.matchRows(rows),
             .total_matches => |v| self.total = v,
-            .complete => self.complete.set(),
+            .complete => self.complete.set(self.io),
             .invalid_query => {
                 self.invalid = true;
-                self.complete.set();
+                self.complete.set(self.io);
             },
             else => {},
         }
@@ -203,6 +204,7 @@ const Sink = struct {
 };
 
 fn runFeed(
+    io: std.Io,
     alloc: std.mem.Allocator,
     args: Args,
     history: []const u8,
@@ -228,19 +230,19 @@ fn runFeed(
     for (0..runs) |run| {
         // Baseline: the same output with no search.
         {
-            var t = try initTerminal(alloc, args);
+            var t = try initTerminal(io, alloc, args);
             defer t.deinit(alloc);
             writeAll(&t, history);
-            var timer = try std.time.Timer.start();
+            const timer: Timer = .start(io);
             writeAll(&t, streamed);
             baseline_ms[run] = nsToMs(timer.read());
         }
 
-        var t = try initTerminal(alloc, args);
+        var t = try initTerminal(io, alloc, args);
         defer t.deinit(alloc);
         writeAll(&t, history);
 
-        var sink: Sink = .{ .alloc = alloc };
+        var sink: Sink = .{ .io = io, .alloc = alloc };
         // Single-threaded: nothing else contends for the lock here. This
         // thread steps the search as the search thread does. The benchmark
         // is built without the thread-role layer, so the scope compiles to
@@ -253,7 +255,7 @@ fn runFeed(
 
         // The query's initial feed, then the search thread's loop until the
         // search completes.
-        var timer = try std.time.Timer.start();
+        const timer: Timer = .start(io);
         sink.run(&search, .{ .query = .{ .needle = args.needle, .options = queryOptions(args) } });
         initial_ms[run] = nsToMs(timer.read());
         if (sink.invalid) return error.InvalidQuery;
@@ -261,7 +263,7 @@ fn runFeed(
         // Streaming with a refresh after every `refresh_bytes` of output.
         var stream = t.vtStream();
         defer stream.deinit();
-        var stream_timer = try std.time.Timer.start();
+        const stream_timer: Timer = .start(io);
         var offset: usize = 0;
         while (offset < streamed.len) {
             const end = @min(offset + refresh_bytes, streamed.len);
@@ -271,7 +273,7 @@ fn runFeed(
             // What the renderer does on a dirty frame.
             t.flags.search_viewport_dirty = true;
 
-            var refresh_timer = try std.time.Timer.start();
+            const refresh_timer: Timer = .start(io);
             sink.run(&search, .{ .refresh = true });
             try refresh_all.append(alloc, nsToMs(refresh_timer.read()));
         }
@@ -290,7 +292,7 @@ fn runFeed(
     }
 
     var out_buf: [4096]u8 = undefined;
-    var out_writer = std.fs.File.stdout().writer(&out_buf);
+    var out_writer = std.Io.File.stdout().writer(io, &out_buf);
     const out = &out_writer.interface;
     try out.print(
         \\bench:search-stream mode=feed regex={} whole-word={}
@@ -332,6 +334,7 @@ fn runFeed(
 }
 
 fn runThread(
+    io: std.Io,
     alloc: std.mem.Allocator,
     args: Args,
     history: []const u8,
@@ -353,12 +356,12 @@ fn runThread(
     var row_messages: usize = 0;
 
     for (0..runs) |run| {
-        const without = try streamLocked(alloc, args, history, streamed, null);
+        const without = try streamLocked(io, alloc, args, history, streamed, null);
         without_ms[run] = without.wall_ms;
         without_wait_ms[run] = without.lock_wait_ms;
 
-        var sink: Sink = .{ .alloc = alloc };
-        const with = try streamLocked(alloc, args, history, streamed, &sink);
+        var sink: Sink = .{ .io = io, .alloc = alloc };
+        const with = try streamLocked(io, alloc, args, history, streamed, &sink);
         with_ms[run] = with.wall_ms;
         with_wait_ms[run] = with.lock_wait_ms;
         initial_ms[run] = with.initial_ms;
@@ -371,7 +374,7 @@ fn runThread(
     }
 
     var out_buf: [2048]u8 = undefined;
-    var out_writer = std.fs.File.stdout().writer(&out_buf);
+    var out_writer = std.Io.File.stdout().writer(io, &out_buf);
     const out = &out_writer.interface;
     const with_median = stats.median(with_ms).?;
     const without_median = stats.median(without_ms).?;
@@ -424,6 +427,7 @@ const StreamResult = struct {
 /// thread runs a search to completion first and then refreshes while the
 /// output streams.
 fn streamLocked(
+    io: std.Io,
     alloc: std.mem.Allocator,
     args: Args,
     history: []const u8,
@@ -431,7 +435,7 @@ fn streamLocked(
     sink: ?*Sink,
 ) !StreamResult {
     var mutex: StateMutex = .{};
-    var t = try initTerminal(alloc, args);
+    var t = try initTerminal(io, alloc, args);
     defer t.deinit(alloc);
     writeAll(&t, history);
 
@@ -458,13 +462,13 @@ fn streamLocked(
     var result: StreamResult = .{ .wall_ms = 0, .lock_wait_ms = 0 };
     if (sink) |search_sink| {
         os_thread = try std.Thread.spawn(.{}, SearchThread.threadMain, .{&thread});
-        var timer = try std.time.Timer.start();
+        const timer: Timer = .start(io);
         thread.send(.{ .change_query = .{
             .generation = 1,
             .options = queryOptions(args),
             .req = try .init(alloc, args.needle),
         } });
-        try search_sink.complete.timedWait(600 * std.time.ns_per_s);
+        try search_sink.complete.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(600), .clock = .awake } });
         result.initial_ms = nsToMs(timer.read());
         if (search_sink.invalid) return error.InvalidQuery;
     }
@@ -479,13 +483,13 @@ fn streamLocked(
     defer reader.exit();
     var stream = t.vtStream();
     defer stream.deinit();
-    var timer = try std.time.Timer.start();
+    const timer: Timer = .start(io);
     var lock_wait_ns: u64 = 0;
     var offset: usize = 0;
     while (offset < streamed.len) {
         const end = @min(offset + 4096, streamed.len);
         const before_lock = timer.read();
-        mutex.lock();
+        mutex.lockUncancelable();
         lock_wait_ns += timer.read() - before_lock;
         stream.nextSlice(streamed[offset..end]);
         t.flags.search_viewport_dirty = true;
@@ -495,7 +499,7 @@ fn streamLocked(
         // Pace the output like a producer that cannot write faster.
         if (ns_per_byte > 0) {
             const due: u64 = @intFromFloat(@as(f64, @floatFromInt(offset)) * ns_per_byte);
-            while (timer.read() + std.time.ns_per_ms < due) std.Thread.sleep(std.time.ns_per_ms);
+            while (timer.read() + std.time.ns_per_ms < due) try io.sleep(.fromMilliseconds(1), .awake);
         }
     }
     result.wall_ms = nsToMs(timer.read());
@@ -506,6 +510,21 @@ fn streamLocked(
 fn queryOptions(args: Args) terminal.search.QueryOptions {
     return .{ .regex = args.regex, .whole_word = args.whole_word };
 }
+
+/// Nanoseconds since it started, as 0.15's `std.time.Timer.read` gave them
+/// (Zig 0.17 removed the Timer): the awake clock, as `palette_match.zig` reads it.
+const Timer = struct {
+    io: std.Io,
+    began: std.Io.Timestamp,
+
+    fn start(io: std.Io) Timer {
+        return .{ .io = io, .began = .now(io, .awake) };
+    }
+
+    fn read(self: Timer) u64 {
+        return @intCast(@max(0, self.began.untilNow(self.io, .awake).toNanoseconds()));
+    }
+};
 
 fn nsToMs(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;

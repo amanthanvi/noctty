@@ -68,8 +68,8 @@ pub const UndoStack = struct {
     pub fn init(alloc: Allocator) UndoStack {
         return .{
             .alloc = alloc,
-            .entries = .{},
-            .redo_entries = .{},
+            .entries = .empty,
+            .redo_entries = .empty,
             .total_bytes = 0,
         };
     }

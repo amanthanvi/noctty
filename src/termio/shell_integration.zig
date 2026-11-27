@@ -2,13 +2,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
 const win32_powershell_install = @import("../apprt/win32_powershell_install.zig");
 const windows_shell = @import("../config/windows_shell.zig");
 const visual_studio = @import("../config/windows_visual_studio.zig");
 const config = @import("../config.zig");
 const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.shell_integration);
 
@@ -106,7 +107,7 @@ pub fn setup(
             if (try windows_shell.lookupChildExecutable(alloc_arena, exe, env)) |path| {
                 var argv: std.ArrayList([:0]const u8) = .empty;
                 try argv.append(alloc_arena, path);
-                while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeZ(u8, arg));
+                while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeSentinel(u8, arg, 0));
                 command = .{ .direct = try argv.toOwnedSlice(alloc_arena) };
                 program = path;
             } else if (command == .shell) {
@@ -214,10 +215,10 @@ test "force shell" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    inline for (@typeInfo(Shell).@"enum".fields) |field| {
-        const shell = @field(Shell, field.name);
+    inline for (@typeInfo(Shell).@"enum".field_names) |field| {
+        const shell = @field(Shell, field);
 
-        var res: TmpResourcesDir = try .init(alloc, shell);
+        var res: TmpResourcesDir = try .init(std.testing.allocator, shell);
         defer res.deinit();
 
         const command: config.Command = switch (shell) {
@@ -336,12 +337,12 @@ test "PKG08 full executable config path is detected before integration" {
     const alloc = arena.allocator();
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.makeDir("PowerShell 7");
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "PowerShell 7/pwsh.exe", .data = "" });
-    const path = try res.tmp_dir.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
+    try res.tmp_dir.dir.createDir(std.testing.io, "PowerShell 7", .default_dir);
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "PowerShell 7/pwsh.exe", .data = "" });
+    const path = try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, "PowerShell 7/pwsh.exe", alloc);
     var env = EnvMap.init(alloc);
     const result = (try setup(alloc, res.path, .{
-        .shell = try alloc.dupeZ(u8, path),
+        .shell = try alloc.dupeSentinel(u8, path, 0),
     }, &env, null, false)).?;
     try std.testing.expectEqual(Shell.powershell, result.shell);
     try std.testing.expect(result.command == .direct);
@@ -465,10 +466,10 @@ test "PKG08 round2 bare bash uses child PATH" {
     const alloc = arena.allocator();
     var res: TmpResourcesDir = try .init(alloc, .bash);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "bash.exe", .data = "child" });
-    const expected = try res.tmp_dir.dir.realpathAlloc(alloc, "bash.exe");
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "bash.exe", .data = "child" });
+    const expected = try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, "bash.exe", alloc);
     var env = EnvMap.init(alloc);
-    try env.put("PATH", try res.tmp_dir.dir.realpathAlloc(alloc, "."));
+    try env.put("PATH", try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", alloc));
     try env.put("PATHEXT", ".exe;.com");
     const result = (try setup(alloc, res.path, .{ .shell = "bash -i" }, &env, null, false)).?;
     try std.testing.expectEqualStrings(expected, result.command.direct[0]);
@@ -482,10 +483,10 @@ test "PKG08 round2 bare powershell uses child PATH" {
     const alloc = arena.allocator();
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "child" });
-    const expected = try res.tmp_dir.dir.realpathAlloc(alloc, "pwsh.exe");
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "pwsh.exe", .data = "child" });
+    const expected = try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, "pwsh.exe", alloc);
     var env = EnvMap.init(alloc);
-    try env.put("Path", try res.tmp_dir.dir.realpathAlloc(alloc, "."));
+    try env.put("Path", try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", alloc));
     try env.put("Pathext", ".exe;.com");
     const result = (try setup(alloc, res.path, .{ .shell = "pwsh -NoLogo" }, &env, null, false)).?;
     try std.testing.expectEqualStrings(expected, result.command.direct[0]);
@@ -677,7 +678,7 @@ test "setup powershell: a Developer PowerShell runs its script, then the integra
     const script = try visual_studio.devShellScript(alloc, "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll", instance, .x64);
     const shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
     // What `windows_shell.appendVisualStudioInstance` gives the profile.
-    const profile_argv = [_][:0]const u8{ shell, "-NoExit", "-Command", try alloc.dupeZ(u8, script) };
+    const profile_argv = [_][:0]const u8{ shell, "-NoExit", "-Command", try alloc.dupeSentinel(u8, script, 0) };
     const result = (try setup(alloc, res.path, .{ .direct = &profile_argv }, &env, null, true)).?;
     try testing.expectEqual(.powershell, result.shell);
     try testing.expectEqual(@as(usize, 4), result.command.direct.len);
@@ -719,10 +720,10 @@ test "setup powershell: interactive shell command auto injects" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "powershell.exe", .data = "" });
     try env.put("PATH", res.path);
     try env.put("PATHEXT", ".exe");
-    const exe_path = try res.tmp_dir.dir.realpathAlloc(alloc, "powershell.exe");
+    const exe_path = try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, "powershell.exe", alloc);
 
     const command: config.Command = .{ .shell = "powershell.exe -NoProfile" };
     const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
@@ -824,7 +825,7 @@ test "setup powershell: explicit short command launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "" });
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "pwsh.exe", .data = "" });
     try env.put("PATH", res.path);
 
     const result = try setup(
@@ -853,7 +854,7 @@ test "setup powershell: explicit command prefix launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "powershell.exe", .data = "" });
     try env.put("PATH", res.path);
 
     const result = try setup(
@@ -882,9 +883,9 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "" });
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "pwsh.exe", .data = "" });
     try env.put("PATH", res.path);
-    const exe_path = try res.tmp_dir.dir.realpathAlloc(alloc, "pwsh.exe");
+    const exe_path = try res.tmp_dir.dir.realPathFileAlloc(std.testing.io, "pwsh.exe", alloc);
 
     const command: config.Command = .{ .shell = "pwsh.exe /NoProfile" };
     const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
@@ -922,7 +923,7 @@ test "setup powershell: slash version launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
-    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try res.tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "powershell.exe", .data = "" });
     try env.put("PATH", res.path);
 
     const result = try setup(
@@ -951,7 +952,7 @@ fn setupPowerShell(
     );
     defer alloc.free(integration_path);
 
-    std.fs.accessAbsolute(integration_path, .{}) catch return null;
+    std.Io.Dir.accessAbsolute(global.io(), integration_path, .{}) catch return null;
 
     var arg_iter = try command.argIterator(alloc);
     defer arg_iter.deinit();
@@ -992,10 +993,15 @@ const cmd_prompt_user_osc_a = "$E]133;A$E\\";
 // The kitty scheme keeps cmd's unescaped `$P` Windows path intact.
 const cmd_prompt_cwd = "$E]9;9;kitty-shell-cwd://localhost/$P$E\\";
 const cmd_prompt_mark_prefix = cmd_prompt_osc_a ++ cmd_prompt_cwd;
-// cmd never requests Kitty keys or modifyOtherKeys. Recover modes left by
-// an abnormally exited TUI when the shell next owns the terminal. Do not
-// reset on generic OSC 133 A: Kitty-aware shells use it too.
-const cmd_prompt_prefix = "$E[<99u$E[>4;0m" ++ cmd_prompt_mark_prefix;
+// cmd never requests Kitty keys, modifyOtherKeys or Kitty paste events (mode
+// 5522). Recover modes left by an abnormally exited TUI when the shell next
+// owns the terminal: a paste would otherwise reach the prompt as an OSC 5522
+// event. Do not reset on generic OSC 133 A: Kitty-aware shells use it too.
+const cmd_prompt_prefix = "$E[<99u$E[>4;0m$E[?5522l" ++ cmd_prompt_mark_prefix;
+// What releases before the paste-event reset put in front of the prompt. A
+// cmd started from one of them inherits it through PROMPT, and gets today's
+// prefix in its place rather than a second set of resets.
+const cmd_prompt_keyboard_prefix = "$E[<99u$E[>4;0m" ++ cmd_prompt_mark_prefix;
 // What releases before `redraw=0` put in front of the prompt. A cmd started
 // from one of them inherits it through PROMPT, and gets today's prefix in its
 // place rather than a second wrapping.
@@ -1026,7 +1032,13 @@ fn buildCmdPrompt(alloc: Allocator, existing: ?[]const u8) ![]u8 {
         if (std.mem.indexOf(u8, current, cmd_prompt_prefix) != null) {
             return try alloc.dupe(u8, current);
         }
-        for ([_][]const u8{ cmd_prompt_mark_prefix, cmd_prompt_legacy_prefix }) |old_prefix| {
+        // The keyboard-only prefix ends in the mark prefix, so it is looked
+        // for first.
+        for ([_][]const u8{
+            cmd_prompt_keyboard_prefix,
+            cmd_prompt_mark_prefix,
+            cmd_prompt_legacy_prefix,
+        }) |old_prefix| {
             if (std.mem.indexOf(u8, current, old_prefix)) |at| {
                 return try std.mem.concat(alloc, u8, &.{
                     current[0..at],
@@ -1158,7 +1170,7 @@ fn cmdMode(arg: []const u8) ?bool {
 }
 
 fn fileExistsAbsolute(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(global.io(), path, .{}) catch return false;
     return true;
 }
 
@@ -1169,7 +1181,7 @@ test "cmd prompt construction defaults and preserves escapes" {
     defer testing.allocator.free(prompt);
 
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?5522l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
         prompt,
     );
 }
@@ -1181,7 +1193,7 @@ test "cmd prompt construction preserves user prompt" {
     defer testing.allocator.free(prompt);
 
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?5522l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
         prompt,
     );
 }
@@ -1203,7 +1215,7 @@ test "cmd prompt construction separates a dangling trailing dollar" {
     const dangling = try buildCmdPrompt(testing.allocator, "$P$G$");
     defer testing.allocator.free(dangling);
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?5522l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
         dangling,
     );
 
@@ -1211,7 +1223,7 @@ test "cmd prompt construction separates a dangling trailing dollar" {
     const balanced = try buildCmdPrompt(testing.allocator, "$P$G$$");
     defer testing.allocator.free(balanced);
     try testing.expectEqualStrings(
-        "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
+        "$E[<99u$E[>4;0m$E[?5522l$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
         balanced,
     );
 
@@ -1254,6 +1266,32 @@ test "PKG16 cmd prompt upgrades inherited marks without duplicating them" {
     const repeated = try buildCmdPrompt(alloc, upgraded);
     defer alloc.free(repeated);
     try std.testing.expectEqualStrings(expected, repeated);
+}
+
+test "cmd prompt construction upgrades a prompt wrapped before the paste-event reset" {
+    const alloc = std.testing.allocator;
+
+    // A cmd started from a release that reset only the keyboard modes
+    // inherits that PROMPT: it gets the whole reset once, not a second set.
+    const keyboard_only = "$E[<99u$E[>4;0m$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\";
+    const upgraded = try buildCmdPrompt(alloc, keyboard_only);
+    defer alloc.free(upgraded);
+    const fresh = try buildCmdPrompt(alloc, "[$T] $P$_$$ ");
+    defer alloc.free(fresh);
+    try std.testing.expectEqualStrings(fresh, upgraded);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, upgraded, "$E[<99u"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, upgraded, "$E[?5522l"));
+
+    // In place behind Clink's own prefix, and stable once upgraded.
+    const clink = "C\x08L\x08I\x08N\x08K\x08 \x08";
+    const clink_upgraded = try buildCmdPrompt(alloc, clink ++ keyboard_only);
+    defer alloc.free(clink_upgraded);
+    const clink_fresh = try std.mem.concat(alloc, u8, &.{ clink, fresh });
+    defer alloc.free(clink_fresh);
+    try std.testing.expectEqualStrings(clink_fresh, clink_upgraded);
+    const repeated = try buildCmdPrompt(alloc, upgraded);
+    defer alloc.free(repeated);
+    try std.testing.expectEqualStrings(upgraded, repeated);
 }
 
 test "cmd prompt construction upgrades a prompt wrapped before redraw=0" {
@@ -1310,7 +1348,7 @@ fn cmdPromptAfterResizeForTest(alloc: Allocator, prompt: []const u8) ![]const u8
         }
     }
 
-    var t: terminalpkg.Terminal = try .init(alloc, .{ .cols = 20, .rows = 5 });
+    var t: terminalpkg.Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 5 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -1366,7 +1404,7 @@ fn cmdScreenAfterResizeForTest(
         }
     }
 
-    var t: terminalpkg.Terminal = try .init(alloc, .{ .cols = 30, .rows = 8 });
+    var t: terminalpkg.Terminal = try .init(std.testing.io, alloc, .{ .cols = 30, .rows = 8 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -1470,13 +1508,13 @@ test "cmd Clink setup fails closed for semicolon integration path" {
 
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    try tmp_dir.dir.makePath("resources;unsafe/shell-integration/cmd");
-    try tmp_dir.dir.writeFile(.{
+    try tmp_dir.dir.createDirPath(std.testing.io, "resources;unsafe/shell-integration/cmd");
+    try tmp_dir.dir.writeFile(std.testing.io, .{
         .sub_path = "resources;unsafe/shell-integration/cmd/noctty-shell-integration.lua",
         .data = "",
     });
 
-    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const root = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     const resource_dir = try std.fs.path.join(alloc, &.{ root, "resources;unsafe" });
 
     var env = EnvMap.init(alloc);
@@ -1513,7 +1551,7 @@ test "PKG48 cmd exposes Clink script without an installed executable" {
     _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
     try testing.expectEqualStrings(expected, env.get("CLINK_PATH").?);
 
-    try resources.tmp_dir.dir.deleteFile("shell-integration/cmd/noctty-shell-integration.lua");
+    try resources.tmp_dir.dir.deleteFile(std.testing.io, "shell-integration/cmd/noctty-shell-integration.lua");
     try env.put("CLINK_PATH", "C:\\trusted\\scripts");
     _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
     try testing.expectEqualStrings("C:\\trusted\\scripts", env.get("CLINK_PATH").?);
@@ -1566,10 +1604,10 @@ pub fn setupFeatures(
     features: config.ShellIntegrationFeatures,
     cursor_blink: bool,
 ) !void {
-    const fields = @typeInfo(@TypeOf(features)).@"struct".fields;
+    const field_names = @typeInfo(@TypeOf(features)).@"struct".field_names;
     const capacity: usize = capacity: {
-        comptime var n: usize = fields.len - 1; // commas
-        inline for (fields) |field| n += field.name.len;
+        comptime var n: usize = field_names.len - 1; // commas
+        inline for (field_names) |name| n += name.len;
         n += ":steady".len; // cursor value
         break :capacity n;
     };
@@ -1579,9 +1617,8 @@ pub fn setupFeatures(
 
     // Sort the fields so that the output is deterministic. This is
     // done at comptime so it has no runtime cost
-    const fields_sorted: [fields.len][]const u8 = comptime fields: {
-        var fields_sorted: [fields.len][]const u8 = undefined;
-        for (fields, 0..) |field, i| fields_sorted[i] = field.name;
+    const fields_sorted: [field_names.len][]const u8 = comptime fields: {
+        var fields_sorted: [field_names.len][]const u8 = field_names.*;
         std.mem.sortUnstable(
             []const u8,
             &fields_sorted,
@@ -1678,7 +1715,7 @@ const IntegrationCommandBuilder = struct {
 
     fn appendArg(self: *IntegrationCommandBuilder, arg: []const u8) !void {
         if (builtin.os.tag != .windows and arg.len == 0) return;
-        try self.args.append(self.alloc, try self.alloc.dupeZ(u8, arg));
+        try self.args.append(self.alloc, try self.alloc.dupeSentinel(u8, arg, 0));
     }
 
     fn finish(self: *IntegrationCommandBuilder) !config.Command {
@@ -1796,18 +1833,18 @@ fn setupBashWithLaunchForm(
     }
 
     // Set our new ENV to point to our integration script.
-    var script_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(
+    var script_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const script_path = try std.mem.print(
         &script_path_buf,
         "{s}/shell-integration/bash/ghostty.bash",
         .{resource_dir},
     );
-    if (std.fs.openFileAbsolute(script_path, .{})) |file| {
-        file.close();
+    if (std.Io.Dir.openFileAbsolute(global.io(), script_path, .{ .allow_directory = false })) |file| {
+        file.close(global.io());
         try env.put("ENV", script_path);
     } else |err| {
         log.warn("unable to open {s}: {}", .{ script_path, err });
-        env.remove("GHOSTTY_BASH_ENV");
+        _ = env.swapRemove("GHOSTTY_BASH_ENV");
         return null;
     }
 
@@ -1819,10 +1856,12 @@ fn setupBashWithLaunchForm(
     // In POSIX mode, HISTFILE defaults to ~/.sh_history, so unless we're
     // staying in POSIX mode (--posix), change it back to ~/.bash_history.
     if (env.get("HISTFILE") == null) {
+        var environ_map = try global.environMap();
+        defer environ_map.deinit();
         var home_buf: [1024]u8 = undefined;
-        if (try homedir.home(&home_buf)) |home| {
-            var histfile_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const histfile = try std.fmt.bufPrint(
+        if (try homedir.home(global.io(), &environ_map, &home_buf)) |home| {
+            var histfile_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const histfile = try std.mem.print(
                 &histfile_buf,
                 "{s}/.bash_history",
                 .{home},
@@ -1843,7 +1882,7 @@ test "PKG17 WSL's bash.exe launcher gets no bash injection" {
     const alloc = arena.allocator();
     var res: TmpResourcesDir = try .init(alloc, .bash);
     defer res.deinit();
-    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    const system_root = try std.testing.environ.getAlloc(alloc, "SystemRoot");
     const launchers = [_][]const u8{
         try std.fs.path.join(alloc, &.{ system_root, "System32", "bash.exe" }),
         "C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe",
@@ -1851,7 +1890,7 @@ test "PKG17 WSL's bash.exe launcher gets no bash injection" {
     for (launchers) |launcher| {
         var env = EnvMap.init(alloc);
         const result = try setup(alloc, res.path, .{
-            .direct = &.{ try alloc.dupeZ(u8, launcher), "--login", "-i" },
+            .direct = &.{ try alloc.dupeSentinel(u8, launcher, 0), "--login", "-i" },
         }, &env, null, false);
         try std.testing.expect(result == null);
         // Nothing was injected, so the launcher's environment is untouched.
@@ -1895,7 +1934,7 @@ test "bash" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1905,9 +1944,9 @@ test "bash" {
     try expectIntegratedCommand("bash --posix", command.?);
     try testing.expectEqualStrings("1", env.get("GHOSTTY_BASH_INJECT").?);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path}),
+        try std.mem.print(&path_buf, "{s}/ghostty.bash", .{res.shell_path}),
         env.get("ENV").?,
     );
 }
@@ -1918,7 +1957,7 @@ test "bash: unsupported options" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     const cmdlines = [_][:0]const u8{
@@ -1944,7 +1983,7 @@ test "bash: inject flags" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     // bash --norc
@@ -1974,7 +2013,7 @@ test "bash: rcfile" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -2001,7 +2040,7 @@ test "bash: HISTFILE" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     // HISTFILE unset
@@ -2033,7 +2072,7 @@ test "bash: ENV" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -2044,9 +2083,9 @@ test "bash: ENV" {
     _ = try setupBash(alloc, .{ .shell = "bash" }, res.path, &env);
     try testing.expectEqualStrings("env.sh", env.get("GHOSTTY_BASH_ENV").?);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path}),
+        try std.mem.print(&path_buf, "{s}/ghostty.bash", .{res.shell_path}),
         env.get("ENV").?,
     );
 }
@@ -2057,7 +2096,7 @@ test "bash: additional arguments" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .bash);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -2085,7 +2124,7 @@ test "bash: missing resources" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", alloc);
     defer alloc.free(resources_dir);
 
     var env = EnvMap.init(alloc);
@@ -2107,19 +2146,23 @@ fn setupXdgDataDirs(
     resource_dir: []const u8,
     env: *EnvMap,
 ) !bool {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     // Get our path to the shell integration directory.
-    const integ_path = try std.fmt.bufPrint(
+    const integ_path = try std.mem.print(
         &path_buf,
         "{s}/shell-integration",
         .{resource_dir},
     );
-    var integ_dir = std.fs.openDirAbsolute(integ_path, .{}) catch |err| {
+    var integ_dir = std.Io.Dir.openDirAbsolute(
+        global.io(),
+        integ_path,
+        .{},
+    ) catch |err| {
         log.warn("unable to open {s}: {}", .{ integ_path, err });
         return false;
     };
-    integ_dir.close();
+    integ_dir.close(global.io());
 
     // Set an env var so we can remove this from XDG_DATA_DIRS later.
     // This happens in the shell integration config itself. We do this
@@ -2131,8 +2174,9 @@ fn setupXdgDataDirs(
     // 4K is a reasonable size for this for most cases. However, env
     // vars can be significantly larger so if we have to we fall
     // back to a heap allocated value.
-    var stack_alloc_state = std.heap.stackFallback(4096, alloc);
-    const stack_alloc = stack_alloc_state.get();
+    var stack_alloc_state_buf: [4096]u8 = undefined;
+    var stack_alloc_state: std.heap.BufferFirstAllocator = .init(&stack_alloc_state_buf, alloc);
+    const stack_alloc = stack_alloc_state.allocator();
 
     // If no XDG_DATA_DIRS set use the default value as specified.
     // This ensures that the default directories aren't lost by setting
@@ -2141,7 +2185,7 @@ fn setupXdgDataDirs(
     const xdg_data_dirs_key = "XDG_DATA_DIRS";
     try env.put(
         xdg_data_dirs_key,
-        try internal_os.prependEnv(
+        try prependEnv(
             stack_alloc,
             env.get(xdg_data_dirs_key) orelse
                 (if (builtin.os.tag == .windows) "" else "/usr/local/share:/usr/share"),
@@ -2152,8 +2196,25 @@ fn setupXdgDataDirs(
     return true;
 }
 
+/// Prepend a value to an environment variable such as PATH.
+/// The returned value is always allocated so it must be freed.
+fn prependEnv(
+    alloc: Allocator,
+    current: []const u8,
+    value: []const u8,
+) Allocator.Error![]u8 {
+    // If there is no prior value, we return it as-is
+    if (current.len == 0) return try alloc.dupe(u8, value);
+
+    return try alloc.print("{s}{c}{s}", .{
+        value,
+        std.fs.path.delimiter,
+        current,
+    });
+}
+
 test "xdg: empty XDG_DATA_DIRS" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
 
@@ -2161,7 +2222,7 @@ test "xdg: empty XDG_DATA_DIRS" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .fish);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .fish);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -2169,19 +2230,19 @@ test "xdg: empty XDG_DATA_DIRS" {
 
     try testing.expect(try setupXdgDataDirs(alloc, res.path, &env));
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?,
     );
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration:/usr/local/share:/usr/share", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration:/usr/local/share:/usr/share", .{res.path}),
         env.get("XDG_DATA_DIRS").?,
     );
 }
 
 test "xdg: existing XDG_DATA_DIRS" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
 
@@ -2189,7 +2250,7 @@ test "xdg: existing XDG_DATA_DIRS" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .fish);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .fish);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -2199,13 +2260,13 @@ test "xdg: existing XDG_DATA_DIRS" {
 
     try testing.expect(try setupXdgDataDirs(alloc, res.path, &env));
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?,
     );
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration:/opt/share", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration:/opt/share", .{res.path}),
         env.get("XDG_DATA_DIRS").?,
     );
 }
@@ -2239,7 +2300,7 @@ test "xdg: missing resources" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", alloc);
     defer alloc.free(resources_dir);
 
     var env = EnvMap.init(alloc);
@@ -2268,8 +2329,8 @@ fn setupNushell(
         const path = try std.fs.path.join(alloc, &.{
             resource_dir, "shell-integration", "nushell", "vendor", "autoload", "ghostty.nu",
         });
-        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
-        file.close();
+        const file = std.Io.Dir.openFileAbsolute(global.io(), path, .{ .allow_directory = false }) catch return null;
+        file.close(global.io());
         break :module path;
     } else null;
     if (builtin.os.tag != .windows and !try setupXdgDataDirs(alloc, resource_dir, env)) return null;
@@ -2364,7 +2425,7 @@ test "nushell" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .nushell);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .nushell);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -2379,14 +2440,14 @@ test "nushell" {
     }
     try expectIntegratedCommand("nu --execute 'use ghostty *'", command.?);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?,
     );
     try testing.expectStringStartsWith(
         env.get("XDG_DATA_DIRS").?,
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
     );
 }
 
@@ -2396,7 +2457,7 @@ test "nushell: unsupported options" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .nushell);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .nushell);
     defer res.deinit();
 
     const cmdlines = [_][:0]const u8{
@@ -2425,7 +2486,7 @@ test "nushell: missing resources" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", alloc);
     defer alloc.free(resources_dir);
 
     var env = EnvMap.init(alloc);
@@ -2450,17 +2511,21 @@ fn setupZsh(
     }
 
     // Set our new ZDOTDIR to point to our shell resource directory.
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const integ_path = try std.fmt.bufPrint(
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const integ_path = try std.mem.print(
         &path_buf,
         "{s}/shell-integration/zsh",
         .{resource_dir},
     );
-    var integ_dir = std.fs.openDirAbsolute(integ_path, .{}) catch |err| {
+    var integ_dir = std.Io.Dir.openDirAbsolute(
+        global.io(),
+        integ_path,
+        .{},
+    ) catch |err| {
         log.warn("unable to open {s}: {}", .{ integ_path, err });
         return null;
     };
-    integ_dir.close();
+    integ_dir.close(global.io());
     try env.put("ZDOTDIR", integ_path);
 
     return try command.clone(alloc);
@@ -2473,7 +2538,7 @@ test "zsh" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(testing.allocator, .zsh);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .zsh);
     defer res.deinit();
 
     var env = EnvMap.init(testing.allocator);
@@ -2492,7 +2557,7 @@ test "zsh: ZDOTDIR" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(testing.allocator, .zsh);
+    var res: TmpResourcesDir = try .init(std.testing.allocator, .zsh);
     defer res.deinit();
 
     var env = EnvMap.init(testing.allocator);
@@ -2515,7 +2580,7 @@ test "zsh: missing resources" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", alloc);
     defer alloc.free(resources_dir);
 
     var env = EnvMap.init(alloc);
@@ -2551,47 +2616,46 @@ test "the shell-integration scripts have LF line endings in every checkout" {
 const TmpResourcesDir = struct {
     allocator: Allocator,
     tmp_dir: std.testing.TmpDir,
-    path: []const u8,
+    path: [:0]const u8,
     shell_path: []const u8,
 
     fn init(allocator: Allocator, shell: Shell) !TmpResourcesDir {
         var tmp_dir = std.testing.tmpDir(.{});
         errdefer tmp_dir.cleanup();
 
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const relative_shell_path = try std.fmt.bufPrint(
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const relative_shell_path = try std.mem.print(
             &path_buf,
             "shell-integration/{s}",
             .{@tagName(shell)},
         );
-        try tmp_dir.dir.makePath(relative_shell_path);
+        try tmp_dir.dir.createDirPath(std.testing.io, relative_shell_path);
 
-        const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+        const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
         errdefer allocator.free(path);
 
-        const shell_path = try std.fmt.allocPrint(
-            allocator,
+        const shell_path = try allocator.print(
             "{s}/{s}",
             .{ path, relative_shell_path },
         );
         errdefer allocator.free(shell_path);
 
         switch (shell) {
-            .bash => try tmp_dir.dir.writeFile(.{
+            .bash => try tmp_dir.dir.writeFile(std.testing.io, .{
                 .sub_path = "shell-integration/bash/ghostty.bash",
                 .data = "",
             }),
-            .powershell => try tmp_dir.dir.writeFile(.{
+            .powershell => try tmp_dir.dir.writeFile(std.testing.io, .{
                 .sub_path = "shell-integration/powershell/integration.ps1",
                 .data = "",
             }),
-            .cmd => try tmp_dir.dir.writeFile(.{
+            .cmd => try tmp_dir.dir.writeFile(std.testing.io, .{
                 .sub_path = "shell-integration/cmd/noctty-shell-integration.lua",
                 .data = "",
             }),
             .nushell => {
-                try tmp_dir.dir.makePath("shell-integration/nushell/vendor/autoload");
-                try tmp_dir.dir.writeFile(.{
+                try tmp_dir.dir.createDirPath(std.testing.io, "shell-integration/nushell/vendor/autoload");
+                try tmp_dir.dir.writeFile(std.testing.io, .{
                     .sub_path = "shell-integration/nushell/vendor/autoload/ghostty.nu",
                     .data = "export module ghostty {}",
                 });

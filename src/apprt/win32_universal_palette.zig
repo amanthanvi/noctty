@@ -89,7 +89,7 @@ pub fn parseQuery(raw: []const u8) ParsedQuery {
     if (text.len == 0) return .{ .filter = null, .text = text };
     for (prefixes) |prefix| {
         if (text[0] == prefix.value) {
-            text = std.mem.trimLeft(u8, text[1..], " \t");
+            text = std.mem.trimStart(u8, text[1..], " \t");
             return .{ .filter = prefix.kind, .text = text };
         }
     }
@@ -286,7 +286,7 @@ fn isBoundary(value: u8) bool {
 fn better(a: Ranked, b: Ranked) bool {
     if (a.enabled != b.enabled) return a.enabled;
     if (a.score != b.score) return a.score > b.score;
-    if (a.id.kind != b.id.kind) return @intFromEnum(a.id.kind) < @intFromEnum(b.id.kind);
+    if (a.id.kind != b.id.kind) return @backingInt(a.id.kind) < @backingInt(b.id.kind);
     if (a.id.value != b.id.value) return a.id.value < b.id.value;
     return a.index < b.index;
 }

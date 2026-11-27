@@ -12,6 +12,7 @@ const inputpkg = @import("../input.zig");
 const monotonic = @import("../os/monotonic.zig");
 const StateMutex = @import("../sync/state_mutex.zig").StateMutex;
 const thread_role = @import("../sync/thread_role.zig");
+const global = @import("../global.zig");
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
@@ -144,7 +145,7 @@ pub fn unlockDemand(self: anytype) void {
     self.mutex.unlock();
     if (comptime signalsDemand(@TypeOf(self))) {
         _ = self.handoff_gen.fetchAdd(1, .monotonic);
-        std.Thread.Futex.wake(&self.handoff_gen, 1);
+        global.io().futexWake(u32, &self.handoff_gen.raw, 1);
     }
 }
 
@@ -168,7 +169,7 @@ fn signalsDemand(comptime Receiver: type) bool {
 /// scheduling heuristic, not a synchronization boundary: the mutex
 /// itself orders the protected data, and the timeout bounds any
 /// staleness.
-pub fn yieldToDemand(self: *State) void {
+pub fn yieldToDemand(self: *State, io: std.Io) void {
     if (self.demand.load(.monotonic) == 0) return;
 
     // Snapshot the generation before rechecking demand: if the waiter
@@ -176,10 +177,11 @@ pub fn yieldToDemand(self: *State) void {
     // generation no longer matches and timedWait returns immediately.
     const gen = self.handoff_gen.load(.monotonic);
     if (self.demand.load(.monotonic) == 0) return;
-    std.Thread.Futex.timedWait(
-        &self.handoff_gen,
+    io.futexWaitTimeout(
+        u32,
+        &self.handoff_gen.raw,
         gen,
-        handoff_timeout_ns,
+        .{ .duration = .{ .raw = .fromNanoseconds(handoff_timeout_ns), .clock = .awake } },
     ) catch {};
 }
 
@@ -229,7 +231,7 @@ pub const WakeSource = enum(u5) {
     inspector,
 
     pub fn bit(self: WakeSource) u32 {
-        return @as(u32, 1) << @intFromEnum(self);
+        return @as(u32, 1) << @backingInt(self);
     }
 };
 

@@ -30,7 +30,13 @@ if internal and type(internal._filter_prompt) == "function" and
             -- by the rows its last drawing takes at the new width, so the
             -- terminal must keep those rows and reflow them as the console
             -- does, not clear them.
-            local prefix = ESC .. "[<99u" .. ESC .. "[>4;0m" ..
+            -- cmd never requests Kitty keys, modifyOtherKeys or Kitty paste
+            -- events (mode 5522), so whatever a TUI left set when it exited
+            -- is reset here, now that the shell owns input: a paste would
+            -- otherwise reach the prompt as an OSC 5522 event. Only these
+            -- marks reset modes: a generic OSC 133 A must not, since
+            -- Kitty-aware shells send it too.
+            local prefix = ESC .. "[<99u" .. ESC .. "[>4;0m" .. ESC .. "[?5522l" ..
                 ESC .. "]133;A;redraw=0" .. BEL ..
                 ESC .. "]9;9;kitty-shell-cwd://localhost/" .. os.getcwd() .. BEL
             prompt = prefix .. prompt .. ESC .. "]133;B" .. BEL

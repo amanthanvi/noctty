@@ -505,7 +505,7 @@ test "libxev runs a due timer before an async wake notified in the same pass" {
     var wakeup_c: xev.Completion = .{};
     wakeup.wait(&loop, &wakeup_c, Order, &order, Order.onWake);
     timer.run(&loop, &timer_c, 1, Order, &order, Order.onTimer);
-    std.Thread.sleep(20 * ns_per_ms);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
     try wakeup.notify();
     try loop.run(.once);
     try std.testing.expectEqualStrings("TW", order.seen[0..order.len]);

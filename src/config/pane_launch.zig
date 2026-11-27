@@ -27,6 +27,7 @@ const ProfileMap = @import("profile_map.zig");
 const windows_shell = @import("windows_shell.zig");
 const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
 
 const cli = struct {
@@ -276,8 +277,10 @@ fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell
 /// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
 fn homeDirectory(pane: *Config, profile: *const windows_shell.Profile) !Config.WorkingDirectory {
     if (windows_shell.isWslCommand(profile.command)) return .home;
+    var environ_map = try global.environMap();
+    defer environ_map.deinit();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (internal_os.home(&buf) catch null) orelse return .home;
+    const home = (internal_os.home(global.io(), &environ_map, &buf) catch null) orelse return .home;
     return .{ .path = try pane._arena.?.allocator().dupe(u8, home) };
 }
 
@@ -309,21 +312,21 @@ pub fn note(config: *Config, alloc: Allocator, arg: []const u8, iter: anytype) A
         const location = try cli.Location.fromIter(iter, alloc);
         config._launch.command_from = .layer;
         config._launch.command_from_file = location == .file;
-        if (location == .cli) config._launch.command_cli = try alloc.dupeZ(u8, value);
+        if (location == .cli) config._launch.command_cli = try alloc.dupeSentinel(u8, value, 0);
     }
     if (std.mem.startsWith(u8, arg, "--initial-command=")) {
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
             if (try takenCliValue(config, "initial-command", arg)) |value| {
-                config._launch.initial_command_cli = try alloc.dupeZ(u8, value);
+                config._launch.initial_command_cli = try alloc.dupeSentinel(u8, value, 0);
             }
         }
     }
     if (std.mem.startsWith(u8, arg, "--default-profile=")) {
         const value = arg["--default-profile=".len..];
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
-            config._launch.default_profile_cli = try alloc.dupeZ(u8, value);
+            config._launch.default_profile_cli = try alloc.dupeSentinel(u8, value, 0);
         } else {
-            config._launch.default_profile_file = if (value.len == 0) null else try alloc.dupeZ(u8, value);
+            config._launch.default_profile_file = if (value.len == 0) null else try alloc.dupeSentinel(u8, value, 0);
         }
     }
     // The place a profile line writes, for a problem only finalize sees.
@@ -349,15 +352,15 @@ pub fn consume(
     const refused: ?[:0]const u8 = if (location == .file) "unknown field" else if (eq == 0) "value required" else null;
     if (refused) |message| {
         try config._diagnostics.append(alloc, .{
-            .key = try alloc.dupeZ(u8, "elevated-profile-env"),
+            .key = try alloc.dupeSentinel(u8, "elevated-profile-env", 0),
             .message = message,
             .location = location,
         });
         return true;
     }
     try config._launch.elevated_profile_env.append(alloc, .{
-        .key = try alloc.dupeZ(u8, value[0..eq]),
-        .value = try alloc.dupeZ(u8, value[eq + 1 ..]),
+        .key = try alloc.dupeSentinel(u8, value[0..eq], 0),
+        .value = try alloc.dupeSentinel(u8, value[eq + 1 ..], 0),
     });
     return true;
 }
@@ -947,7 +950,7 @@ pub const Ledger = struct {
     /// been read, so an `env` line in an included file cannot replace them,
     /// as it would replace an `--env` argument. Not a field: a config file
     /// line that names it is reported as an unknown field and ignored.
-    elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
+    elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .empty,
 
     /// Where each `profile-*` (key, id) was last written, for the problems
     /// `finalize` reports (`profilePlace`). Recorded by `note`, so a config
@@ -983,7 +986,7 @@ pub const Ledger = struct {
 };
 
 fn dupeOptional(alloc: Allocator, value: ?[:0]const u8) Allocator.Error!?[:0]const u8 {
-    return if (value) |text| try alloc.dupeZ(u8, text) else null;
+    return if (value) |text| try alloc.dupeSentinel(u8, text, 0) else null;
 }
 
 const DefaultProfileFailure = enum {
@@ -1063,7 +1066,7 @@ pub const fixtures = struct {
         pub fn defaultShell(self: Machine, alloc: Allocator) !?Command {
             const path = self.default_shell orelse return null;
             const argv = try alloc.alloc([:0]const u8, 1);
-            argv[0] = try alloc.dupeZ(u8, path);
+            argv[0] = try alloc.dupeSentinel(u8, path, 0);
             return .{ .direct = argv };
         }
     };
@@ -1759,11 +1762,11 @@ test "finalize-time profile problems are there once, at their lines, after a the
     // replay before the conditional replays below.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background = #000000\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "background = #ffffff\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "background = #000000\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark_theme = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark_theme);
     const Want = struct { key: []const u8, line: usize, message: []const u8 };
     const cases = [_]struct { body: []const u8, want: []const Want }{
@@ -1866,7 +1869,7 @@ test "elevated profile env is taken from the command line, over env, and kept on
     const alloc = testing.allocator;
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         alloc,
         "--elevated-profile-env=PATH=p=1 --env=Path=global --env=KEEP=1 --elevated-profile-env=nothing --elevated-profile-env=KEEP=",
     );
@@ -2094,8 +2097,8 @@ test "keepSources: a config built again from the files keeps the running launch"
     // again from its replay steps, as a palette theme preview's does.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "preview-theme", alloc);
     defer alloc.free(theme);
 
     // The running config: `default-profile = py`, resolved.
@@ -2295,7 +2298,7 @@ test "prepare: a chosen profile starts in home unless it pins a directory or inh
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
-    var cfg = try fixtures.load(alloc, .{ .file = 
+    var cfg = try fixtures.load(alloc, .{ .file =
         \\env = Path=C:\global
         \\env = KEEP=1
         \\profile-command = plain: cmd.exe /k echo "a&b"
@@ -2318,8 +2321,10 @@ test "prepare: a chosen profile starts in home unless it pins a directory or inh
     cfg.command = .{ .shell = "pwsh.exe" };
     const profiles = try testUserProfiles(alloc, &cfg);
     defer windows_shell.deinitProfiles(alloc, profiles);
+    var environ_map = try std.testing.environ.createMap(alloc);
+    defer environ_map.deinit();
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    const home = (try internal_os.home(std.testing.io, &environ_map, &home_buf)) orelse return error.SkipZigTest;
 
     // Home as a path: a bare `.home` on a pane's config would start in
     // noctty's own folder. A wsl.exe launch keeps `.home`, which gives
@@ -2510,8 +2515,10 @@ test "prepare: a split starts the source's profile as it is defined now" {
     defer cfg.deinit();
     const profiles = try testUserProfiles(alloc, &cfg);
     defer windows_shell.deinitProfiles(alloc, profiles);
+    var environ_map = try std.testing.environ.createMap(alloc);
+    defer environ_map.deinit();
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    const home = (try internal_os.home(std.testing.io, &environ_map, &home_buf)) orelse return error.SkipZigTest;
 
     // The split's own directory inheritance comes after `prepare`; before
     // it, a profile with no pinned directory keeps the ordinary rules' one
@@ -2577,8 +2584,10 @@ test "prepare: a restored pane runs its saved profile, and never connects over S
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
+    var environ_map = try std.testing.environ.createMap(alloc);
+    defer environ_map.deinit();
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    const home = (try internal_os.home(std.testing.io, &environ_map, &home_buf)) orelse return error.SkipZigTest;
     var cfg = try fixtures.load(alloc, .{ .file = test_source_profiles, .argv = &.{ "-e", "vim.exe" } });
     defer cfg.deinit();
     var plain = try fixtures.load(alloc, .{ .file = "profile-command = vs18-cmd: cmd.exe /k VsDevCmd.bat\n" });

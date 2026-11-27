@@ -88,19 +88,19 @@ fn initSampled(opts: Options) !Self {
     const tex = try gl.Texture.create();
     errdefer tex.destroy();
     {
-        const texbind = try tex.bind(.@"2D");
+        const texbind = try tex.bind(.@"2d");
         defer texbind.unbind();
-        try texbind.parameter(.MinFilter, @as(gl.c.GLint, gl.c.GL_NEAREST));
-        try texbind.parameter(.MagFilter, @as(gl.c.GLint, gl.c.GL_NEAREST));
-        try texbind.parameter(.WrapS, @as(gl.c.GLint, gl.c.GL_CLAMP_TO_EDGE));
-        try texbind.parameter(.WrapT, @as(gl.c.GLint, gl.c.GL_CLAMP_TO_EDGE));
+        try texbind.parameter(.min_filter, .nearest);
+        try texbind.parameter(.mag_filter, .nearest);
+        try texbind.parameter(.wrap_s, .clamp_to_edge);
+        try texbind.parameter(.wrap_t, .clamp_to_edge);
         try texbind.image2D(
             0,
             opts.internal_format,
             @intCast(opts.width),
             @intCast(opts.height),
             .rgba,
-            .UnsignedByte,
+            .unsigned_byte,
             null,
         );
     }
@@ -109,7 +109,7 @@ fn initSampled(opts: Options) !Self {
     errdefer fbo.destroy();
     const bound_fbo = try fbo.bind(.framebuffer);
     defer bound_fbo.unbind();
-    try bound_fbo.texture2D(.color0, .@"2D", tex, 0);
+    try bound_fbo.texture2D(.color0, .@"2d", tex, 0);
 
     return .{
         .storage = .offscreen,

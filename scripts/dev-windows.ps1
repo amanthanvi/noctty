@@ -62,19 +62,19 @@ foreach ($version in @("18", "2022")) {
 }
 
 if (-not $env:ZIG_HOME) {
-    $candidate = Join-Path $userHome "tools\zig-0.15.2"
+    $candidate = Join-Path $userHome "tools\zig-0.17.1"
     if (Test-Path (Join-Path $candidate "zig.exe")) {
         $env:ZIG_HOME = $candidate
     }
 }
 if (-not $env:ZIG_HOME) {
-    $candidate = Join-Path $userHome "tools\zig-aarch64-windows-0.15.2"
+    $candidate = Join-Path $userHome "tools\zig-aarch64-windows-0.17.1"
     if (Test-Path (Join-Path $candidate "zig.exe")) {
         $env:ZIG_HOME = $candidate
     }
 }
 if (-not $env:ZIG_HOME) {
-    $candidate = Join-Path $userHome "tools\zig-x86_64-windows-0.15.2"
+    $candidate = Join-Path $userHome "tools\zig-x86_64-windows-0.17.1"
     if (Test-Path (Join-Path $candidate "zig.exe")) {
         $env:ZIG_HOME = $candidate
     }
@@ -109,7 +109,7 @@ if (-not (Test-Path (Join-Path $gitUsrBin "sh.exe"))) {
     throw "Missing Git runtime under $gitUsrBin"
 }
 if (-not $env:ZIG_HOME) {
-    throw "Zig 0.15.2+ not found. Set ZIG_HOME or install Zig under $userHome\tools\zig or $programFiles\Zig."
+    throw "Zig 0.17.1+ not found. Set ZIG_HOME or install Zig under $userHome\tools\zig or $programFiles\Zig."
 }
 if (-not (Test-Path (Join-Path $env:ZIG_HOME "zig.exe"))) {
     throw "Missing zig.exe under $env:ZIG_HOME"
@@ -149,6 +149,11 @@ where zig || exit /b 1
 git --version || exit /b 1
 zig version || exit /b 1
 cl 2>&1 | findstr /c:"Version" || exit /b 1
+for /f %%v in ('zig version') do set "ZIG_VERSION=%%v"
+echo %ZIG_VERSION% | findstr /b /c:"0.17." >nul || (
+echo noctty currently requires Zig 0.17.x. Resolved: %ZIG_VERSION%
+exit /b 1
+)
 echo == WSL ==
 if "%DEV_WINDOWS_CHECK_WSL%"=="1" (
 wsl.exe --status || exit /b 1

@@ -14,7 +14,7 @@ const sys = @import("win32/sys.zig");
 
 pub const HANDLE = windows.HANDLE;
 pub const DWORD = windows.DWORD;
-pub const BOOL = windows.BOOL;
+pub const BOOL = win32_types.BOOL;
 pub const SIZE_T = windows.SIZE_T;
 pub const SECURITY_ATTRIBUTES = windows.SECURITY_ATTRIBUTES;
 pub const LPCWSTR = win32_types.LPCWSTR;
@@ -178,15 +178,15 @@ test "win32 job object ABI declarations match expected Win32 values" {
     const create_fn = @typeInfo(@TypeOf(CreateJobObjectW)).@"fn";
     const set_info_fn = @typeInfo(@TypeOf(SetInformationJobObject)).@"fn";
 
-    try std.testing.expectEqual(@as(i32, 9), @intFromEnum(JOBOBJECTINFOCLASS.extended_limit_information));
-    try std.testing.expectEqual(@as(i32, 3), @intFromEnum(JOBOBJECTINFOCLASS.basic_process_id_list));
+    try std.testing.expectEqual(@as(i32, 9), @backingInt(JOBOBJECTINFOCLASS.extended_limit_information));
+    try std.testing.expectEqual(@as(i32, 3), @backingInt(JOBOBJECTINFOCLASS.basic_process_id_list));
     try std.testing.expectEqual(@as(DWORD, 0x00000008), JOB_OBJECT_LIMIT_ACTIVE_PROCESS);
     try std.testing.expectEqual(@as(DWORD, 0x00000200), JOB_OBJECT_LIMIT_JOB_MEMORY);
     try std.testing.expectEqual(@as(DWORD, 0x00002000), JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
-    try std.testing.expect(create_fn.params[0].type.? == ?*SECURITY_ATTRIBUTES);
-    try std.testing.expect(create_fn.params[1].type.? == ?LPCWSTR);
+    try std.testing.expect(create_fn.param_types[0].? == ?*SECURITY_ATTRIBUTES);
+    try std.testing.expect(create_fn.param_types[1].? == ?LPCWSTR);
     try std.testing.expect(create_fn.return_type.? == ?HANDLE);
-    try std.testing.expect(set_info_fn.params[2].type.? == *const anyopaque);
+    try std.testing.expect(set_info_fn.param_types[2].? == *const anyopaque);
 }
 
 test "win32 job object ABI layouts stay compatible on x64" {

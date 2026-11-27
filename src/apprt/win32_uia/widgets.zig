@@ -1708,7 +1708,7 @@ pub const SettingsControlProvider = struct {
     fn requestAction(self: *SettingsControlProvider, action: Action, index: isize) com.HRESULT {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         var result: usize = 0;
-        if (SendMessageTimeoutW(self.hwnd, action_message, @intFromEnum(action), index, SMTO_BLOCK | SMTO_ABORTIFHUNG, settings_selection_timeout_ms, &result) == 0)
+        if (SendMessageTimeoutW(self.hwnd, action_message, @backingInt(action), index, SMTO_BLOCK | SMTO_ABORTIFHUNG, settings_selection_timeout_ms, &result) == 0)
             return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (result == action_success) return com.S_OK;
         if (result == 0) return com.UIA_E_ELEMENTNOTAVAILABLE;
@@ -1721,7 +1721,7 @@ pub const SettingsControlProvider = struct {
     pub fn handleAction(self: *SettingsControlProvider, raw_action: usize, index: isize) com.HRESULT {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (IsWindowEnabled(self.hwnd) == 0) return com.UIA_E_ELEMENTNOTENABLED;
-        const action = std.meta.intToEnum(Action, raw_action) catch return com.E_INVALIDARG;
+        const action = std.enums.fromInt(Action, raw_action) orelse return com.E_INVALIDARG;
         const parent = GetParent(self.hwnd) orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
         switch (action) {
             .toggle => {
@@ -1852,6 +1852,15 @@ pub fn returnSettingsControlProvider(
     return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 /// Selection container for the settings window's native section radio buttons.
 /// The section providers retain this object; it only borrows their pointers while
 /// attached, so teardown cannot form a COM reference cycle.
@@ -1863,7 +1872,7 @@ pub const SettingsSectionGroupProvider = struct {
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
-    sections_mutex: std.Thread.Mutex,
+    sections_mutex: std.Io.Mutex,
     sections: [settings_section_count]?*SettingsSectionProvider,
     selected_index: std.atomic.Value(u8),
     detached: std.atomic.Value(bool),
@@ -1896,8 +1905,8 @@ pub const SettingsSectionGroupProvider = struct {
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .hwnd = hwnd,
-            .sections_mutex = .{},
-            .sections = [_]?*SettingsSectionProvider{null} ** settings_section_count,
+            .sections_mutex = .init,
+            .sections = @as([settings_section_count]?*SettingsSectionProvider, @splat(null)),
             .selected_index = .init(std.math.maxInt(u8)),
             .detached = std.atomic.Value(bool).init(false),
             .disconnected = std.atomic.Value(bool).init(false),
@@ -1906,8 +1915,8 @@ pub const SettingsSectionGroupProvider = struct {
     }
 
     pub fn setSection(self: *SettingsSectionGroupProvider, index: usize, section: *SettingsSectionProvider) void {
-        self.sections_mutex.lock();
-        defer self.sections_mutex.unlock();
+        self.sections_mutex.lockUncancelable(mutexIo());
+        defer self.sections_mutex.unlock(mutexIo());
         if (index < self.sections.len) self.sections[index] = section;
     }
 
@@ -1918,9 +1927,9 @@ pub const SettingsSectionGroupProvider = struct {
     pub fn detach(self: *SettingsSectionGroupProvider) void {
         self.detached.store(true, .release);
         self.selected_index.store(std.math.maxInt(u8), .release);
-        self.sections_mutex.lock();
-        defer self.sections_mutex.unlock();
-        self.sections = [_]?*SettingsSectionProvider{null} ** settings_section_count;
+        self.sections_mutex.lockUncancelable(mutexIo());
+        defer self.sections_mutex.unlock(mutexIo());
+        self.sections = @as([settings_section_count]?*SettingsSectionProvider, @splat(null));
     }
 
     pub fn disconnect(self: *SettingsSectionGroupProvider) com.HRESULT {
@@ -2038,9 +2047,9 @@ pub const SettingsSectionGroupProvider = struct {
         out.* = null;
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         var selected: ?*SettingsSectionProvider = null;
-        self.sections_mutex.lock();
+        self.sections_mutex.lockUncancelable(mutexIo());
         if (self.detached.load(.acquire)) {
-            self.sections_mutex.unlock();
+            self.sections_mutex.unlock(mutexIo());
             return com.UIA_E_ELEMENTNOTAVAILABLE;
         }
         const selected_index: usize = @intCast(self.selected_index.load(.acquire));
@@ -2048,7 +2057,7 @@ pub const SettingsSectionGroupProvider = struct {
             selected = self.sections[selected_index];
             if (selected) |section| _ = SettingsSectionProvider.AddRef(&section.base);
         }
-        self.sections_mutex.unlock();
+        self.sections_mutex.unlock(mutexIo());
         defer {
             if (selected) |section| _ = SettingsSectionProvider.Release(&section.base);
         }
@@ -2135,7 +2144,7 @@ pub const SettingsSectionProvider = struct {
     container: *SettingsSectionGroupProvider,
     detached: std.atomic.Value(bool),
     disconnected: std.atomic.Value(bool),
-    marker: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(SettingsSectionMarker.none)),
+    marker: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(SettingsSectionMarker.none)),
     /// How many rows the Settings search found on this section's page, or
     /// `no_search` while nothing is searched for.
     search_count: std.atomic.Value(i32) = std.atomic.Value(i32).init(no_search),
@@ -2208,12 +2217,12 @@ pub const SettingsSectionProvider = struct {
     }
 
     pub fn markerState(self: *const SettingsSectionProvider) SettingsSectionMarker {
-        return @enumFromInt(self.marker.load(.acquire));
+        return @fromBackingInt(@intCast(self.marker.load(.acquire)));
     }
 
     /// Say what the section holds; a change is announced as a new `ItemStatus`.
     pub fn setMarker(self: *SettingsSectionProvider, marker: SettingsSectionMarker) void {
-        if (self.marker.swap(@intFromEnum(marker), .acq_rel) == @intFromEnum(marker)) return;
+        if (self.marker.swap(@backingInt(marker), .acq_rel) == @backingInt(marker)) return;
         if (!self.available()) return;
         events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ItemStatusPropertyId);
     }
@@ -7830,7 +7839,7 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
     // rather than only synthesizing a changed provenance field above.
     const terminal = @import("../../terminal/main.zig");
     for (0..5) |path| {
-        var t = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+        var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 3 });
         defer t.deinit(std.testing.allocator);
         if (path < 3) _ = try t.switchScreen(.alternate);
         try t.printString("a\r\nb\r\nc");
@@ -7936,7 +7945,7 @@ test "PKG71 scrollback-erase rejects held overlapping geometry" {
                     return @divExact(upper + 1, 4);
                 }
             };
-            var t = try terminal.Terminal.init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 100_000 });
+            var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 10, .rows = 3, .max_scrollback_bytes = 100_000 });
             defer t.deinit(alloc);
             try t.printString("a\nb\nc\nd");
             var ctx = Hook{ .term = &t };

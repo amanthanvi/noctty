@@ -5,6 +5,7 @@
 //! therefore remains exclusively owned by the existing WGL renderer.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const sys = @import("win32/sys.zig");
 const boundary = @import("win32_compositor.zig");
@@ -14,7 +15,7 @@ const window_content_native = @import("win32_compositor_window_content_native.zi
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const GUID = windows.GUID;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const BOOL = i32;
 const UINT = u32;
 const HMODULE = ?*anyopaque;

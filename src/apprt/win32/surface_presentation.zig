@@ -472,7 +472,7 @@ pub fn requestFirstFrame(self: *Surface) void {
     if (sys.RedrawWindow(hwnd, null, null, flags) == 0) {
         log.warn(
             "win32 first-frame invalidate failed err={}",
-            .{windows.kernel32.GetLastError()},
+            .{windows.GetLastError()},
         );
     }
 }

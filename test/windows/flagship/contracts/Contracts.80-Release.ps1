@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '0d204a0cde96d60e5a38eb2294d1030c6b2cc67b8b3baeee66706a99216871d2'
+    'decce3c03743bc63867c85a5a83a3011d3cc16cc21793dda8796d3b5ca194388'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -951,7 +951,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseCommon
         Content = $releaseCommonText
         ExpectedSha256 =
-            'c69ba084b4bba0ee397a493e5f12459d988507b4bc756ffb71ffb627f500257b'
+            'ba5a8fd8e7229b004777a280778a63e28d1b3c0867f87366eb6427cc51380973'
         CriticalStatement =
             "    return [System.IO.Path]::GetFullPath((Join-Path `$PSScriptRoot '..'))"
     }

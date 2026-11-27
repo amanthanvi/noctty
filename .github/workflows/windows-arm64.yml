@@ -65,7 +65,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # Reuse only verified dependency packages, never compiler/build outputs.
@@ -73,7 +73,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Configure Zig cache directories
         shell: pwsh
@@ -105,8 +105,12 @@ jobs:
         # is still only a subset; the full suite is what this job should run.
         # -Dtest-shards=4 runs it as four processes on the runner's four cores
         # (src/test_runner.zig), as test.yml's Full Zig test suite does.
+        # ReleaseSafe on ARM64 only (QR-49): the aarch64 Debug test exe fails
+        # to link on Zig 0.17.1 with "lld-link: adding thunks hasn't converged
+        # after 10 passes" (ZIG017-AARCH64-THUNKS-01). ReleaseSafe keeps the
+        # safety checks; x64 runs the Debug suite.
         run: |
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-shards=4 --summary all
+          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-optimize=ReleaseSafe -Dtest-shards=4 --summary all --test-timeout 240s
 
   arm64-build:
     name: Native Windows ARM64 Build
@@ -128,7 +132,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # Reuse only verified dependency packages, never compiler/build outputs.
@@ -136,7 +140,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Configure Zig cache directories
         shell: pwsh
@@ -221,16 +225,6 @@ jobs:
           if ($versionText -notmatch "custom shaders: enabled") {
             throw "Packaged noctty.com +version did not report custom shader support."
           }
-
-          # The packaged ghostty-vt.dll is the placeholder: it fails to load
-          # (ERROR_DLL_INIT_FAILED), exports nothing and names itself. The x64
-          # portable smoke runs the same check (package-portable-cli.ps1).
-          . ./scripts/ghostty-vt-stub.ps1
-          $dllSmoke = Join-Path $env:RUNNER_TEMP 'test_dll_init.exe'
-          zig cc test/windows/test_dll_init.c -lshell32 -lversion -o $dllSmoke
-          if ($LASTEXITCODE -ne 0) { throw "Packaged ARM64 DLL smoke compilation failed: $LASTEXITCODE" }
-          & $dllSmoke (Join-Path $portableRoot 'ghostty-vt.dll') $GhosttyVtStubDescription
-          if ($LASTEXITCODE -ne 0) { throw "Packaged ARM64 DLL smoke failed: $LASTEXITCODE" }
 
           $themesText = & $portableCommand +list-themes | Out-String
           if ($themesText -notmatch "0x96f") {

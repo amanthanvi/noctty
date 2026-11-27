@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const c = @import("c.zig").c;
+const c = @import("wuffs_c");
 const Error = @import("error.zig").Error;
 
 const log = std.log.scoped(.wuffs_zlib);
@@ -208,4 +208,27 @@ test "zlib: corrupt checksum is an error" {
 test "zlib: garbage is an error" {
     const alloc = std.testing.allocator;
     try std.testing.expectError(error.WuffsError, decompress(alloc, "not zlib at all", 1024, null));
+}
+
+test "zlib: decompress aligns decoder in an unaligned allocator buffer" {
+    // Upstream's test for its alignment fix (42049f1c4), on the fork's API.
+    const testing = std.testing;
+    const memory = try testing.allocator.alignedAlloc(
+        u8,
+        .@"16",
+        c.sizeof__wuffs_zlib__decoder() + 128,
+    );
+    defer testing.allocator.free(memory);
+
+    // A byte allocation from this allocator starts at an unaligned address
+    // unless the caller explicitly requests a stronger alignment.
+    var fba = std.heap.FixedBufferAllocator.init(memory[1..]);
+    const alloc = fba.allocator();
+    const compressed = [_]u8{
+        0x78, 0x9c, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0x28, 0x2f,
+        0x4d, 0x4b, 0x2b, 0x06, 0x00, 0x1a, 0x02, 0x04, 0x60,
+    };
+    const output = try decompress(alloc, &compressed, 64, 11);
+    defer alloc.free(output);
+    try testing.expectEqualStrings("hello wuffs", output);
 }

@@ -7,6 +7,7 @@
 //! the app runs. No Win32 here, so the text builders are unit-testable.
 
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 const diagnostics = @import("../../cli/diagnostics.zig");
 
@@ -299,7 +300,7 @@ test "config problems: a long path loses its tail, not the problem" {
     const alloc = std.testing.allocator;
     var problems: Problems = .{};
     defer problems.deinit(alloc);
-    const path = "C:\\" ++ "deep\\" ** 60 ++ "config.ghostty";
+    const path = "C:\\" ++ comptime win32_repeat.repeat("deep\\", 60) ++ "config.ghostty";
     try problems.addDiagnostics(alloc, &.{.{
         .location = .{ .file = .{ .path = path, .line = 7 } },
         .key = "font-szie",
@@ -338,7 +339,7 @@ test "config problems: a long first problem is cut for the banner, not for the l
     var problems: Problems = .{};
     defer problems.deinit(alloc);
     // 150 two-byte characters: a cut must not split one.
-    const message = "\u{e9}" ** 150;
+    const message = comptime win32_repeat.repeat("\u{e9}", 150);
     try problems.addDiagnostics(alloc, &.{.{ .key = "theme", .message = message }});
 
     const banner = (try problems.bannerText(alloc)).?;
@@ -367,7 +368,7 @@ test "config problems: the list keeps whole entries and counts the rest" {
     defer problems.deinit(alloc);
     for (0..40) |i| {
         var key_buf: [16:0]u8 = undefined;
-        const key = std.fmt.bufPrintZ(&key_buf, "key-{d}", .{i}) catch unreachable;
+        const key = std.mem.printSentinel(&key_buf, "key-{d}", .{i}, 0) catch unreachable;
         try problems.addDiagnostics(alloc, &.{testDiagnostic(key, "unknown field", i + 1)});
     }
 

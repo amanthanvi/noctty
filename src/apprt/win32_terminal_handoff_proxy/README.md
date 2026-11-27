@@ -28,7 +28,10 @@ file, and it is a property of the generator rather than a sign of tampering.
 
 The permanent noctty proxy CLSID is supplied by `src/build/TerminalHandoffProxy.zig` as
 `{1D349824-21FB-46C7-ACF3-746EDC991D52}`. Never regenerate it. `exports.c` is
-the single source of the five DLL exports, expressed as linker pragmas because
-Zig 0.15.2 does not accept a module-definition file as a link input. It carries
-the same exports as Microsoft's `OpenConsoleProxy.def`; no parallel `.def` is
-kept here, so the two lists cannot drift.
+the single source of the five DLL exports, expressed as linker pragmas. It
+carries the same exports as Microsoft's `OpenConsoleProxy.def`; no parallel
+`.def` is kept here, so the two lists cannot drift. The pragmas date from a
+Zig release that did not accept a module-definition file as a link input;
+Zig 0.17.1's `zig build-lib` does (a `.def` given beside the sources sets the
+DLL's exports, measured with a two-export probe for x86_64-windows-msvc), but
+the build keeps the pragmas: one list, in the source the build compiles.

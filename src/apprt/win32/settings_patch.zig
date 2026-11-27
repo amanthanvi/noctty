@@ -19,6 +19,10 @@
 //! lines for the key go, and `key =` (which clears what any earlier layer
 //! gave) then one line per value take the place of the first of them.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
+const prefixed_path = @import("../win32_prefixed_path.zig");
+const win32_sys = @import("sys.zig");
+const win32_types = @import("../win32_types.zig");
 const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../../config.zig");
@@ -1661,16 +1665,16 @@ test "settings patch: an edit to the file's own list lines that a later file mas
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "# read first\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = pwsh.exe\n" });
-    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "earlier", .data = "# read first\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = pwsh.exe\n" });
+    const later = try tmp.dir.realPathFileAlloc(std.testing.io, "later.conf", alloc);
     defer alloc.free(later);
     const text = try std.fmt.allocPrint(alloc, "profile-order = cmd.exe\nconfig-file = {s}\n", .{later});
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const earlier = try tmp.dir.realPathFileAlloc(std.testing.io, "earlier", alloc);
     defer alloc.free(earlier);
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var original = try testLoad(alloc, earlier, path);
     defer original.deinit();
@@ -1690,7 +1694,7 @@ test "settings patch: an edit to the file's own list lines that a later file mas
     for ([_][]const u8{ "profile-order = git-bash\n", "profile-order =\nprofile-order = cmd.exe\n" }) |own| {
         const changed = try std.fmt.allocPrint(alloc, "{s}config-file = {s}\n", .{ own, later });
         defer alloc.free(changed);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = changed });
         var disk = try testLoad(alloc, earlier, path);
         defer disk.deinit();
         try testing.expect(listEql(.order, &disk, &original));
@@ -1703,20 +1707,20 @@ test "settings patch: a dark theme's hidden list, read only because the app went
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
     // The dark theme hides another profile.
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = cmd.exe\n", .{ light, dark });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
     var original = try testLoad(alloc, none, path);
     defer original.deinit();
@@ -1750,7 +1754,7 @@ test "settings patch: a dark theme's hidden list, read only because the app went
     // Another program's edit to the file's lines still stops the save.
     const changed = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-hidden = wsl\n", .{ light, dark });
     defer alloc.free(changed);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = changed });
     var edited = try testLoad(alloc, none, path);
     defer edited.deinit();
     var edited_dark = (try edited.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
@@ -1966,22 +1970,22 @@ test "settings patch: an earlier file's lists are the save's to write, though th
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     // A default file read first orders and hides profiles.
-    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
-    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "earlier", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
+    const earlier = try tmp.dir.realPathFileAlloc(std.testing.io, "earlier", alloc);
     defer alloc.free(earlier);
-    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    const later = try tmp.dir.realPathFileAlloc(std.testing.io, "later.conf", alloc);
     defer alloc.free(later);
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "target" });
     defer alloc.free(path);
     const Target = enum { empty, comments, missing };
     for ([_]Target{ .empty, .comments, .missing }) |target| {
-        tmp.dir.deleteFile("target") catch {};
+        tmp.dir.deleteFile(std.testing.io, "target") catch {};
         switch (target) {
-            .empty => try tmp.dir.writeFile(.{ .sub_path = "target", .data = "" }),
-            .comments => try tmp.dir.writeFile(.{ .sub_path = "target", .data = "# Settings saves here\n" }),
+            .empty => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target", .data = "" }),
+            .comments => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target", .data = "# Settings saves here\n" }),
             .missing => {},
         }
         // As the app reads its default files: an empty or missing one is
@@ -2005,12 +2009,12 @@ test "settings patch: an earlier file's lists are the save's to write, though th
     }
     // A file `config-file` names: one it names before is earlier, one after
     // is later, the file Settings saves to empty or not there.
-    try tmp.dir.writeFile(.{ .sub_path = "first.conf", .data = "profile-hidden = pwsh.exe\n" });
-    const first = try tmp.dir.realpathAlloc(alloc, "first.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "first.conf", .data = "profile-hidden = pwsh.exe\n" });
+    const first = try tmp.dir.realPathFileAlloc(std.testing.io, "first.conf", alloc);
     defer alloc.free(first);
     for ([_]Target{ .empty, .missing }) |target| {
-        tmp.dir.deleteFile("target") catch {};
-        if (target == .empty) try tmp.dir.writeFile(.{ .sub_path = "target", .data = "" });
+        tmp.dir.deleteFile(std.testing.io, "target") catch {};
+        if (target == .empty) try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target", .data = "" });
         for ([_]struct { after: bool, want: ?ListsForeign }{
             .{ .after = false, .want = null },
             .{ .after = true, .want = .later_file },
@@ -2038,7 +2042,7 @@ test "settings patch: the load order is unknown, and the lists another layer's, 
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "target" });
     defer alloc.free(path);
@@ -2046,12 +2050,12 @@ test "settings patch: the load order is unknown, and the lists another layer's, 
     // profiles and then clears `config-file`. That file still loads after
     // the target, but it is gone from the list that places it, and would
     // pass for a default file read before. The order is unknown: refused.
-    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
-    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
+    const later = try tmp.dir.realPathFileAlloc(std.testing.io, "later.conf", alloc);
     defer alloc.free(later);
     const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{later});
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "target", .data = text });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target", .data = text });
     {
         var cfg = try Config.default(alloc);
         defer cfg.deinit();
@@ -2064,7 +2068,7 @@ test "settings patch: the load order is unknown, and the lists another layer's, 
         try testing.expectEqual(@as(?ListsForeign, .unordered), try listsForeign(&cfg, path, &testSamePath));
     }
     // A clear while no other file sets either list leaves the order moot.
-    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "font-size = 13\nconfig-file =\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "font-size = 13\nconfig-file =\n" });
     {
         var cfg = try Config.default(alloc);
         defer cfg.deinit();
@@ -2082,7 +2086,7 @@ test "settings patch: the load order is unknown, and the lists another layer's, 
     }) |case| {
         const data = try std.fmt.allocPrint(alloc, "profile-order = cmd.exe\n{s}", .{case.line});
         defer alloc.free(data);
-        try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = data });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = data });
         var cfg = try Config.default(alloc);
         defer cfg.deinit();
         try cfg.loadFile(alloc, path);
@@ -2099,13 +2103,15 @@ test "settings patch: the lists are another layer's when the command line, a lat
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     // A file read first orders the profiles: the save's own to write over.
-    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "profile-order = cmd.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "both", .data = "profile-hidden = pwsh.exe\n" });
-    var names: [5][]u8 = undefined;
-    for ([_][]const u8{ "earlier", "later.conf", "light", "dark", "both" }, &names) |name, *full| full.* = try tmp.dir.realpathAlloc(alloc, name);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "earlier", .data = "profile-order = cmd.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order = git-bash\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "# light\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "both", .data = "profile-hidden = pwsh.exe\n" });
+    // Sentinel-terminated, as 0.17's realPathFileAlloc allocates them, so
+    // each is freed at the length it was allocated.
+    var names: [5][:0]u8 = undefined;
+    for ([_][]const u8{ "earlier", "later.conf", "light", "dark", "both" }, &names) |name, *full| full.* = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
     defer for (names) |full| alloc.free(full);
     const later_line = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{names[1]});
     defer alloc.free(later_line);
@@ -2130,8 +2136,8 @@ test "settings patch: the lists are another layer's when the command line, a lat
     }) |case| {
         const text = try std.mem.concat(alloc, u8, &.{ "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n", case.lines });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         // As the app loads them: the default files, the command line, the
         // files they include, then the theme.
@@ -2148,8 +2154,8 @@ test "settings patch: the lists are another layer's when the command line, a lat
     // The file a `--config-file` names, which the loader reads after the
     // command line: a command-line list is still this launch's alone, and
     // the file does not set the order itself.
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     const config_arg = try std.fmt.allocPrint(alloc, "--config-file={s}", .{path});
     defer alloc.free(config_arg);
@@ -2180,14 +2186,14 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     // Read before the config file: py, and a variable of it.
-    try tmp.dir.writeFile(.{ .sub_path = "earlier.conf", .data = "profile-command = py: early.exe\nprofile-env = py: E=1\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "earlier.conf", .data = "profile-command = py: early.exe\nprofile-env = py: E=1\n" });
     // Read after it: team, and its label.
-    try tmp.dir.writeFile(.{ .sub_path = "x.conf", .data = "profile-command = team: t.exe\nprofile-name = team: Team\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.conf", .data = "profile-command = team: t.exe\nprofile-name = team: Team\n" });
     const text = "# mine\nprofile-command = py: cmd.exe\nprofile-name = py: P\nprofile-command = solo: s.exe\nprofile-env = solo: K=1\nconfig-file = x.conf\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier.conf");
+    const earlier = try tmp.dir.realPathFileAlloc(std.testing.io, "earlier.conf", alloc);
     defer alloc.free(earlier);
 
     var original = try testLoad(alloc, earlier, path);
@@ -2221,7 +2227,7 @@ test "settings patch: profileEdits writes what the editor staged, and the loader
         out.items,
     );
 
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = out.items });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = out.items });
     var reloaded = try testLoad(alloc, earlier, path);
     defer reloaded.deinit();
     try testing.expect(reloaded.@"profile-command".get("py") == null);
@@ -2260,7 +2266,7 @@ test "settings patch: lines are read as the loader reads them" {
     );
     // A line longer than the reader takes is skipped by the loader: never
     // matched, never changed.
-    const long = "profile-name = py: " ++ "x" ** 4080;
+    const long = "profile-name = py: " ++ comptime win32_repeat.repeat("x", 4080);
     try testPatch(
         long ++ "\n",
         &.{.{ .field = .name, .id = "py", .op = .{ .set = "B" } }},
@@ -2268,7 +2274,7 @@ test "settings patch: lines are read as the loader reads them" {
     );
     // A line replaced in place keeps its indentation unless that would make
     // it longer than the reader takes.
-    const value = "y" ** 4073;
+    const value = comptime win32_repeat.repeat("y", 4073);
     try testPatch(
         "    profile-name = py: A\n",
         &.{.{ .field = .name, .id = "py", .op = .{ .set = value } }},
@@ -2282,7 +2288,7 @@ test "settings patch: a line the loader skips for its two CRs is never matched o
     const alloc = arena.allocator();
     // 4,096 bytes before the LF: one more than the reader holds, so the
     // loader skips the line, though less one CR it would be 4,095.
-    const refused = "profile-name = py: " ++ "x" ** 4075 ++ "\r\r";
+    const refused = "profile-name = py: " ++ comptime win32_repeat.repeat("x", 4075) ++ "\r\r";
     try testing.expectEqual(@as(usize, LineIterator.max_line_len + 2), refused.len);
     const raw = "profile-command = py: python.exe\r\n" ++ refused ++ "\n";
     var reader: std.Io.Reader = .fixed(raw);
@@ -2362,20 +2368,21 @@ test "settings patch: FileEnd hands the patchers a complete, marked last line, a
 
 /// A config file `theme = light:<light>,dark:<dark>` that defines `py`, in
 /// `tmp` as `config`, where only the dark theme defines `py` too. Returns its
-/// path, the caller's to free.
-fn testThemedProfile(tmp: *std.testing.TmpDir) ![]u8 {
+/// path, the caller's to free (sentinel-terminated, as 0.17's
+/// realPathFileAlloc allocates it).
+fn testThemedProfile(tmp: *std.testing.TmpDir) ![:0]u8 {
     const alloc = testing.allocator;
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "light", .data = "\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+    const light = try tmp.dir.realPathFileAlloc(testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(testing.io, "dark", alloc);
     defer alloc.free(dark);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    return tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = text });
+    return tmp.dir.realPathFileAlloc(testing.io, "config", alloc);
 }
 
 /// The op `editsForSave` gives the removal of `py`'s command, read from
@@ -2416,19 +2423,19 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
     var fresh = try testLoad(alloc, none, path);
     defer fresh.deinit();
@@ -2436,8 +2443,8 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // Another program holds the dark theme with no sharing as the switch to
     // dark reads it, after the save's probe: it does not open.
     {
-        const wide = try std.os.windows.sliceToPrefixedFileW(null, dark);
-        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        const wide = try prefixed_path.sliceToPrefixedFileW(dark);
+        const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
         var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
@@ -2452,31 +2459,31 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // `file_load.test_config_root`), and by path.
     const themes_dir = try std.fs.path.join(alloc, &.{ "home", @import("../../build_config.zig").data_dir_name, "themes" });
     defer alloc.free(themes_dir);
-    try tmp.dir.makePath(themes_dir);
-    var themes = try tmp.dir.openDir(themes_dir, .{});
-    defer themes.close();
-    try themes.writeFile(.{ .sub_path = "Mine", .data = "font-size = 14\n" });
-    try themes.makeDir("Dir");
-    try tmp.dir.makeDir("dir");
-    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    try tmp.dir.createDirPath(std.testing.io, themes_dir);
+    var themes = try tmp.dir.openDir(std.testing.io, themes_dir, .{});
+    defer themes.close(std.testing.io);
+    try themes.writeFile(testing.io, .{ .sub_path = "Mine", .data = "font-size = 14\n" });
+    try themes.createDir(testing.io, "Dir", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "dir", .default_dir);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
     defer alloc.free(home);
     const file_load = @import("../../config/file_load.zig");
     file_load.test_config_root = home;
     defer file_load.test_config_root = null;
-    const mine = try themes.realpathAlloc(alloc, "Mine");
+    const mine = try themes.realPathFileAlloc(testing.io, "Mine", alloc);
     defer alloc.free(mine);
     const gone = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(dark) orelse return error.TestExpectedDir, "gone" });
     defer alloc.free(gone);
-    const dir = try tmp.dir.realpathAlloc(alloc, "dir");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, "dir", alloc);
     defer alloc.free(dir);
     const check = struct {
         /// The switch to dark, with `dark_theme` as the dark half, names
         /// `expected` as the unread theme, or nothing when it is null.
-        fn darkTheme(a: Allocator, at: std.fs.Dir, earlier: []const u8, light_theme: []const u8, dark_theme: []const u8, expected: ?[]const u8) !void {
+        fn darkTheme(a: Allocator, at: std.Io.Dir, earlier: []const u8, light_theme: []const u8, dark_theme: []const u8, expected: ?[]const u8) !void {
             const config_text = try std.fmt.allocPrint(a, "theme = light:{s},dark:{s}\n", .{ light_theme, dark_theme });
             defer a.free(config_text);
-            try at.writeFile(.{ .sub_path = "config", .data = config_text });
-            const config_path = try at.realpathAlloc(a, "config");
+            try at.writeFile(testing.io, .{ .sub_path = "config", .data = config_text });
+            const config_path = try at.realPathFileAlloc(testing.io, "config", a);
             defer a.free(config_path);
             var loaded = try testLoad(a, earlier, config_path);
             defer loaded.deinit();
@@ -2498,8 +2505,8 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // Found by name and held with no sharing: named, by the path it was
     // found at.
     try check(alloc, tmp.dir, none, light, "Mine", null);
-    const wide = try std.os.windows.sliceToPrefixedFileW(null, mine);
-    const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    const wide = try prefixed_path.sliceToPrefixedFileW(mine);
+    const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
     defer std.os.windows.CloseHandle(handle);
     try check(alloc, tmp.dir, none, light, "Mine", mine);
@@ -2509,27 +2516,27 @@ test "settings patch: an include whose read failed is still named after the ligh
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "font-size = 14\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark);
-    const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+    const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
     defer alloc.free(more);
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nconfig-file = {s}\n", .{ light, dark, more });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     // The include's bytes are locked while the layers are read.
-    var lock = try tmp.dir.openFile("more.conf", .{ .mode = .read_write, .lock = .exclusive });
+    var lock = try tmp.dir.openFile(std.testing.io, "more.conf", .{ .mode = .read_write, .lock = .exclusive });
     var loaded = blk: {
-        defer lock.close();
+        defer lock.close(std.testing.io);
         break :blk try testLoad(alloc, none, path);
     };
     defer loaded.deinit();
@@ -2574,13 +2581,13 @@ test "settings patch: a config file that did not decode is still named after the
     const arena = config._arena.?.allocator();
     // What `Config.invalidUtf16` records for a config file, as a replay brings
     // it back without the marker.
-    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "config-file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8") });
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeSentinel(u8, "config-file C:\\noctty-test\\more.conf is not valid UTF-16; not reading it. Save it as UTF-8", 0) });
     const unread = unreadConfigFile(&config) orelse return error.TestExpectedUnread;
     try testing.expect(unread.undecodable and unread.kind == .include);
     try expectSameText("C:\\noctty-test\\more.conf", unread.path);
     // A config file's problem is not the theme's.
     try testing.expect(unreadTheme(&config) == null);
-    try config._diagnostics.append(arena, .{ .message = try arena.dupeZ(u8, "error reading theme C:\\noctty-test\\dark: error.ReadFailed") });
+    try config._diagnostics.append(arena, .{ .message = try arena.dupeSentinel(u8, "error reading theme C:\\noctty-test\\dark: error.ReadFailed", 0) });
     try expectSameText("C:\\noctty-test\\dark", (unreadTheme(&config) orelse return error.TestExpectedUnread).path);
 }
 
@@ -2591,7 +2598,7 @@ test "settings patch: the report after a save names a file only the reload as re
     // The light/dark switch drops the record; the reload as read has it.
     var loaded = try Config.default(alloc);
     defer loaded.deinit();
-    loaded._undecodable_file = try loaded._arena.?.allocator().dupeZ(u8, "C:\\noctty-test\\more.conf");
+    loaded._undecodable_file = try loaded._arena.?.allocator().dupeSentinel(u8, "C:\\noctty-test\\more.conf", 0);
     var switched = try Config.default(alloc);
     defer switched.deinit();
     switch (try reloadReport(&masked.writer, &.{}, &switched, &loaded, false)) {
@@ -2611,19 +2618,19 @@ test "settings patch: a default config file that did not decode is named as the 
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\xff\xfe\x00\xd8a\x00" });
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\xff\xfe\x00\xd8a\x00" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark);
     const themes_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
     defer alloc.free(themes_text);
-    try tmp.dir.writeFile(.{ .sub_path = "themes", .data = themes_text });
-    const themes = try tmp.dir.realpathAlloc(alloc, "themes");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "themes", .data = themes_text });
+    const themes = try tmp.dir.realPathFileAlloc(std.testing.io, "themes", alloc);
     defer alloc.free(themes);
     // The default config file is skipped whole; a later file names the
     // themes, so the config has a light/dark switch to make.
@@ -2694,7 +2701,7 @@ test "settings patch: a removal is decided in the light/dark state the app appli
     defer tmp.cleanup();
     const path = try testThemedProfile(&tmp);
     defer alloc.free(path);
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
     // What a read from disk hands over: the light state.
     var layers = try testLoad(alloc, none, path);
@@ -2727,19 +2734,19 @@ test "settings patch: a removal made in Settings opened in one light/dark state 
         defer tmp.cleanup();
         // Only the theme of the state the app switched to defines `py` and
         // its fields again.
-        try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = if (now == .light) defines else "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = if (now == .dark) defines else "\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = if (now == .light) defines else "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = if (now == .dark) defines else "\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nprofile-name = py: Python\nprofile-working-directory = py: C:\\src\nprofile-env = py: V=1\n", .{ light, dark });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
-        const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+        const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
         defer alloc.free(none);
         // The save's fresh read: the light state, as `Config.load` hands it.
         var fresh = try testLoad(alloc, none, path);
@@ -2778,23 +2785,23 @@ test "settings patch: a removal keeps its tombstone when the config as last read
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "profile-name = py: Python\n" });
-    const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "profile-name = py: Python\n" });
+    const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
     defer alloc.free(more);
     const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
     // The config as last read: the include labels `py`.
     var held = try testLoad(alloc, none, path);
     defer held.deinit();
     // A read that missed the include's line, as one that stopped partway
     // through would: no problem recorded, and no label.
-    try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "\n" });
     var fresh = try testLoad(alloc, none, path);
     defer fresh.deinit();
     try testing.expect(fresh._diagnostics.empty());
@@ -2810,16 +2817,16 @@ test "settings patch: a config-file the load could not open or read whole, or a 
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "held.conf", .data = "profile-command = py: python.exe\n" });
-    try tmp.dir.makeDir("dir");
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "held.conf", .data = "profile-command = py: python.exe\n" });
+    try tmp.dir.createDir(std.testing.io, "dir", .default_dir);
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
-    const held = try tmp.dir.realpathAlloc(alloc, "held.conf");
+    const held = try tmp.dir.realPathFileAlloc(std.testing.io, "held.conf", alloc);
     defer alloc.free(held);
-    const dir = try tmp.dir.realpathAlloc(alloc, "dir");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, "dir", alloc);
     defer alloc.free(dir);
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const missing = try std.fs.path.join(alloc, &.{ root, "missing.conf" });
     defer alloc.free(missing);
@@ -2828,8 +2835,8 @@ test "settings patch: a config-file the load could not open or read whole, or a 
     {
         const text = try std.fmt.allocPrint(alloc, "config-file = {s}\nconfig-file = {s}\n", .{ missing, dir });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         var config = try testLoad(alloc, none, path);
         defer config.deinit();
@@ -2842,11 +2849,11 @@ test "settings patch: a config-file the load could not open or read whole, or a 
     {
         const text = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{held});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
-        const wide = try std.os.windows.sliceToPrefixedFileW(null, held);
-        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        const wide = try prefixed_path.sliceToPrefixedFileW(held);
+        const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
         var config = try testLoad(alloc, none, path);
@@ -2885,15 +2892,15 @@ test "settings patch: a removed profile keeps its tombstone while anything else 
     defer tmp.cleanup();
     // The config Settings was opened on had no earlier file; the one read
     // last (the app's) has one, which labels `labelled`.
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "earlier.conf", .data = "profile-name = labelled: L\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "earlier.conf", .data = "profile-name = labelled: L\n" });
     const text = "profile-command = labelled: l.exe\nprofile-command = solo: s.exe\nprofile-command = hid: h.exe\nprofile-hidden = hid\nprofile-command = ordered: o.exe\nprofile-order = user:Ordered\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const none = try tmp.dir.realpathAlloc(alloc, "none.conf");
+    const none = try tmp.dir.realPathFileAlloc(std.testing.io, "none.conf", alloc);
     defer alloc.free(none);
-    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier.conf");
+    const earlier = try tmp.dir.realPathFileAlloc(std.testing.io, "earlier.conf", alloc);
     defer alloc.free(earlier);
     var original = try testLoad(alloc, none, path);
     defer original.deinit();

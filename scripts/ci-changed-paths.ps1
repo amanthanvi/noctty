@@ -75,20 +75,18 @@ $script:CiPathRules = @(
     # none of which a Zig source names. (package-windows.ps1 and
     # build-package-windows.ps1 are read by a unit test that compares their
     # $runtimeFiles lists, so they stay on the default rule.)
-    # ghostty-vt-stub.ps1 checks the staged ghostty-vt.dll placeholder for
-    # package-windows.ps1 and package-portable-cli.ps1.
-    @{ Needs = 'package'; Pattern = '^scripts/(symbols-verification|signing-trust|interactive-win11-lib|dev-windows|ghostty-vt-stub)\.(ps1|cmd)$' }
+    @{ Needs = 'package'; Pattern = '^scripts/(symbols-verification|signing-trust|interactive-win11-lib|dev-windows)\.(ps1|cmd)$' }
 
     # Test harnesses the checks job runs, or that only a person or the manual
     # interactive job runs.
     @{ Needs = 'none'; Pattern = '^test/README\.md$' }
-    @{ Needs = 'none'; Pattern = '^test/windows/(README\.md|\.gitignore|PSScriptAnalyzerSettings\.psd1|accessibility-evidence\.schema\.json|bench-thresholds\.json|bench-windows\.ps1|Test-InteractiveWin11HintsContracts\.ps1|assert-interactive-runner\.ps1|bash-shell-integration\.ps1|powershell-shell-integration\.ps1|cmd-clink\.(lua|ps1)|conpty-host-spike\.ps1|console-[a-z-]+\.c|issue149-color-payload\.ps1|link-opener-pathext-probe\.ps1|package-chocolatey\.ps1|package-scoop\.ps1|vt-probe-win32-conformance\.ps1|ci-scripts\.ps1|fixtures/.*)$' }
+    @{ Needs = 'none'; Pattern = '^test/windows/(README\.md|\.gitignore|PSScriptAnalyzerSettings\.psd1|accessibility-evidence\.schema\.json|bench-thresholds\.json|bench-windows\.ps1|Test-InteractiveWin11HintsContracts\.ps1|assert-interactive-runner\.ps1|bash-shell-integration\.ps1|powershell-shell-integration\.ps1|cmd-clink\.(lua|ps1)|conpty-host-spike\.ps1|console-[a-z-]+\.c|test_dll_init\.c|issue149-color-payload\.ps1|link-opener-pathext-probe\.ps1|package-chocolatey\.ps1|package-scoop\.ps1|vt-probe-win32-conformance\.ps1|ci-scripts\.ps1|fixtures/.*)$' }
     @{ Needs = 'none'; Pattern = '^test/windows/(interactive-win11[a-z0-9-]*|hidden-win11-[a-z0-9-]+)\.ps1$' }
     @{ Needs = 'none'; Pattern = '^test/windows/flagship/(?!Invoke-PortableSmoke\.ps1$|scenarios/portable-x64\.json$|result\.schema\.json$)' }
     # What package-portable-cli.ps1 and Invoke-PortableSmoke.ps1 run.
     # The executable build also runs the emitted-image import contract.
     @{ Needs = 'zig'; Pattern = '^test/windows/cli-import-contract\.ps1$' }
-    @{ Needs = 'package'; Pattern = '^test/windows/(package-portable-cli\.ps1|cli-[a-z-]+\.ps1|test_dll_init\.c|flagship/Invoke-PortableSmoke\.ps1|flagship/scenarios/portable-x64\.json|flagship/result\.schema\.json)$' }
+    @{ Needs = 'package'; Pattern = '^test/windows/(package-portable-cli\.ps1|cli-[a-z-]+\.ps1|flagship/Invoke-PortableSmoke\.ps1|flagship/scenarios/portable-x64\.json|flagship/result\.schema\.json)$' }
     @{ Needs = 'renderer'; Pattern = '^test/windows/renderer/' }
 )
 
