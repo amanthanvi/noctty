@@ -855,14 +855,12 @@ class GitControls(unittest.TestCase):
         base = self.commit()
         upstream, removed, _ = self.inputs()
         commented = source.replace("kernel32;", "kernel32; // Win32 API")
-        # Council P1 on #768: in one mixed hunk, a comment on the alias line beside a changed next line, and a move of
-        # the alias inside its scope, leave the binding's own tokens as they were.
+        # Council P1 and Q1 on #768: in one mixed hunk, a comment on the alias line beside a changed next line leaves
+        # the alias as a declaration that hunk removed, token for token.
         mixed = commented.replace("const unrelated = 1;", "const unrelated = 2;")
-        moved = source.replace("const w = std.os.windows.kernel32;\n", "").replace(
-            "const unrelated = 1;", "const unrelated = 1;\nconst w = std.os.windows.kernel32;")
         for variant in (commented, source.replace("const w = std", "const  w =\n    std"),
                         source.replace("const unrelated = 1;\n", "const unrelated = 1;\n// a comment line\n"),
-                        mixed, moved):
+                        mixed):
             self.write("probe.zig", variant)
             head = self.commit()
             self.assertIn("probe.zig", common.line_changes(self.repo, base, head))
@@ -872,15 +870,69 @@ class GitControls(unittest.TestCase):
         self.assertEqual([("probe.zig", 5, "error", "removed std.os.windows.kernel32.Sleep")],
                          win.check(self.repo, base, head, upstream, removed))
 
-    def test_touched_alias_visibility_and_spellings_recheck(self):
+    def test_retargeted_twin_aliases_recheck_their_unchanged_uses(self):
+        # Council Q1 on #768: P1 took a touched declaration as unchanged when any base scope with the same header held
+        # its tokens, which twins defeat: a retargeted alias then hid its unchanged, newly forbidden use. Only a
+        # declaration that the same hunk removed, token for token and at the same braces, is unchanged now.
+        self.write("src/os/windows.zig", "// reexports\n")
+        upstream, removed, _ = self.inputs()
+        safe, bad = "const w = local.sys;", "const w = std.os.windows.kernel32;"
+        cases = (
+            ("Sol's sibling if (on) blocks",
+             "fn f(on: bool) void {\n    if (on) {\n        " + safe + "\n        w.Sleep(1);\n    }\n"
+             "    if (on) {\n        " + bad + "\n        w.Sleep(2);\n    }\n}\n", (2, safe, bad), [4]),
+            ("Opus's twin else blocks",
+             "fn f(on: bool) void {\n    if (on) {} else {\n        " + safe + "\n        w.Sleep(1);\n    }\n"
+             "    if (on) {} else {\n        " + bad + "\n        w.Sleep(2);\n    }\n}\n", (2, safe, bad), [4]),
+            ("two functions returning error{Stopped}!void",
+             "fn a() error{Stopped}!void {\n    " + safe + "\n    w.Sleep(1);\n}\n"
+             "fn b() error{Stopped}!void {\n    " + bad + "\n    w.Sleep(2);\n}\n", (1, safe, bad), [3]),
+            ("a swap of twin aliases",
+             "test {\n    " + bad + "\n    w.Sleep(1);\n}\ntest {\n    " + safe + "\n    w.Sleep(2);\n}\n",
+             None, [7]),
+        )
+        for name, before, edit, expected in cases:
+            with self.subTest(case=name):
+                self.write("probe.zig", before)
+                base = self.commit()
+                lines = before.split("\n")
+                if edit:
+                    at, old, new = edit
+                    lines[at] = lines[at].replace(old, new)
+                else:
+                    first = next(i for i, l in enumerate(lines) if l.strip() == bad)
+                    second = next(i for i, l in enumerate(lines) if l.strip() == safe)
+                    lines[first], lines[second] = lines[second], lines[first]
+                self.write("probe.zig", "\n".join(lines))
+                head = self.commit()
+                self.assertEqual(expected, [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
+        # The same swap inside one hunk (the use and the braces between the twins edited too): the hunk did remove a
+        # `const w = std.os.windows.kernel32;`, but at other braces, so the else block's alias is still changed.
+        before = ("fn f(on: bool) void {\n    if (on) {\n        " + bad + "\n        w.Sleep(1);\n    } else {\n"
+                  "        " + safe + "\n        w.Sleep(2);\n    }\n}\n")
+        after = ("fn f(on: bool) void {\n    if (on) {\n        " + safe + " // a\n        w.Sleep(1); // swapped\n"
+                 "    }  else {\n        " + bad + " // b\n        w.Sleep(2);\n    }\n}\n")
+        self.write("probe.zig", before)
+        base = self.commit()
+        self.write("probe.zig", after)
+        head = self.commit()
+        hunks = {}
+        common.line_changes(self.repo, base, head, same_code=win.same_zig_code, hunks=hunks)
+        self.assertEqual([frozenset({3, 4, 5, 6})], [rows for rows, _ in hunks["probe.zig"]])
+        self.assertEqual([7], [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
+
+    def test_touched_alias_moves_visibility_and_spellings_recheck(self):
         self.write("src/os/windows.zig", "// reexports\n")
         source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
                   'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
         self.write("probe.zig", source)
         base = self.commit()
         upstream, removed, _ = self.inputs()
-        # A changed visibility or spelling is a change to the binding's own tokens (a move is not: council P1 on #768).
+        # A move to another hunk is a documented over-report (council Q1 on #768); a changed visibility or spelling
+        # changes the binding's own tokens.
         variants = (source.replace("const w =", "pub const w ="),
+                    source.replace("const w = std.os.windows.kernel32;\n", "").replace(
+                        "const unrelated = 1;", "const unrelated = 1;\nconst w = std.os.windows.kernel32;"),
                     source.replace("std.os.windows.kernel32;", '@import("std").os.windows.kernel32;'))
         for variant in variants:
             self.write("probe.zig", variant)
@@ -1141,22 +1193,22 @@ class HistoryControls(unittest.TestCase):
         print("Real comment on an alias line: 0 errors; with the next line changed in its hunk: 0; "
               "added-reference twin: 1")
 
-    def test_real_import_swap_and_ipc_alias_move_pass(self):
-        # Council P1 on #768: a binding is changed only by its own tokens in its scope, so two swapped imports and a
-        # moved alias recheck none of their uses (they rechecked 48 and 40 before).
+    def test_real_import_swap_and_ipc_alias_move_touch_definitions(self):
+        # A moved definition sits in another hunk than the one that removed it, so it rechecks its uses: a documented
+        # over-report (council Q1 on #768, which undid P1's base-scope match).
         path = "src/apprt/win32.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
         self.assertEqual('const std = @import("std");\n', lines[10])
         lines[10], lines[11] = lines[11], lines[10]
-        self.assertEqual(0, len(self.check(self.base, self.fixture(path, "".join(lines)))))
+        self.assertEqual(48, len(self.check(self.base, self.fixture(path, "".join(lines)))))
         path = "src/apprt/win32/ipc_server.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
         at = lines.index("const windows = std.os.windows;\n")
         line = lines.pop(at)
         lines.insert(at + 2, line)
-        self.assertEqual(0, len(self.check(self.base, self.fixture(path, "".join(lines)))))
+        self.assertEqual(40, len(self.check(self.base, self.fixture(path, "".join(lines)))))
 
     def test_rekeyed_alias_owner_fixtures_keep_unchanged_uses(self):
         path = "src/os/monotonic.zig"
@@ -1211,9 +1263,10 @@ class HistoryControls(unittest.TestCase):
             added = common.added_lines(self.repo, base, head)
             unchanged = [row for row in rows if row[1] not in added.get(row[0], ())]
             if head.startswith("1c8d4d394"):
-                # Its two unchanged-use errors came from host.zig's `const windows = win32.windows;`, which this
-                # refactor only moved (line 268 to 255): no change to the binding (council P1 on #768).
-                self.assertEqual(0, len(rows))
+                # Its two unchanged-use errors come from host.zig's `const windows = win32.windows;`, which this
+                # refactor only moved (line 268 to 255): the documented move over-report (council Q1 on #768).
+                self.assertEqual(2, len(rows))
+                self.assertEqual(2, len(unchanged))
             else:
                 self.assertEqual(74, len(rows))
                 self.assertEqual(29, len(unchanged))
@@ -1257,15 +1310,15 @@ class HistoryControls(unittest.TestCase):
                             'const zstd = @import("std");\nconst std = zstd;'), 40),
             (source.replace('const windows = std.os.windows;',
                             'const windows = @import("../../os/windows.zig");'), 32),
-            # Council P1 on #768: the alias moved, its tokens and scope as they were, is no change.
+            # Council Q1 on #768: the alias moved to another hunk rechecks its uses, as P1 had briefly stopped.
             (source.replace('const windows = std.os.windows;\n', '').replace(
                 'const log = std.log.scoped(.win32);\n',
-                'const log = std.log.scoped(.win32);\nconst windows = std.os.windows;\n'), 0),
+                'const log = std.log.scoped(.win32);\nconst windows = std.os.windows;\n'), 40),
         )
         for text, count in variants:
             self.assertNotEqual(source, text)
             self.assertEqual(count, len(self.check(self.base, self.fixture(path, text))))
-        print("Documented safe-side over-report retained: 40 / 40 / 32; a moved alias: 0")
+        print("Documented safe-side over-report retained: 40 / 40 / 32 / moved alias 40")
 
 
 if __name__ == "__main__":

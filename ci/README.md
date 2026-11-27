@@ -141,21 +141,26 @@ whose removed and added lines hold the same Zig tokens (`same_zig_code`, which
 `line_changes` takes as `same_code`), so a comment or whitespace edit on an
 alias's definition line rechecks nothing, while a reference added in the same
 edit is still checked (council no-seat N3, after the lint was enforced).
-Inside a hunk that does change code, a touched definition counts as changed
-only when its own tokens (with its prefix keywords and the headers of the
-scopes around it, `declaration_key`) match no declaration of the merge base
-(`changed_declarations`, council P1 on #768). So a comment on an alias line
-beside a changed next line, or an alias moved within its scope, rechecks none
-of its uses.
+Inside a hunk that does change code, a touched definition counts as unchanged
+only when every line of it is an added line of that one hunk and a declaration
+on the same hunk's removed lines has the same whole token sequence, name and
+prefix keywords included, at the same braces inside the hunk
+(`changed_declarations`; council P1 and Q1 on #768). So a comment on an alias
+line beside a changed next line rechecks none of its uses. Anything else counts
+as changed: the rule matches only a declaration that hunk removed, so it fails
+closed. (P1 had matched any base declaration in a scope with the same header,
+which twin blocks defeat.)
 
-**Known conservative over-report:** a definition whose own tokens changed
-rechecks its uses even if the final origin stayed the same. Re-spelling an
-alias's definition can therefore report unchanged legacy uses. Introducing an intermediate
+**Known conservative over-report:** a definition whose own tokens changed, or
+that moved to another hunk, rechecks its uses even if the final origin stayed
+the same. Moving or re-spelling an alias's definition can therefore report
+unchanged legacy uses (the soft freeze forbids moves on `main` during 1B
+anyway). Introducing an intermediate
 alias (for example `const os = std.os; const windows = os.windows;`), or routing
 an existing std alias through the fork's re-exports, can recheck uses whose final
 binding stayed the same. This may report existing removed uses even though that
 edit changed no call's meaning. The real IPC fixture retains the measured
-40/40/32 reports for these cases. The definition-span rule can therefore
+40/40/32 reports for these cases, and 40 for a moved alias. The definition-span rule can therefore
 report a legacy use whose binding stayed the same.
 
 The fork-added file set is computed at each head, by subtracting

@@ -76,14 +76,16 @@ def changed_paths(repo, base, head, *pathspecs):
     ]
 
 
-def line_changes(repo, base, head, same_code=None):
+def line_changes(repo, base, head, same_code=None, hunks=None):
     """Added head lines and deletion gaps (number of head lines before the gap).
 
     A zero-length head hunk starts after its numbered line. Other hunks start
     on that line; each deleted run is at the gap before the next head line.
     With `same_code`, a hunk whose removed and added line texts it calls equal
     (the Win32 lint's Zig token comparison: a comment or whitespace edit)
-    records neither its added lines nor its deletion gaps.
+    records neither its added lines nor its deletion gaps. With a `hunks`
+    dict, each recorded hunk's added head lines and removed line texts are
+    appended to `hunks[path]`.
     """
     base = merge_base(repo, base, head)
     names = changed_paths(repo, base, head, "*.zig")
@@ -99,6 +101,8 @@ def line_changes(repo, base, head, same_code=None):
             if hunk and not (same_code and same_code(hunk[2], hunk[3])):
                 rows.update(hunk[0])
                 deleted.update(hunk[1])
+                if hunks is not None:
+                    hunks.setdefault(name, []).append((frozenset(hunk[0]), tuple(hunk[2])))
 
         for line in diff.split("\n"):
             match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
