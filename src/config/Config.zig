@@ -11739,6 +11739,26 @@ pub const RepeatableCommand = struct {
         try testing.expectEqual(inputpkg.command.defaults.len, list.value.items.len);
     }
 
+    test "RepeatableCommand parseCLI: an action without its parameter takes the parameter's default (QR-44)" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        // A 1.3 palette entry: `open_config` had no parameter before 1.4.
+        // `new_split` is another tagged union with a declared default.
+        var list: RepeatableCommand = .{};
+        try list.parseCLI(alloc, "title:Open Config,action:open_config");
+        try list.parseCLI(alloc, "title:Split,action:new_split");
+        try list.parseCLI(alloc, "title:Split Left,action:new_split:left");
+        try testing.expectEqual(@as(usize, 3), list.value.items.len);
+        try testing.expectEqual(inputpkg.Binding.Action{ .open_config = .os_open }, list.value.items[0].action);
+        try testing.expectEqual(inputpkg.Binding.Action{ .new_split = .auto }, list.value.items[1].action);
+        try testing.expectEqual(inputpkg.Binding.Action{ .new_split = .left }, list.value.items[2].action);
+        // A colon with nothing after it still names no value.
+        try testing.expectError(error.InvalidValue, list.parseCLI(alloc, "title:Bad,action:open_config:"));
+    }
+
     test "RepeatableCommand clone rebuilds the C mirror" {
         const testing = std.testing;
         var arena = ArenaAllocator.init(testing.allocator);
