@@ -6,9 +6,11 @@
 # residue list's "checked, left" rows and the lead's QF3 ruling give them (keep upstream's line where a kind check
 # follows the open; such a site pins its check's whole text, and holds only while that text follows the open in
 # the same block: council W2 and Y1). The text is matched, not what the check does: a check moved into dead code,
-# or made weaker in meaning without a change of text, is code review's. A write-mode open refuses a directory anyway. The fork's own `win32_sys.openFile` opens files
-# only by default and is not this API. Only the options argument, the call's last, is read (council W3). A new
-# open, or one that loses the option, fails here.
+# or made weaker in meaning without a change of text, is code review's. A write-mode open refuses a directory
+# anyway. The fork's own `win32_sys.openFile` opens files only by default and is not this API. Only the options
+# argument, the call's last, is read (council W3), and it must be one plain struct literal whose top level sets
+# `.allow_directory = false` or a write `.mode`, exactly (council Y2): a computed, conditional or unparsed form
+# fails, and a real site in one is reviewed below. A new open, or one that loses the option, fails here.
 
 # Blanks comments, multi-line-string lines and string and character literals, keeping the length. With
 # -KeepStrings the string and character literals stay as written (a pinned check's text holds its strings).
@@ -61,8 +63,7 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
         # Only the last top-level argument, the options, counts: a struct inside the path argument says
         # nothing about the open (council W3).
         $options = Get-OpenFileLastArgument $callArgs
-        if ($options -match '\ballow_directory\s*=\s*false\b') { continue }
-        if ($options -match '\.mode\s*=\s*\.(?:write_only|read_write)\b') { continue }
+        if (Test-OpenFileOptionsRefuseDirectory $options) { continue }
         $name = '(top level)'
         foreach ($function in $functions) { if ($function.Index -lt $call.Index) { $name = $function.Groups[1].Value } else { break } }
         # A site reviewed for the kind check that follows its open holds only while that check's whole pinned
@@ -96,6 +97,42 @@ function Get-OpenFileLastArgument([string] $CallArgs) {
         if ($piece.Trim().Length -gt 0) { return $piece }
     }
     return ''
+}
+
+# Whether `$Options`, an open's options argument (strings blanked), is one plain struct literal, `.{ ... }`, whose
+# top level holds `.allow_directory = false` or `.mode` set to a write mode, each value exactly that. Anything
+# else reads as an open that may accept a directory (council Y2): a computed or conditional value or argument,
+# `. {`, a field the guard cannot parse, or the field inside a nested literal. A real site in such a form is
+# reviewed below.
+function Test-OpenFileOptionsRefuseDirectory([string] $Options) {
+    $text = $Options.Trim()
+    if (-not $text.StartsWith('.{') -or -not $text.EndsWith('}')) { return $false }
+    # The literal's own brace must close at its end: `.{ } orelse .{ ... }` is two expressions.
+    $depth = 0
+    foreach ($d in [regex]::new('[()\[\]{}]').Matches($text, 1)) {
+        if ('([{'.Contains($d.Value)) { $depth++ } else { $depth--; if ($depth -eq 0 -and $d.Index -ne $text.Length - 1) { return $false } }
+    }
+    $inner = $text.Substring(2, $text.Length - 3)
+    $fields = [System.Collections.Generic.List[string]]::new()
+    $depth = 0
+    $start = 0
+    foreach ($d in [regex]::new('[()\[\]{},]').Matches($inner)) {
+        $c = $d.Value
+        if ($c -eq ',') { if ($depth -eq 0) { $fields.Add($inner.Substring($start, $d.Index - $start)); $start = $d.Index + 1 } }
+        elseif ('([{'.Contains($c)) { $depth++ }
+        else { $depth-- }
+    }
+    $fields.Add($inner.Substring($start))
+    $refuses = $false
+    foreach ($field in $fields) {
+        if ($field.Trim().Length -eq 0) { continue }
+        $m = [regex]::Match($field, '^\s*\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S(?:.*\S)?)\s*$', 'Singleline')
+        if (-not $m.Success) { return $false }
+        $value = [regex]::Replace($m.Groups[2].Value, '\s+', ' ')
+        if ($m.Groups[1].Value -ceq 'allow_directory' -and $value -ceq 'false') { $refuses = $true }
+        if ($m.Groups[1].Value -ceq 'mode' -and ($value -ceq '.write_only' -or $value -ceq '.read_write')) { $refuses = $true }
+    }
+    return $refuses
 }
 
 # Whether `$Check`, a check's whole text with its whitespace normalized (each run one space), appears in `$Code`
@@ -224,6 +261,14 @@ foreach ($sample in @(
         @{ Text = "fn m() !void {`n    const f = try dir.openFile(io, pick(.{ .mode = .read_write }), .{});`n}`n"; Hits = 1 }
         @{ Text = "fn a() !void {`n    const f = try dir.openFile(io, pick(.{ .allow_directory = false }), .{});`n}`n"; Hits = 1 }
         @{ Text = "fn t() !void {`n    const f = try dir.openFile(`n        io,`n        pick(.{ .x = 1 }),`n        .{ .allow_directory = false },`n    );`n}`n"; Hits = 0 }
+        # Council Y2: options the guard cannot read as refusing a directory fail; a plain literal passes.
+        @{ Text = "fn c() !void {`n    const f = try dir.openFile(io, `"x`", .{ .allow_directory = false or x });`n}`n"; Hits = 1 }
+        @{ Text = "fn k() !void {`n    const f = try dir.openFile(io, `"x`", if (c) .{ .mode = .read_write } else .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn s() !void {`n    const f = try dir.openFile(io, `"x`", . { .allow_directory = false });`n}`n"; Hits = 1 }
+        @{ Text = "fn n() !void {`n    const f = try dir.openFile(io, `"x`", .{ .lock = .{ .allow_directory = false } });`n}`n"; Hits = 1 }
+        @{ Text = "fn u() !void {`n    const f = try dir.openFile(io, `"x`", .{ .allow_directory = false, extra });`n}`n"; Hits = 1 }
+        @{ Text = "fn v() !void {`n    const f = try dir.openFile(io, `"x`", options);`n}`n"; Hits = 1 }
+        @{ Text = "fn p() !void {`n    const f = try dir.openFile(io, `"x`", .{ .mode = .read_only, .allow_directory = false });`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
