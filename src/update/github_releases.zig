@@ -2399,7 +2399,7 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     const dir_path = std.fs.path.dirname(dest_path) orelse return error.InvalidDownloadPath;
     const leaf = std.fs.path.basename(dest_path);
     if (leaf.len == 0) return error.InvalidDownloadPath;
-    try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
+    try makeDirPath(dir_path);
 
     // Every child below is created, replaced, and renamed relative to this
     // one handle. Holding the stage directory keeps that directory from
