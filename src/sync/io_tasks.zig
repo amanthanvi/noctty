@@ -246,7 +246,10 @@ test "acceptance test 19: Io.Group.async whose task cannot be allocated runs a .
     try expectTag(.ui, On.current());
 }
 
-const SelectResult = union(enum) { task: void };
+/// A select's result. Two fields, so it has a size: `Io.Queue` divides by
+/// its element's (0.17.1 `lib/std/Io.zig` `putUncancelable`, `get`), and a
+/// one-`void` union has none, which fails to compile.
+const SelectResult = union(enum) { task: void, unused: void };
 
 test "acceptance test 19: Io.Select.async at the async limit runs a .search task inline under the caller's .ui, and its pool task enters .search" {
     const scope = On.fixture(.ui);
