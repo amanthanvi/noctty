@@ -1136,7 +1136,10 @@ pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
 /// `updates` folder opened, for its attributes only, and that folder's
 /// identity (volume serial and FILE_ID_INFO file ID) compared with the
 /// stage's (`stagedImageByIdentity`; council T3, U2, U6). No other folder is
-/// opened, and none on another root.
+/// opened, and none on another root. The root check reads the path the
+/// process reports, which is the path after any link
+/// (`QueryFullProcessImageNameW` names the image's file object; council V1):
+/// a process started through a local link to a share reports the share.
 fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     const windows = std.os.windows;
     var dir = std.Io.Dir.openDirAbsolute(updateIo(), updates_dir, .{}) catch return false;
@@ -1213,6 +1216,32 @@ fn identityFrom(info: FILE_ID_INFO) ?DirectoryIdentity {
     const invalid: [16]u8 = @splat(0xff);
     if (std.mem.eql(u8, &info.FileId, &none) or std.mem.eql(u8, &info.FileId, &invalid)) return null;
     return .{ .volume = info.VolumeSerialNumber, .file_id = info.FileId };
+}
+
+test "the identity fallback goes through the root check before it opens anything (council V1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "updates");
+    var dir = try tmp.dir.openDir(io, "updates", .{});
+    defer dir.close(io);
+    const final_buf = try alloc.alloc(u16, std.os.windows.PATH_MAX_WIDE);
+    defer alloc.free(final_buf);
+    const final = try win32_sys.getFinalPathNameByHandle(dir.handle, final_buf);
+    const identity = directoryIdentity(dir.handle) orelse return error.SkipZigTest;
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    // The positive control: an image in a version folder of this stage
+    // matches by identity (nothing needs to exist below `updates`).
+    const image = try std.mem.concat(alloc, u16, &.{ final, w("\\1\\x.exe") });
+    defer alloc.free(image);
+    try std.testing.expect(stagedImageByIdentity(alloc, final, image, identity));
+    // The same image as a device path: the root check refuses it before the
+    // open, which would otherwise reach the same folder and match.
+    const device = try std.mem.concat(alloc, u16, &.{ w("\\\\?\\"), final, w("\\1\\x.exe") });
+    defer alloc.free(device);
+    try std.testing.expect(!stagedImageByIdentity(alloc, final, device, identity));
 }
 
 test "a zero or all-0xFF file ID is no directory identity (council U6)" {
