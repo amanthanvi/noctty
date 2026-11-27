@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const build_options = @import("terminal_options");
 const terminal = @import("../main.zig");
 const point = terminal.point;
 const size = terminal.size;
@@ -569,7 +570,10 @@ test "feed keeps its tracked pin within a shorter page" {
 
     try testing.expect(try search.feed());
     try testing.expectEqual(shorter, search.pin.node);
-    try testing.expect(pages.pinIsValid(search.pin.*));
+    // pinIsValid exists only where slow runtime safety is on (Debug): elsewhere
+    // it fails to compile, so a ReleaseSafe test build checks the pin only in
+    // Debug (QR-57; the ARM64 job builds its tests ReleaseSafe, QR-49).
+    if (comptime build_options.slow_runtime_safety) try testing.expect(pages.pinIsValid(search.pin.*));
 }
 
 test "feed discovers pages prepended after exhaustion" {

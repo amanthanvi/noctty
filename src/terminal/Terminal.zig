@@ -17622,7 +17622,10 @@ test "Terminal: fullReset tracked pins" {
     // Create a tracked pin
     const p = try t.screens.active.pages.trackPin(t.screens.active.cursor.page_pin.*);
     t.fullReset();
-    try testing.expect(t.screens.active.pages.pinIsValid(p.*));
+    // pinIsValid exists only where slow runtime safety is on (Debug): elsewhere
+    // it fails to compile, so a ReleaseSafe test build checks the pin only in
+    // Debug (QR-57; the ARM64 job builds its tests ReleaseSafe, QR-49).
+    if (comptime build_options.slow_runtime_safety) try testing.expect(t.screens.active.pages.pinIsValid(p.*));
 }
 
 test "Terminal: default xt checksum survives resets" {
