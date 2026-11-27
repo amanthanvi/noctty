@@ -1066,6 +1066,8 @@ pub const HostControls = struct {
                 const command_entry = snap.commands[index];
                 const cval = snap.cvals[index];
                 const action_text = std.mem.span(cval.action);
+                // The rows `appendActionSnapshot` would list, no more.
+                if (!win32_palette.catalog.listsAction(action_text)) continue;
                 var id = win32_palette.catalog.actionStableId(command_entry.title, action_text);
                 id.value ^= @as(u64, @intCast(index + 1)) *% 0x9e37_79b9_7f4a_7c15;
                 if (!self.appendPaletteDescriptor(.{

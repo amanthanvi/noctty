@@ -13031,13 +13031,20 @@ const PaletteCapacityTest = struct {
         host.profiles = try windows_shell.cloneProfiles(app.core_app.alloc, &profile_list);
         host.profiles_complete = true;
 
-        // A full recent-action list, of distinct commands.
+        // A full recent-action list, of distinct commands the palette lists
+        // (`catalog.listsAction`: not `open_config:new_window`).
         const snap = host.paletteSnapshot();
         defer app.palette_mru = @splat(null);
         var recent: usize = 0;
+        var listed_commands: usize = 0;
+        for (snap.cvals) |cval| {
+            if (win32_palette.catalog.listsAction(std.mem.span(cval.action))) listed_commands += 1;
+        }
+        try std.testing.expect(listed_commands < snap.commands.len);
         for (snap.cvals) |cval| {
             if (recent == app.palette_mru.len) break;
             const action = std.mem.span(cval.action);
+            if (!win32_palette.catalog.listsAction(action)) continue;
             for (app.palette_mru[0..recent]) |slot| {
                 if (std.mem.eql(u8, slot.?, action)) break;
             } else {
@@ -13070,7 +13077,7 @@ const PaletteCapacityTest = struct {
         try std.testing.expectEqual(tabs, kinds.get(.tab));
         try std.testing.expectEqual(tabs * panes_per_tab, kinds.get(.pane));
         try std.testing.expectEqual((tabs - 1) * 4, transfers);
-        try std.testing.expectEqual(snap.commands.len + transfers, kinds.get(.action));
+        try std.testing.expectEqual(listed_commands + transfers, kinds.get(.action));
         try std.testing.expectEqual(profiles, kinds.get(.profile));
         try std.testing.expectEqual(std.enums.values(win32_settings.SettingField).len, kinds.get(.setting));
         try std.testing.expectEqual(@as(usize, win32_palette.catalog.reviewed_help.len), kinds.get(.help));

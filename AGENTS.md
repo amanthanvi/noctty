@@ -448,7 +448,9 @@ that govern each symbol you change, or that none does.
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
-  palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
+  palette (`win32_palette.zig`, `win32/palette_controller.zig`, the
+  commands it leaves out of upstream's defaults: `listsAction` in
+  `win32_palette_catalog.zig`, its live
   theme preview, one window's at a time (`Host.showOverlay`, which closes
   every other window's palette; `Surface.toggleTabOverview`, which closes
   what is open first like every overlay's open; the error
