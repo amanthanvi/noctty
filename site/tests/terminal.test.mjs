@@ -148,12 +148,14 @@ test('every key the demo presses is a shipped Windows default for that action', 
 test('the demo palette rows are real commands with their real defaults', () => {
   for (const entry of PALETTE_RESULTS) {
     if (entry.tab) continue;
-    // command.zig lists each entry as action, title, description in order.
+    // command.zig lists each entry as action, title, description in order;
+    // since upstream 1.4 each string is marked for translation, i18n.N_("...").
     const [name, arg] = entry.action.split(':');
+    const text = (value) => `(?:"${escapeRegExp(value)}"|i18n\\.N_\\("${escapeRegExp(value)}"\\))`;
     const pattern = new RegExp(
       `\\.action = \\.\\{ \\.${name} = \\.${arg} \\},\\s*` +
-        `\\.title = "${escapeRegExp(entry.title)}",\\s*` +
-        `\\.description = "${escapeRegExp(entry.description)}"`,
+        `\\.title = ${text(entry.title)},\\s*` +
+        `\\.description = ${text(entry.description)}`,
     );
     assert.match(commandTitles, pattern, `no command ${entry.title} with that action and description`);
     if (entry.keys) {
