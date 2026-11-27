@@ -136,7 +136,12 @@ the cross-file recheck is bounded to resolved literal exports of
 `src/os/windows.zig`, not arbitrary module evaluation. They are not evaluated
 by this lint.
 
-**Comments and whitespace are no change:** the Win32 lint drops a diff hunk
+**Comments and whitespace are no change:** a file whose only changes are to
+comments and whitespace is never flagged: before reading its hunks, the Win32
+lint skips a file whose whole Zig code-token stream is the same at base and
+head, whatever lines git aligns (council S1 on #768; a swap of comments on two
+identical calls once made git read one call as added). In a file with a real
+change, the lint drops a diff hunk
 whose removed and added lines hold the same Zig tokens (`same_zig_code`, which
 `line_changes` takes as `same_code`), so a comment or whitespace edit on an
 alias's definition line rechecks nothing, while a reference added in the same

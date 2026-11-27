@@ -83,11 +83,19 @@ def line_changes(repo, base, head, same_code=None):
     on that line; each deleted run is at the gap before the next head line.
     With `same_code`, a hunk whose removed and added line texts it calls equal
     (the Win32 lint's Zig token comparison: a comment or whitespace edit)
-    records neither its added lines nor its deletion gaps.
+    records neither its added lines nor its deletion gaps. Before that, a
+    file present at both commits whose whole texts it calls equal records
+    nothing, whatever lines git aligns: a file whose only changes are to
+    comments and whitespace (council S1 on #768).
     """
     base = merge_base(repo, base, head)
     names = changed_paths(repo, base, head, "*.zig")
     result = {}
+    if same_code:
+        both = set(names) & paths(repo, base) & paths(repo, head)
+        befores, afters = sources(repo, base, both), sources(repo, head, both)
+        names = [name for name in names
+                 if name not in both or not same_code(befores[name].split("\n"), afters[name].split("\n"))]
     for name in names:
         diff = git(repo, "diff", *DIFF_OPTIONS, base, head,
                    "--", ":(literal)" + name).decode("utf-8")

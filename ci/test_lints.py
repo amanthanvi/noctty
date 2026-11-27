@@ -872,6 +872,35 @@ class GitControls(unittest.TestCase):
         head = self.commit()
         self.assertEqual([4], [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
 
+    def test_comment_only_file_is_never_flagged_whatever_git_aligns(self):
+        # Council S1 on #768, Sol's case: each arm of an if/else holds `w.Sleep(1);`. Swapping their `// on` and
+        # `// off` comments made git match a call across the `else` boundary, so an unchanged call read as added and
+        # failed. A file whose whole Zig code-token stream is the same at base and head is now skipped first.
+        self.write("src/os/windows.zig", "// reexports\n")
+        upstream, removed, _ = self.inputs()
+        source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\nfn f(on: bool) void {\n'
+                  '    if (on) {\n        w.Sleep(1); // on\n    } else {\n        w.Sleep(1); // off\n    }\n}\n')
+        swapped = source.replace("// on", "// was").replace("// off", "// on").replace("// was", "// off")
+        self.write("probe.zig", source)
+        self.write("other.zig", 'const std = @import("std");\n')
+        base = self.commit()
+        self.write("probe.zig", swapped)
+        head = self.commit()
+        self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
+        self.assertNotIn("probe.zig", common.line_changes(self.repo, base, head, same_code=win.same_zig_code))
+        # Git's alignment is the one that misled the hunk rule: without the file check the swap reads as a change.
+        self.assertIn("probe.zig", common.line_changes(self.repo, base, head))
+        # The same swap beside a genuinely added call in another file reports that call alone.
+        self.write("other.zig", 'const std = @import("std");\nfn g() void { std.os.windows.kernel32.Sleep(2); }\n')
+        head = self.commit()
+        self.assertEqual([("other.zig", 2)], [(row[0], row[1]) for row in win.check(self.repo, base, head, upstream, removed)])
+        # Documented over-report: in the same file, the added call makes a real change, so the file keeps the hunk
+        # rule and the misaligned call is reported too. It fails closed.
+        self.write("other.zig", 'const std = @import("std");\n')
+        self.write("probe.zig", swapped + "fn g() void {\n    w.Sleep(2);\n}\n")
+        head = self.commit()
+        self.assertEqual([7, 11], [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
+
     def test_fail_open_fixtures_report_the_forbidden_use(self):
         # Council R1 on #768: every fixture with which P1 (round 2) or Q1 (round 3) matched a touched alias to an old
         # declaration, and so hid an unchanged use now bound to kernel32. With only N3's rule (a hunk whose tokens did
