@@ -73,7 +73,6 @@ pub const windows_notes = [_]WindowsNote{
     .{ .key = "window-subtitle", .note = no_effect },
     .{ .key = "window-step-resize", .note = no_effect },
     .{ .key = "drag-handle", .note = "Has no effect on Windows: it belongs to the split drag handles of upstream Ghostty's macOS and GTK apps. It is kept so a shared config file still loads." },
-    .{ .key = "scrollback-compression", .note = "Has no effect on Windows: this build does not compress scrollback. It is kept so a shared config file still loads." },
     .{ .key = "gtk-opengl-debug", .note = gtk_only },
     .{ .key = "gtk-custom-css", .note = gtk_only },
     .{ .key = "gtk-quick-terminal-layer", .note = gtk_only },
