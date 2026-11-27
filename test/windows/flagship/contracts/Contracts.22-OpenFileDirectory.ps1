@@ -103,7 +103,8 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
         $options = Get-OpenFileLastArgument $callArgs
         if (Test-OpenFileOptionsRefuseDirectory $options) { continue }
         $name = '(top level)'
-        foreach ($function in $functions) { if ($function.Index -lt $call.Index) { $name = $function.Groups[1].Value } else { break } }
+        $nameAt = 0
+        foreach ($function in $functions) { if ($function.Index -lt $call.Index) { $name = $function.Groups[1].Value; $nameAt = $function.Index } else { break } }
         # A site reviewed for the kind check that follows its open holds only while that check's whole pinned
         # text is still there, after the open and in the block that holds it (council W2 and Y1).
         $site = "${Path}:${name}"
@@ -112,6 +113,15 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
             if ($null -eq $withStrings) { $withStrings = Remove-OpenFileNonCode $ZigText -KeepStrings }
             if (-not (Test-OpenFileKindCheck -Code $withStrings -After $callEnd -Check $reviewed[0]['Check'])) {
                 $site += ' (its pinned kind check is not after the open)'
+            }
+        }
+        # A site reviewed for the branch that comes before its open holds only while that branch's whole pinned
+        # text ends at the open, in the same function (council AB1).
+        $before = @($script:OpenFileDirectoryReviewed | Where-Object { $_['Site'] -ceq $site -and $_['Before'] })
+        if ($before.Length -eq 1) {
+            if ($null -eq $withStrings) { $withStrings = Remove-OpenFileNonCode $ZigText -KeepStrings }
+            if (-not (Test-OpenFilePinnedText -Code $withStrings -Blank $code -Start $nameAt -End $call.Index -Text $before[0]['Before'] -AtEnd)) {
+                $site += ' (its pinned branch is not before the open)'
             }
         }
         $site
@@ -189,8 +199,9 @@ function Test-OpenFileKindCheck([string] $Code, [int] $After, [string] $Check) {
 # Whether `$Text`, a pinned text with its whitespace normalized (each space matching any run of whitespace), is in
 # `$Code` (comments blanked, strings kept) between `$Start` and `$End`, starting at a code token: its first token
 # must be there in `$Blank` (strings blanked too), so the same text inside a string does not count (council AA3).
-function Test-OpenFilePinnedText([string] $Code, [string] $Blank, [int] $Start, [int] $End, [string] $Text) {
-    $pattern = '(?<![\w.])' + [regex]::Escape($Text).Replace('\ ', '\s+')
+function Test-OpenFilePinnedText([string] $Code, [string] $Blank, [int] $Start, [int] $End, [string] $Text, [switch] $AtEnd) {
+    # With -AtEnd the text must end where the region does, at the open itself (council AB1).
+    $pattern = '(?<![\w.])' + [regex]::Escape($Text).Replace('\ ', '\s+') + $(if ($AtEnd) { '\s*$' } else { '' })
     $lead = [regex]::Match($Text, '^\S+').Value.Length
     foreach ($m in [regex]::new($pattern).Matches($Code.Substring($Start, $End - $Start))) {
         $at = $Start + $m.Index
@@ -213,7 +224,10 @@ $script:OpenFileDirectoryReviewed = @(
     @{ Site = 'src/os/cgroup.zig:current'; Opens = 1; Why = 'a Linux /proc read, where 0.15 opened a directory too' }
     @{ Site = 'src/os/kernel_info.zig:getKernelInfo'; Opens = 1; Why = 'a Linux /proc read' }
     @{ Site = 'src/os/systemd.zig:launchedBySystemd'; Opens = 1; Why = 'a Linux /proc read' }
-    @{ Site = 'src/terminal/kitty/graphics_image.zig:readFile'; Opens = 1; Why = 'the non-Windows branch; on Windows the open goes through local_path.open' }
+    # The Windows branch that keeps Windows off this open is pinned as `Before`, its whole text ending at the open
+    # (council AB1).
+    @{ Site = 'src/terminal/kitty/graphics_image.zig:readFile'; Opens = 1; Why = 'the non-Windows branch; on Windows the open goes through local_path.open'
+        Before = 'if (comptime builtin.target.os.tag == .windows) switch (try local_path.open(alloc, path, .{ .data = true })) { .found => |found| hit: { alloc.free(found.path); break :hit found.file; }, else => |opened| { log.warn("failed to open image file: {t}", .{opened}); return error.InvalidData; }, } else std.Io.Dir.cwd()' }
     # Test-only helpers outside a `test` block (they open with std.testing.io or only tests call them).
     @{ Site = 'src/apprt/win32/app.zig:read'; Opens = 1; Why = 'a test fixture struct''s reader (std.testing.io)' }
     @{ Site = 'src/apprt/win32/sys.zig:expectFinalPathAsOpened'; Opens = 1; Why = 'the final-path test''s helper' }
@@ -304,6 +318,17 @@ foreach ($kindControl in @(
     }
     $openFileControls++
 }
+# Council AB1: the kitty open's Windows branch removed, so the plain open runs on Windows too, fails.
+$kittyPath = 'src/terminal/kitty/graphics_image.zig'
+$kittyText = (Get-Content -LiteralPath (Join-Path $repoRoot $kittyPath) -Raw).Replace("`r`n", "`n")
+$kittyMutant = [regex]::new('(?s)if \(comptime builtin\.target\.os\.tag == \.windows\) switch \(try local_path\.open\(.*?\} else (std\.Io\.Dir\.cwd\(\)\.openFile\()').Replace($kittyText, '$1', 1)
+if ([string]::Equals($kittyMutant, $kittyText, [StringComparison]::Ordinal)) { throw 'The kitty branch control changed nothing.' }
+$kittyHits = @{} + $openFileHits
+$kittyHits[$kittyPath] = @(Get-OpenFileDirectoryHits -ZigText $kittyMutant -Path $kittyPath)
+if ((Get-OpenFileDirectoryProblems -HitsByFile $kittyHits) -cnotcontains "${kittyPath}:readFile (its pinned branch is not before the open) opens without .allow_directory = false (1, reviewed 0)") {
+    throw 'The open-file directory check kept the kitty open reviewed after its Windows branch was removed.'
+}
+$openFileControls++
 foreach ($sample in @(
         @{ Text = "test `"t`" {`n    const f = try dir.openFile(io, `"x`", .{});`n}`n"; Hits = 0 }
         @{ Text = "fn w() !void {`n    const f = try dir.openFile(io, `"x`", .{ .mode = .write_only });`n}`n"; Hits = 0 }
