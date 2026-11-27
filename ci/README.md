@@ -155,7 +155,12 @@ mixed hunks, P1 and Q1, each failed open on twin scopes). Two limits follow:
 - **Mixed hunks and moves over-report, and fail closed.** A comment on an
   alias line beside an edit to the next line is one hunk whose code changed,
   so the alias's unchanged uses are rechecked (40 on the real `ipc_server.zig`),
-  and so is a moved alias. Split the comment edit into its own hunk or commit.
+  and so is a moved alias. In a file with a real change, a comment can also
+  make git align an unchanged call as added, and that call is reported: two
+  identical calls whose comments are swapped, beside one added call, report
+  both the added call and the misaligned one (`[7, 11]` in
+  `test_comment_only_file_is_never_flagged_whatever_git_aligns`). Split the
+  comment edit into its own hunk or commit.
 - **An edit elsewhere that changes scope is missed.** When the uses of an alias
   whose own line is untouched bind somewhere else (a removed `else` boundary,
   merged blocks), no touched definition rechecks them. This limit of the
