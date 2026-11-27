@@ -8,7 +8,10 @@ For each file, a use of the map's name through a binding of the fork's os/window
                 when the file has none);
   top           `W.exp.<name>` -> `W.<name>` (v1.4.0 has it at its top level);
   exp.kernel32  `W.<name>` -> `W.exp.kernel32.<name>`.
-The map is read against the merged content: a use 0b already re-homed is simply not found. Idempotent.
+The map is read against the merged content: a use 0b already re-homed is simply not found. Idempotent. A file with
+more than one binding of the windows module (a local `os.windows` alias and a file-scope `internal_os.windows` one),
+or of windows_ext, is a hand edit: which binding a use or an added windows_ext goes through needs a reader, so
+nothing in it is rewritten and each use the sweep would re-point prints as `hand edit<TAB><file><TAB>...`.
 
 Usage: python plans/1b/codemod/b1_sweep.py <map> [--check] [--report out.tsv]
 """
@@ -33,11 +36,17 @@ def parse_map(path):
     return out
 
 
+MANY_BINDINGS = ("the file binds the fork's {} module more than once (lines {}), so which binding a use, or an "
+                 "added windows_ext, goes through needs a reader: the whole file is a hand edit")
+
+
 def windows_bindings(toks, rel):
     """Names bound to the fork's os/windows module, the file's windows_ext binding name (or None), the index of
     the token that ends the first windows binding's declaration (for an added binding), and that binding's
-    import path (for `@import(".../windows.zig")`) or else None, and its initializer's text."""
+    import path (for `@import(".../windows.zig")`) or else None, its initializer's text, and the 1-based line of
+    every windows binding and of every windows_ext binding."""
     names, ext, decl_end, import_path, init = set(), None, None, None, None
+    windows_lines, ext_lines = [], []
     is_os = rel.startswith("src/os/")
     for i, t in enumerate(toks):
         if not (t.kind == "keyword" and t.text == "const" and codemod.is_tok(codemod.at(toks, i + 1), "identifier")
@@ -52,11 +61,13 @@ def windows_bindings(toks, rel):
         m = re.fullmatch(r'@import\("((?:\.\./)*(?:os/)?)windows\.zig"\)', value)
         if m and (m.group(1).endswith("os/") or (is_os and m.group(1) == "")):
             names.add(name)
+            windows_lines.append(t.line + 1)
             if decl_end is None:
                 decl_end, import_path, init = semi, m.group(1), value
         elif re.fullmatch(r"(internal_os|os)\.windows", value) or re.fullmatch(
                 r'@import\("(?:\.\./)*(?:os/)?main\.zig"\)\.windows', value):
             names.add(name)
+            windows_lines.append(t.line + 1)
             if decl_end is None:
                 decl_end, import_path, init = semi, None, value
         m = re.fullmatch(r'@import\("((?:\.\./)*(?:os/)?)windows_ext\.zig"\)', value)
@@ -64,12 +75,19 @@ def windows_bindings(toks, rel):
                 r"(internal_os|os)\.windows_ext", value) or re.fullmatch(
                 r'@import\("(?:\.\./)*(?:os/)?main\.zig"\)\.windows_ext', value):
             ext = name
-    return names, ext, decl_end, import_path, init
+            ext_lines.append(t.line + 1)
+    return names, ext, decl_end, import_path, init, windows_lines, ext_lines
 
 
-def sweep(text, rel, entries):
+def sweep(text, rel, entries, hand=None):
+    """(new text, [(name path, target, line)]) for one file. A file with more than one binding of the windows module,
+    or of windows_ext, is a hand edit: its text is returned as it is, and each use the sweep would re-point is added
+    to `hand` (when given) as (name path, target, line, why)."""
     toks = codemod.code_tokens(text)
-    names, ext, decl_end, import_path, init = windows_bindings(toks, rel)
+    names, ext, decl_end, import_path, init, windows_lines, ext_lines = windows_bindings(toks, rel)
+    many = next((MANY_BINDINGS.format(what, ", ".join(map(str, lines)))
+                 for what, lines in (("os/windows", windows_lines), ("os/windows_ext", ext_lines)) if len(lines) > 1),
+                None)
     edits, hits = [], []
     need_ext = False
     ext_name = ext or "windows_ext"
@@ -119,6 +137,10 @@ def sweep(text, rel, entries):
                 continue
             edits.append(codemod.Edit(span_start, span_end, new))
             hits.append((name_path, target, t.line + 1))
+    if many is not None and edits:
+        if hand is not None:
+            hand.extend((n, t, line, many) for n, t, line in hits)
+        return text, []
     if need_ext and edits:
         if decl_end is None:
             raise ValueError(f"{rel}: no windows binding to add windows_ext beside")
@@ -142,17 +164,24 @@ def main(argv=None):
     ap.add_argument("--report")
     args = ap.parse_args(argv)
     mapping = parse_map(args.map)
-    report, changed = [], 0
+    report, changed, uses, hand_edits = [], 0, 0, 0
     for rel, entries in mapping.items():
         path = ROOT / rel
         text = path.read_bytes().decode("utf-8")
-        new, hits = sweep(text, rel, entries)
+        hand = []
+        new, hits = sweep(text, rel, entries, hand)
+        uses += len(hits)
+        hand_edits += len(hand)
         report.extend(f"{rel}\t{n}\t{t}\t{line}" for n, t, line in hits)
+        report.extend(f"{rel}\t{n}\t{t}\t{line}\thand edit: {why}" for n, t, line, why in hand)
+        for n, t, line, why in hand:
+            print(f"hand edit\t{rel}\t{n}\t{t}\t{line}\t{why}")
         if new != text:
             changed += 1
             if not args.check:
                 path.write_bytes(new.encode("utf-8"))
-    print(f"uses re-pointed\t{len(report)}\nfiles {'to change' if args.check else 'changed'}\t{changed}")
+    print(f"uses re-pointed\t{uses}\nhand edits\t{hand_edits}\n"
+          f"files {'to change' if args.check else 'changed'}\t{changed}")
     if args.report:
         Path(args.report).write_text("".join(r + "\n" for r in report), encoding="utf-8", newline="\n")
     return 1 if args.check and changed else 0

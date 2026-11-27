@@ -58,6 +58,36 @@ class SweepTests(unittest.TestCase):
                 self.assertIn("_ = windows_ext.detectProcessArchitecture();", got)
                 self.assertEqual(len(hits), 1)
 
+    def test_more_than_one_candidate_binding_is_a_hand_edit(self):
+        # council G9: with a local `os.windows` alias and a later file-scope `internal_os.windows` alias, the sweep
+        # added windows_ext beside the first, inside a function, where a use in another function cannot see it.
+        # More than one binding of the windows module (or of windows_ext) leaves the file to a hand edit: nothing in
+        # it is rewritten, and each use the sweep would re-point is reported.
+        entries = [("detectProcessArchitecture", "ext")]
+        two_windows = ('const internal_os = @import("../os/main.zig");\nfn f() void {\n    const os = internal_os;\n'
+                       '    const w = os.windows;\n    _ = w.detectProcessArchitecture();\n}\n'
+                       'const windows = internal_os.windows;\n'
+                       'fn g() void {\n    _ = windows.detectProcessArchitecture();\n}\n')
+        two_ext = ('const windows = internal_os.windows;\nconst ext = internal_os.windows_ext;\nfn f() void {\n'
+                   '    const local_ext = internal_os.windows_ext;\n    _ = local_ext;\n}\n'
+                   'fn g() void {\n    _ = windows.detectProcessArchitecture();\n}\n')
+        for src, why in ((two_windows, b1_sweep.MANY_BINDINGS.format("os/windows", "4, 7")),
+                         (two_ext, b1_sweep.MANY_BINDINGS.format("os/windows_ext", "2, 4"))):
+            with self.subTest(why=why):
+                hand = []
+                self.assertEqual(b1_sweep.sweep(src, "src/apprt/x.zig", entries, hand), (src, []))
+                lines = [n + 1 for n, line in enumerate(src.split("\n")) if ".detectProcessArchitecture" in line]
+                self.assertEqual(hand, [("detectProcessArchitecture", "ext", n, why) for n in lines])
+        # One binding of each is the sweep's as before, and a file with nothing to re-point reports nothing.
+        one = two_ext.replace("    const local_ext = internal_os.windows_ext;\n    _ = local_ext;\n", "")
+        got, hits = self.run_sweep(one, "src/apprt/x.zig", entries)
+        self.assertIn("_ = ext.detectProcessArchitecture();", got)
+        self.assertEqual(len(hits), 1)
+        hand = []
+        self.assertEqual(b1_sweep.sweep(two_windows, "src/apprt/x.zig", [("knownFolderPathUtf8", "ext")], hand),
+                         (two_windows, []))
+        self.assertEqual(hand, [])
+
     def test_other_receivers_left_alone(self):
         src = ('const w = @import("std").os.windows;\nconst os_windows = @import("../os/windows.zig");\n'
                'fn f() void {\n    _ = w.CloseHandle;\n    _ = self.os_windows.CloseHandle;\n}\n')

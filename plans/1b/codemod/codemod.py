@@ -18,9 +18,10 @@ A hand edit is a 0.15 shape a rule recognises but cannot prove equivalent: the r
 rewritten in memory first; nothing is written unless every file rewrote cleanly (a failure, such as an unreadable
 baseline, writes nothing). A rule's hit is one group of edits, kept or dropped whole: with --fork-lines a group is
 kept only when every line it touches (from each edit's first line to its last) differs from REV, and one that also
-touches an inherited line is a hand edit. A group that would add, drop or move a line break is a hand edit too, so
-the line ownership the filter reads stays true. Two groups that overlap (a call nested in another's arguments) are
-applied in turns until the rule finds nothing more.
+touches an inherited line is a hand edit; a file REV has only under another case (a case-only rename the work tree
+did not take) is a hand edit whole, each rewrite a rule would make in it reported and none written. A group that
+would add, drop or move a line break is a hand edit too, so the line ownership the filter reads stays true. Two
+groups that overlap (a call nested in another's arguments) are applied in turns until the rule finds nothing more.
 """
 import argparse
 import os
@@ -73,7 +74,8 @@ class Bail:
 
 
 class HandEdit(Exception):
-    """Raised while a rule builds a hit for a shape it cannot prove equivalent; the rule reports it as a Bail."""
+    """Raised while a rule builds a hit for a shape it cannot prove equivalent; the rule reports it as a Bail. Also
+    raised by changed_lines for a file whose fork lines it cannot tell, which the run leaves whole."""
 
 
 # Why the engine leaves a hit for a hand edit.
@@ -268,10 +270,15 @@ IO_ARG_NAMES = ("io", "testing.io", "std.testing.io")
 # the slice, so a call's value changes meaning (a hand edit).
 
 
-OPEN_OPTIONS = ("makeOpenPath's options are not `.{}` or `.{ .no_follow = true }`, the two the rule translates "
-                "exactly")
+OPEN_OPTIONS = "makeOpenPath's options are not `.{}`, the one the rule translates exactly"
+NO_FOLLOW = ("makeOpenPath's `.no_follow = true` has no exact 0.17 form: under `.open_options = .{ .follow_symlinks = "
+             "false }` 0.17's createDirPathOpen also stats an existing intermediate component without following a "
+             "link there (NotDir), where 0.15's stat followed it")
 REALPATH_SHAPE = ("realpathAlloc's 0.17 result is a `[:0]u8`: outside an untyped `const` it may lose the sentinel, "
                   "and a later free would get the wrong size")
+REALPATH_USE = ("realpathAlloc's 0.17 result is a `[:0]u8`, and its binding has a use other than a direct "
+                "`<allocator>.free(<binding>)` or a read in place (`.len`, an index): a coercion or a pass to another "
+                "function may drop the sentinel, and a free through that slice would get the wrong size")
 OPEN_FILE_NOTE = ("0.17's openFile opens a directory, which 0.15's refused on Windows (error.IsDir); a test keeps "
                   "0.17's default")
 PRODUCT_OPEN_FILE = ("outside a test the rule has no Io to pass; 0.17's openFile opens a directory, which 0.15's "
@@ -279,13 +286,14 @@ PRODUCT_OPEN_FILE = ("outside a test the rule has no Io to pass; 0.17's openFile
 
 
 def _open_options(texts):
-    """makeOpenPath's 0.15 `OpenOptions`: `.{}` stays, and `.{ .no_follow = true }` is 0.17's
-    `.{ .open_options = .{ .follow_symlinks = false } }`, both exact; any other option is a hand edit."""
+    """makeOpenPath's 0.15 `OpenOptions`: `.{}` stays, exact; any other option is a hand edit. `.no_follow = true`
+    is too: 0.17's `.open_options = .{ .follow_symlinks = false }` also changes createDirPathOpen's check of an
+    existing intermediate component (std.Io.Threaded stats it with the same `follow_symlinks`)."""
     words = [t.text for t in code_tokens(texts[1])]
     if words == [".", "{", "}"]:
         return texts[1]
     if words in ([".", "{", ".", "no_follow", "=", "true", "}"], [".", "{", ".", "no_follow", "=", "true", ",", "}"]):
-        return ".{ .open_options = .{ .follow_symlinks = false } }"
+        raise HandEdit(NO_FOLLOW)
     raise HandEdit(OPEN_OPTIONS)
 
 
@@ -296,15 +304,48 @@ def _untyped_const_init(toks, s, close):
             and is_tok(at(toks, k - 3), "keyword", "const") and is_tok(at(toks, close + 1), "op", ";"))
 
 
+def _freed_or_read(toks, lo, hi, decl):
+    """Every use in toks[lo:hi] of the name toks[decl] declares is a direct `<allocator>.free(<name>)` or a read in
+    place (`<name>.len`, `<name>[i]`, not a slice); `<name>.<field>` and `.<name>` are no uses of it."""
+    name = toks[decl].text
+    for k in range(lo, hi):
+        if k == decl or not is_tok(toks[k], "identifier", name) or is_tok(at(toks, k - 1), "op", "."):
+            continue
+        if (is_tok(at(toks, k - 1), "op", "(") and is_tok(at(toks, k + 1), "op", ")")
+                and is_tok(at(toks, k - 2), "identifier", "free") and is_tok(at(toks, k - 3), "op", ".")
+                and is_tok(at(toks, k - 4), "identifier")):
+            continue
+        if is_tok(at(toks, k + 1), "op", ".") and is_tok(at(toks, k + 2), "identifier", "len"):
+            continue
+        if is_tok(at(toks, k + 1), "op", "["):
+            close = close_of(toks, k + 1)
+            depth = 0
+            for j in range(k + 1, close if close is not None else k + 1):
+                if toks[j].kind == "op" and toks[j].text in ("(", "[", "{"):
+                    depth += 1
+                elif toks[j].kind == "op" and toks[j].text in (")", "]", "}"):
+                    depth -= 1
+                elif depth == 1 and is_tok(toks[j], "op", ".."):
+                    break
+            else:
+                if close is not None:
+                    continue
+        return False
+    return True
+
+
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
-LIMIT_SHAPE = "readFileAlloc's limit is no literal or simple name, so `+ 1` (0.15's inclusive bound) could change it"
+LIMIT_SHAPE = ("readFileAlloc's limit is no integer literal, so `+ 1` (0.15's inclusive bound) could change it "
+               "(`1 << 20 + 1` is `1 << 21`) or overflow (a name bound to `maxInt(usize)`)")
+INT_LITERAL = re.compile(r"0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*")
 
 
 def _inclusive_limit(texts):
     """readFileAlloc's 0.15 `max_bytes` accepted a file of exactly that size; 0.17's `Io.Limit` refuses a file that
-    reaches it. `.limited(n + 1)` keeps the bound, for a literal or a simple name only: `1 << 20 + 1` is `1 << 21`."""
+    reaches it. `.limited(n + 1)` keeps the bound, for an integer literal only: `1 << 20 + 1` is `1 << 21`, and a
+    name's value (`maxInt(usize)`, which `+ 1` overflows) is not in the tokens."""
     toks = code_tokens(texts[2])
-    if len(toks) == 1 and toks[0].kind in ("number", "identifier"):
+    if len(toks) == 1 and toks[0].kind == "number" and INT_LITERAL.fullmatch(toks[0].text):
         return ".limited(" + texts[2] + " + 1)"
     raise HandEdit(LIMIT_SHAPE)
 
@@ -385,6 +426,65 @@ REUSED_NAME = ("the name `{}` is bound more than once in this test, so which ope
                "reader: its 0.15 opens and its closes are hand edits")
 REUSED_RECEIVER = ("the name `{}` is bound more than once in this test, not always to a temporary directory: its "
                    "calls are hand edits")
+UNREAD_OPEN = ("the pairing reads an open's binding only as `const f = [try] <open>`, and this open's value goes "
+               "elsewhere (a typed binding, an assignment, a field, another expression), so its close would not be "
+               "rewritten with it: the open, and the closes and opens of a name it binds, are hand edits")
+
+
+def _enclosing_open(toks, r):
+    """The index of the innermost bracket that is open at toks[r], or None."""
+    depth = 0
+    for k in range(r - 1, -1, -1):
+        t = toks[k]
+        if t.kind != "op":
+            continue
+        if t.text in (")", "]", "}"):
+            depth += 1
+        elif t.text in ("(", "[", "{"):
+            if depth == 0:
+                return k
+            depth -= 1
+    return None
+
+
+def _statement_start(toks, p):
+    """The index of the first token of the statement (or of the bracketed group) toks[p] is in."""
+    depth = 0
+    for k in range(p - 1, -1, -1):
+        t = toks[k]
+        if t.kind != "op":
+            continue
+        if t.text in (")", "]"):
+            depth += 1
+        elif t.text in ("(", "["):
+            if depth == 0:
+                return k + 1
+            depth -= 1
+        elif depth == 0 and t.text in (";", "{", "}"):
+            return k + 1
+    return 0
+
+
+def _open_target(toks, r):
+    """Where the value of an open that the pairing did not read goes (toks[r] starts its receiver): (True, None)
+    when nothing can close it (the open is an argument of `expectError`, or discarded by `_ =`), else (False, the
+    name a typed `const`/`var` or an assignment binds it to, or None when it goes anywhere else)."""
+    p = r - 1
+    if is_tok(at(toks, p), "keyword", "try"):
+        p -= 1
+    t = at(toks, p)
+    if is_tok(t, "op", ",") or is_tok(t, "op", "("):
+        o = _enclosing_open(toks, r)
+        return (o is not None and is_tok(toks[o], "op", "(") and is_tok(at(toks, o - 1), "identifier", "expectError"),
+                None)
+    if is_tok(t, "op", "="):
+        s = _statement_start(toks, p)
+        if s == p - 1 and is_tok(toks[s], "identifier"):
+            return (True, None) if toks[s].text == "_" else (False, toks[s].text)
+        if (is_tok(at(toks, s), "keyword") and toks[s].text in ("const", "var")
+                and is_tok(at(toks, s + 1), "identifier") and is_tok(at(toks, s + 2), "op", ":")):
+            return False, toks[s + 1].text
+    return False, None
 
 
 def _binding_counts(toks, lo, hi):
@@ -457,17 +557,22 @@ def rule_test_dir_io(text, toks):
     (`<tmp>.dir.<method>(`) or on `std.fs.cwd()` becomes the 0.17 `std.Io.Dir` call with `std.testing.io`, renamed
     where 0.17 renamed it (makeDir, makePath, makeOpenPath, realpathAlloc). readFileAlloc's byte bound `n` becomes
     the `Io.Limit` `.limited(n + 1)`, since 0.15 accepted a file of exactly `n` bytes and 0.17's limit refuses a file
-    that reaches it; a bound that is not a literal or a simple name is a hand edit. Its oversize error is
-    `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a helper outside the
-    test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a `[:0]u8`, so it is
-    rewritten only as the whole initializer of an untyped `const`, whose `free` keeps the sentinel's size.
-    makeOpenPath's options are rewritten only where the translation is exact (`.{}`, `.{ .no_follow = true }`).
+    that reaches it; a bound that is not an integer literal (a name may be `maxInt(usize)`) is a hand edit. Its
+    oversize error is `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a
+    helper outside the test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a
+    `[:0]u8`, so it is rewritten only as the whole initializer of an untyped `const` bound once in the test, whose
+    every use is a direct `<allocator>.free(<name>)` or a read in place (`.len`, an index), so a free keeps the
+    sentinel's size.
+    makeOpenPath's options are rewritten only where the translation is exact (`.{}`; `.no_follow = true` is not).
     openFile in a test keeps 0.17's default, which opens a directory where 0.15's refused one on Windows, and the
     report notes each; outside a test nothing is rewritten (no `std.testing.io` there), and a 0.15 openFile on
     `std.fs.cwd()` or `std.fs.openFileAbsolute` is a reported hand edit that should pass `.allow_directory = false`.
     A file or directory such a call opened (`const f = try tmp.dir.createFile(...)`) closes with the
     Io, in the same hit as its open, so the two are rewritten together or not at all; one whose open is already
-    0.17's closes with the Io alone. Only the 0.15 arity is rewritten, so a ported call is left alone."""
+    0.17's closes with the Io alone. An open whose value goes anywhere else (a typed binding, an assignment, a field,
+    another expression) is a hand edit, with the closes and opens of a name it binds; only one that nothing can close
+    (an argument of `expectError`, or `_ =`) is rewritten alone. Only the 0.15 arity is rewritten, so a ported call
+    is left alone."""
     hits = []
     names_file_too_big = "FileTooBig" in text   # code, a string or a comment: when in doubt, a hand edit
     blocks = test_blocks(toks)
@@ -490,6 +595,7 @@ def rule_test_dir_io(text, toks):
         tmp_names = {n for n, c in tmp_counts.items() if c == bound.get(n, 0)}
         tmp_any = set(tmp_counts)
         call_hits = {}   # method-name token index -> Hit
+        call_at = {}   # method-name token index -> (the index its receiver starts at, the lines the call spans)
         for i in range(lo, hi):
             t = toks[i]
             if t.kind != "identifier" or t.text not in DIR_METHODS or not is_tok(at(toks, i - 1), "op", "."):
@@ -508,8 +614,13 @@ def rule_test_dir_io(text, toks):
                     raise HandEdit(REUSED_RECEIVER.format(toks[i - 4].text))
                 if t.text == "readFileAlloc" and names_file_too_big:
                     raise HandEdit(FILE_TOO_BIG)
-                if t.text == "realpathAlloc" and not _untyped_const_init(toks, i - (4 if recv == "tmp" else 8), close):
-                    raise HandEdit(REALPATH_SHAPE)
+                if t.text == "realpathAlloc":
+                    s = i - (4 if recv == "tmp" else 8)
+                    if not _untyped_const_init(toks, s, close):
+                        raise HandEdit(REALPATH_SHAPE)
+                    decl = s - (3 if is_tok(at(toks, s - 1), "keyword", "try") else 2)
+                    if bound.get(toks[decl].text, 0) != 1 or not _freed_or_read(toks, lo, hi, decl):
+                        raise HandEdit(REALPATH_USE)
                 edits = _dir_call_edits(text, toks, i, args)
             except HandEdit as e:
                 hits.append(Bail(t.line + 1, str(e), call_lines))
@@ -520,10 +631,12 @@ def rule_test_dir_io(text, toks):
             hit = Hit(t.line + 1, edits, OPEN_FILE_NOTE if t.text == "openFile" else None)
             hits.append(hit)
             call_hits[i] = hit
+            call_at[i] = (i - (4 if recv == "tmp" else 8), call_lines)
         # What such a call opened closes with the Io. A name bound more than once in the block (sibling scopes, a
         # capture, a parameter) could pair a close with the wrong open: its opens and closes are hand edits.
         opened = {}   # name -> the open's Hit, or "ported" when the open is already 0.17's
         open_hits = {}   # name -> the Hits of its 0.15 opens
+        paired = set()   # the method-name token index of each 0.15 open the pairing read
         for i in range(lo, hi):
             if not (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
                     and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
@@ -554,21 +667,36 @@ def rule_test_dir_io(text, toks):
             if m in call_hits and method in OPENING:
                 opened[name] = call_hits[m]
                 open_hits.setdefault(name, []).append(call_hits[m])
+                paired.add(m)
             elif method in ("createFile", "openFile", "openDir", "createDirPathOpen"):
                 args, _ = zigtok.split_args(toks, m + 1)
                 if args and "".join(x.text for x in args[0]) in IO_ARG_NAMES:
                     opened[name] = "ported"
-        reused = {n for n in opened if bound.get(n, 0) > 1}
-        for name in sorted(reused):
+        held = {n: REUSED_NAME.format(n) for n in opened if bound.get(n, 0) > 1}   # name -> why its pairs bail
+        # A 0.15 open the pairing did not read (a typed binding, an assignment, a field, an expression) would be
+        # rewritten without its close: it is a hand edit, and so are the closes and opens of a name it binds. One
+        # that nothing can close (expectError's argument, `_ =`) is rewritten.
+        for m, owner in list(call_hits.items()):
+            if toks[m].text not in OPENING or m in paired:
+                continue
+            free, name = _open_target(toks, call_at[m][0])
+            if free:
+                continue
+            hits.remove(owner)
+            hits.append(Bail(owner.line, UNREAD_OPEN, call_at[m][1]))
+            if name is not None:
+                held.setdefault(name, UNREAD_OPEN)
+        for name in sorted(held):
             for owner in open_hits.get(name, ()):
                 hits.remove(owner)
-                hits.append(Bail(owner.line, REUSED_NAME.format(name)))
+                hits.append(Bail(owner.line, held[name]))
         for i in range(lo, hi):
-            if (is_tok(at(toks, i), "identifier") and toks[i].text in opened and is_tok(at(toks, i + 1), "op", ".")
+            if (is_tok(at(toks, i), "identifier") and (toks[i].text in opened or toks[i].text in held)
+                    and is_tok(at(toks, i + 1), "op", ".")
                     and is_tok(at(toks, i + 2), "identifier", "close") and is_tok(at(toks, i + 3), "op", "(")
                     and is_tok(at(toks, i + 4), "op", ")") and not is_tok(at(toks, i - 1), "op", ".")):
-                if toks[i].text in reused:
-                    hits.append(Bail(toks[i].line + 1, REUSED_NAME.format(toks[i].text)))
+                if toks[i].text in held:
+                    hits.append(Bail(toks[i].line + 1, held[toks[i].text]))
                     continue
                 edit = Edit(toks[i + 4].start, toks[i + 4].start, IO)
                 owner = opened[toks[i].text]
@@ -748,15 +876,35 @@ def check_rev(rev):
         raise ValueError(f"--fork-lines: {rev!r} is no commit")
 
 
+CASE_ONLY = ("the ref has this path only in another case (git on Windows keeps a file's case on disk when a merge "
+             "renames it by case only), so which lines are the fork's is unknown: the whole file is a hand edit")
+_REF_PATHS = {}   # (root, rev) -> the case-folded path of every file in rev's tree
+
+
+def _ref_paths_folded(rev):
+    """The case-folded path of every file in `rev`'s tree (`ls-tree -r -z`, read once per root and ref)."""
+    key = (str(ROOT), rev)
+    if key not in _REF_PATHS:
+        listed = _git("ls-tree", "-r", "-z", "--name-only", rev)
+        if listed.returncode != 0:
+            raise ValueError(f"git ls-tree -r {rev} failed: {_text(listed.stderr).strip()[:200]}")
+        _REF_PATHS[key] = {_text(p).casefold() for p in listed.stdout.split(b"\0") if p}
+    return _REF_PATHS[key]
+
+
 def changed_lines(path, rev):
     """The 1-based lines of `path` (as it is in the work tree) that differ from `rev`, or None when `rev` lacks
-    the file (fork-only: every line). An empty set means the file is upstream's as it stands. A git failure other
-    than a path `rev` lacks stops the run. `ls-tree -z` names the path unquoted, so a non-ASCII name is found."""
+    the file (fork-only: every line). An empty set means the file is upstream's as it stands. A path `rev` has only
+    in another case (a directory's or the file's own) raises HandEdit(CASE_ONLY): which of its lines are the fork's
+    needs a reader. A git failure other than a path `rev` lacks stops the run. `ls-tree -z` names the path
+    unquoted, so a non-ASCII name is found."""
     rel = Path(path).resolve().relative_to(ROOT).as_posix()
     listed = _git("ls-tree", "-z", "--name-only", rev, "--", rel)
     if listed.returncode != 0:
         raise ValueError(f"git ls-tree {rev} {rel} failed: {_text(listed.stderr).strip()[:200]}")
     if listed.stdout != (rel + "\0").encode("utf-8"):
+        if rel.casefold() in _ref_paths_folded(rev):
+            raise HandEdit(CASE_ONLY)
         return None
     out = _git("diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--inter-hunk-context=0", rev, "--",
                rel)
@@ -785,7 +933,7 @@ def main(argv=None):
     ap.add_argument("--report")
     ap.add_argument("--fork-lines", metavar="REV",
                     help="rewrite only lines that differ from REV (the upstream tag); a file REV lacks is rewritten "
-                         "whole, a file equal to REV not at all")
+                         "whole, a file equal to REV not at all, a file REV has only in another case is a hand edit")
     ap.add_argument("paths", nargs="+")
     args = ap.parse_args(argv)
     rule_ids = set(args.rules.split(",")) if args.rules else None
@@ -803,7 +951,11 @@ def main(argv=None):
             if b"\r" in raw:
                 raise ValueError(f"refused (CR bytes): {path}")
             text = raw.decode("utf-8")
-            lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
+            whole = None   # why the whole file is a hand edit, or None
+            try:
+                lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
+            except HandEdit as e:
+                lines, whole = None, str(e)
             if lines is not None and not lines:
                 continue
             rows = []
@@ -811,6 +963,10 @@ def main(argv=None):
                 new, hits = rewrite(text, rule_ids, lines, rows)
             except ValueError as e:
                 raise ValueError(f"{path}: {e}") from e
+            if whole is not None:
+                # Every rewrite a rule would make in the file is reported as a hand edit; nothing is written.
+                new, hits = text, []
+                rows = [(r, n, f"hand edit: {whole}" if what.startswith("rewritten") else what) for r, n, what in rows]
             for rule_id, line in hits:
                 counts[rule_id] += 1
             for rule_id, line, what in sorted(rows, key=lambda r: r[1]):

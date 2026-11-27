@@ -58,7 +58,7 @@ FIXTURES = {
          '    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });\n'
          '    try tmp.dir.makeDir("real");\n    try tmp.dir.makePath("a/b");\n'
          '    const p = try tmp.dir.realpathAlloc(alloc, ".");\n'
-         '    const d = try tmp.dir.readFileAlloc(alloc, "a.txt", max_bytes);\n'
+         '    const d = try tmp.dir.readFileAlloc(alloc, "a.txt", 1024);\n'
          '    try tmp.dir.symLink("t", "l", .{});\n    const f = try tmp.dir.openFile("a.txt", .{});\n'
          '    try testing.expectError(error.FileNotFound, tmp.dir.access("x", .{}));\n}\n',
          'test "a" {\n    var tmp = std.testing.tmpDir(.{});\n    defer tmp.cleanup();\n'
@@ -66,7 +66,7 @@ FIXTURES = {
          '    try tmp.dir.createDir(std.testing.io, "real", .default_dir);\n'
          '    try tmp.dir.createDirPath(std.testing.io, "a/b");\n'
          '    const p = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);\n'
-         '    const d = try tmp.dir.readFileAlloc(std.testing.io, "a.txt", alloc, .limited(max_bytes + 1));\n'
+         '    const d = try tmp.dir.readFileAlloc(std.testing.io, "a.txt", alloc, .limited(1024 + 1));\n'
          '    try tmp.dir.symLink(std.testing.io, "t", "l", .{});\n'
          '    const f = try tmp.dir.openFile(std.testing.io, "a.txt", .{});\n'
          '    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "x", .{}));\n}\n'),
@@ -124,28 +124,25 @@ class RuleTests(unittest.TestCase):
 
     # --- the council's round-1 findings (E3, E4, E5, O3, O6) ---------------------------------------------------
 
-    def test_make_open_path_translates_no_follow_and_nothing_else(self):
-        # council F3: `.no_follow = true` is 0.17's `.open_options = .{ .follow_symlinks = false }`, one to one;
-        # any other option is a hand edit, reported.
+    def test_make_open_path_translates_only_empty_options(self):
+        # council F3: `.{}` stays, one to one; any other option is a hand edit, reported. council G5: so is
+        # `.no_follow = true`, which round 2 translated to `.open_options = .{ .follow_symlinks = false }`: 0.17
+        # also stats an existing intermediate component without following a link there, which 0.15 followed.
         head = 'test "m" {\n    var tmp = std.testing.tmpDir(.{});\n'
-        for opts, want in ((".{}", ".{}"),
-                           (".{ .no_follow = true }", ".{ .open_options = .{ .follow_symlinks = false } }"),
-                           (".{ .no_follow = true, }", ".{ .open_options = .{ .follow_symlinks = false } }")):
-            with self.subTest(opts=opts):
-                got, hits = codemod.rewrite(head + f'    var a = try tmp.dir.makeOpenPath("a", {opts});\n}}\n')
-                self.assertIn(f'    var a = try tmp.dir.createDirPathOpen(std.testing.io, "a", {want});\n', got)
-        for opts in (".{ .iterate = true }", ".{ .no_follow = true, .iterate = true }", ".{ .no_follow = false }",
-                     ".{ .access_sub_paths = false }", "opts"):
+        got, hits = codemod.rewrite(head + '    var a = try tmp.dir.makeOpenPath("a", .{});\n}\n')
+        self.assertIn('    var a = try tmp.dir.createDirPathOpen(std.testing.io, "a", .{});\n', got)
+        self.assertEqual(len(hits), 1)
+        for opts, why in ((".{ .no_follow = true }", codemod.NO_FOLLOW), (".{ .no_follow = true, }", codemod.NO_FOLLOW),
+                          (".{\n        .no_follow = true,\n    }", codemod.NO_FOLLOW),
+                          (".{ .iterate = true }", codemod.OPEN_OPTIONS),
+                          (".{ .no_follow = true, .iterate = true }", codemod.OPEN_OPTIONS),
+                          (".{ .no_follow = false }", codemod.OPEN_OPTIONS),
+                          (".{ .access_sub_paths = false }", codemod.OPEN_OPTIONS), ("opts", codemod.OPEN_OPTIONS)):
             with self.subTest(opts=opts):
                 src = head + f'    var a = try tmp.dir.makeOpenPath("a", {opts});\n}}\n'
                 rows = []
                 self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
-                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.OPEN_OPTIONS)])
-        # The one translation over several lines would drop its line breaks: the engine's hand edit.
-        src = head + '    var a = try tmp.dir.makeOpenPath("a", .{\n        .no_follow = true,\n    });\n}\n'
-        rows = []
-        self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
-        self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.LINE_COUNT)])
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + why)])
 
     def test_realpath_alloc_keeps_its_sentinel_type_or_is_a_hand_edit(self):
         # council F3: 0.17's realPathFileAlloc returns `[:0]u8`. Into an untyped const it stays one, and
@@ -212,21 +209,32 @@ class RuleTests(unittest.TestCase):
 
     def test_read_file_alloc_keeps_the_inclusive_bound(self):
         # council F2 (QR-30): 0.15 read a file of exactly n bytes, which 0.17's `.limited(n)` refuses; `n + 1` keeps
-        # the bound where n is a literal or a simple name.
+        # the bound where n is an integer literal (council G6: no longer a name, which may be the maximum).
         head = 'test "rf" {\n    var tmp = std.testing.tmpDir(.{});\n'
-        for limit in ("4096", "0x10_0000", "max_bytes"):
+        for limit in ("4096", "0x10_0000", "0o777", "0b1010"):
             with self.subTest(limit=limit):
                 src = head + f'    const d = try tmp.dir.readFileAlloc(alloc, "a", {limit});\n}}\n'
                 got, hits = codemod.rewrite(src)
                 self.assertIn(f'readFileAlloc(std.testing.io, "a", alloc, .limited({limit} + 1));', got)
                 self.assertEqual(len(hits), 1)
-        # Another expression is a hand edit: `1 << 20 + 1` is `1 << 21`, `maxInt(usize) + 1` overflows.
-        for limit in ("1 << 20", "(n)", "self.max", "std.math.maxInt(usize)", "@sizeOf(T)", "'a'"):
+        # Another expression is a hand edit: `1 << 20 + 1` is `1 << 21`, `maxInt(usize) + 1` overflows, and so does
+        # a name bound to it.
+        for limit in ("max_bytes", "1 << 20", "(n)", "self.max", "std.math.maxInt(usize)", "@sizeOf(T)", "'a'",
+                      "1e6"):
             with self.subTest(limit=limit):
                 src = head + f'    const d = try tmp.dir.readFileAlloc(alloc, "a", {limit});\n}}\n'
                 rows = []
                 self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
                 self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.LIMIT_SHAPE)])
+
+    def test_a_name_bound_to_the_maximum_is_no_bound_to_widen(self):
+        # council G6: `max + 1` with `max = maxInt(usize)` overflows (a compile error, or a trap at run time); the
+        # tokens do not show a name's value, so a bound written as a name is a hand edit, reported.
+        src = ('const max = std.math.maxInt(usize);\ntest "max" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    const d = try tmp.dir.readFileAlloc(alloc, "a", max);\n    defer alloc.free(d);\n}\n')
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+        self.assertEqual(rows, [("test-dir-io", 4, "hand edit: " + codemod.LIMIT_SHAPE)])
 
     def test_file_too_big_anywhere_in_the_file_keeps_read_file_alloc(self):
         # council F2: a helper outside the test consumes the error by name (or by its name's text); 0.17's
@@ -453,6 +461,68 @@ class RuleTests(unittest.TestCase):
         self.assertIn("dupeSentinel(\n    u8,\n    name,\n 0,);", got)
         self.assertNotIn("trimStart", got)
 
+    # --- the council's round-3 findings ------------------------------------------------------------------------
+
+    def test_an_open_whose_binding_the_pairing_cannot_read_is_a_hand_edit(self):
+        # council G4: the pairing reads an open's binding only as `const f = [try] <open>`. Through a typed binding
+        # (or an assignment, a field, any other expression) the open was rewritten and its close was not. Such an
+        # open is a hand edit, reported, with every close of the name it binds (and that name's other opens).
+        head = 'test "u" {\n    var tmp = std.testing.tmpDir(.{});\n'
+        why = "hand edit: " + codemod.UNREAD_OPEN
+        for body, want in (
+                ('    const f: std.fs.File = try tmp.dir.openFile("a", .{});\n    defer f.close();\n', [3, 4]),
+                ('    var d: std.fs.Dir = try std.fs.cwd().openDir("a", .{});\n    d.close();\n', [3, 4]),
+                ('    var f: std.fs.File = undefined;\n    f = try tmp.dir.createFile("a", .{});\n    f.close();\n',
+                 [4, 5]),
+                ('    var f = try tmp.dir.openFile("a", .{});\n    f.close();\n'
+                 '    f = try tmp.dir.openFile("b", .{});\n    f.close();\n', [3, 4, 5, 6]),
+                ('    s.file = try tmp.dir.createFile("a", .{});\n    s.file.close();\n', [3]),
+                ('    const s: S = .{ .file = try tmp.dir.createFile("a", .{}) };\n', [3]),
+                ('    (try tmp.dir.createFile("a", .{})).close();\n', [3]),
+                ('    if (tmp.dir.openFile("a", .{})) |f| f.close() else |_| {}\n', [3]),
+                ('    const f = wrap(try tmp.dir.openFile("a", .{}));\n    f.close();\n', [3])):
+            with self.subTest(body=body):
+                src = head + body + '}\n'
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", n, why) for n in want])
+        # An open whose value goes nowhere a close could reach it is still rewritten: the one expectError expects to
+        # fail (over one line or several), and one discarded.
+        for body in ('    try testing.expectError(error.FileNotFound, tmp.dir.openFile("x", .{}));\n',
+                     '    try std.testing.expectError(\n        error.FileNotFound,\n'
+                     '        tmp.dir.openFile("x", .{}),\n    );\n',
+                     '    _ = try tmp.dir.createFile("x", .{});\n'):
+            with self.subTest(body=body):
+                got, hits = codemod.rewrite(head + body + '}\n')
+                self.assertEqual(got, head + body.replace('("x"', '(std.testing.io, "x"') + '}\n')
+                self.assertEqual(len(hits), 1)
+
+    def test_realpath_alloc_needs_every_use_freed_or_read(self):
+        # council G5: an untyped const keeps 0.17's `[:0]u8`, but a use of it may still drop the sentinel: a
+        # coercion (`const owned: []u8 = p;`) or a pass to a function that may free it would free the wrong size.
+        # The rewrite is kept only when every use is a direct `<allocator>.free(p)` or a read in place (`p.len`, an
+        # index); any other use is a hand edit, reported.
+        head = ('test "rp" {\n    var tmp = std.testing.tmpDir(.{});\n'
+                '    const p = try tmp.dir.realpathAlloc(alloc, ".");\n')
+        for uses in ('    defer std.testing.allocator.free(p);\n    try testing.expect(p.len > 1 and p[1] == \':\');\n',
+                     '    errdefer alloc.free(p);\n', ''):
+            with self.subTest(uses=uses):
+                got, hits = codemod.rewrite(head + uses + '}\n')
+                self.assertIn('    const p = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);\n' + uses, got)
+                self.assertEqual(len(hits), 1)
+        for uses in ('    const owned: []u8 = p;\n    defer alloc.free(owned);\n',
+                     '    const q = p;\n    defer alloc.free(q);\n',
+                     '    defer alloc.free(p);\n    try consume(alloc, p);\n',
+                     '    defer alloc.free(p);\n    try testing.expectEqualStrings("x", p);\n',
+                     '    defer alloc.free(p[0..p.len]);\n',
+                     '    s.path = p;\n',
+                     '    defer alloc.free(p);\n    {\n        const p = other;\n        _ = p.len;\n    }\n'):
+            with self.subTest(uses=uses):
+                src = head + uses + '}\n'
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.REALPATH_USE)])
+
     def test_all_rules_together_match_each_rule_alone(self):
         for rule_id, cases in FIXTURES.items():
             for source, expected in cases:
@@ -472,6 +542,7 @@ class ForkLineTests(unittest.TestCase):
         for key, value in (("core.autocrlf", "false"), ("core.quotePath", "true")) + tuple(config):
             self.git(repo, "config", key, value)
         for name, data in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
             (repo / name).write_bytes(data)
         self.git(repo, "add", "--", *files)
         self.git(repo, "-c", "user.name=codemod-test", "-c", "user.email=codemod-test@example.invalid",
@@ -508,6 +579,50 @@ class ForkLineTests(unittest.TestCase):
         repo, rev = self.make_repo({"a.zig": b"one\rtwo\nthree\nfour\n"})
         (repo / "a.zig").write_bytes(b"one\nthree\nFOUR\n")
         self.assertEqual(self.changed(repo, "a.zig", rev), {1, 3})
+
+    # council G3: git on Windows keeps a file's on-disk case when a merge renames it by case only. The path read
+    # from the disk is then absent at the ref, which has it in another case; read as fork-only, every line of the
+    # file (upstream's too) would be eligible. The whole file is a hand edit instead: each rewrite a rule would make
+    # in it is reported, and nothing is written.
+    SRC = b'const a = std.mem.trimLeft(u8, s, " ");\n'
+
+    def case_only_repo(self, ref_name, disk_name):
+        import os
+        repo, rev = self.make_repo({ref_name: self.SRC})
+        top_ref, top_disk = ref_name.split("/")[0], disk_name.split("/")[0]
+        os.rename(repo / top_ref, repo / top_disk)   # a case-only rename the work tree keeps
+        (repo / disk_name).write_bytes(self.SRC + b'const b = std.mem.trimLeft(u8, s, " ");\n')
+        return repo, rev
+
+    def test_a_case_only_spelling_difference_is_a_hand_edit(self):
+        for ref_name, disk_name in (("foo.zig", "Foo.zig"), ("lib/a.zig", "Lib/a.zig")):
+            with self.subTest(disk_name=disk_name):
+                repo, rev = self.case_only_repo(ref_name, disk_name)
+                with self.assertRaises(codemod.HandEdit) as caught:
+                    self.changed(repo, disk_name, rev)
+                self.assertEqual(str(caught.exception), codemod.CASE_ONLY)
+        # A path the ref lacks in every case is still the fork's alone.
+        repo, rev = self.make_repo({"foo.zig": self.SRC})
+        (repo / "bar.zig").write_bytes(self.SRC)
+        self.assertIsNone(self.changed(repo, "bar.zig", rev))
+
+    def test_a_case_only_file_is_reported_and_never_written(self):
+        import contextlib
+        import io
+        from unittest import mock
+        repo, rev = self.case_only_repo("foo.zig", "Foo.zig")
+        path = repo / "Foo.zig"
+        before = path.read_bytes()
+        out = io.StringIO()
+        with mock.patch.object(codemod, "ROOT", repo), contextlib.redirect_stdout(out):
+            code = codemod.main(["--fork-lines", rev, str(path)])
+        self.assertEqual(code, 0)
+        self.assertEqual(path.read_bytes(), before)
+        for line in (1, 2):
+            self.assertIn(f"hand edit\t{path.as_posix()}\tmem-trim\t{line}\t{codemod.CASE_ONLY}\n", out.getvalue())
+        self.assertIn("mem-trim\t0\n", out.getvalue())
+        self.assertIn("hand edits\t2\n", out.getvalue())
+        self.assertIn("files changed\t0\n", out.getvalue())
 
 
 if __name__ == "__main__":
