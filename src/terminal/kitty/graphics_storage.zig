@@ -2628,6 +2628,7 @@ test "storage: delete all visible placements preserves scrollback" {
     defer t.deinit(alloc);
     t.width_px = 2;
     t.height_px = 2;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2655,6 +2656,7 @@ test "storage: delete all visible placements preserves scrollback" {
     try testing.expect(s.placements.contains(history_key));
     try testing.expectEqual(@as(usize, 1), s.images.count());
     try testing.expect(s.images.contains(1));
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete all includes placements spanning into active area" {
@@ -2669,6 +2671,7 @@ test "storage: delete all includes placements spanning into active area" {
     defer t.deinit(alloc);
     t.width_px = 2;
     t.height_px = 2;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2699,6 +2702,7 @@ test "storage: delete all includes placements spanning into active area" {
     s.delete(io, alloc, &t, .{ .all = true });
     try testing.expectEqual(@as(usize, 0), s.placements.count());
     try testing.expectEqual(@as(usize, 0), s.images.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete all placements" {
@@ -3354,6 +3358,7 @@ test "storage: erase display preserves scrollback and reclaims unplaced images" 
     defer t.deinit(alloc);
     t.width_px = 2;
     t.height_px = 2;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     const s = &t.screens.active.kitty_images;
     try s.addImage(io, alloc, t.screens.active, .{ .id = 1, .width = 1, .height = 1 });
@@ -3384,6 +3389,7 @@ test "storage: erase display preserves scrollback and reclaims unplaced images" 
     try testing.expect(s.images.contains(1));
     try testing.expect(!s.images.contains(2));
     try testing.expect(!s.images.contains(3));
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: erase scrollback removes placements in history" {
