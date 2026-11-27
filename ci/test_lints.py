@@ -573,14 +573,21 @@ class GitControls(unittest.TestCase):
         self.write("src/os/windows.zig", "// unused\n")
         source = ('const k32 = @import("std").os.windows\n'
                   '    .kernel32;\nfn call() void { k32.Sleep(1); }\n')
-        self.write(path, source)
+        self.write(path, source.replace(".kernel32", ".ws2_32"))
         base = self.commit()
         upstream, removed, _ = self.inputs()
-        self.write(path, source.replace("    .kernel32", "    // alias continuation\n    .kernel32"))
+        commented = source.replace("    .kernel32", "    // alias continuation\n    .kernel32")
+        self.write(path, commented)
         head = self.commit()
-        self.assertEqual(({2}, set()), common.line_changes(self.repo, base, head)[path])
+        self.assertEqual(({2, 3}, {1}), common.line_changes(self.repo, base, head)[path])
         self.assertEqual([(path, 4, "error", "removed std.os.windows.kernel32.Sleep")],
                          win.check(self.repo, base, head, upstream, removed))
+        # Council no-seat N3: an added comment line alone changes no binding, so the use is not rechecked.
+        self.write(path, commented.replace("    .kernel32", "    // second comment\n    .kernel32"))
+        twin = self.commit()
+        self.assertEqual(({3}, set()), common.line_changes(self.repo, head, twin)[path])
+        self.assertNotIn(path, common.line_changes(self.repo, head, twin, same_code=win.same_zig_code))
+        self.assertEqual([], win.check(self.repo, head, twin, upstream, removed))
 
     def test_test_insertion_does_not_pair_same_named_aliases(self):
         path = "src/probe.zig"
@@ -838,7 +845,28 @@ class GitControls(unittest.TestCase):
         self.assertEqual([(path, 2)], [(r[0], r[1]) for r in win.check(
             self.repo, before, after, here / "upstream-paths.txt", here / "win32-removed-identifiers.txt")])
 
-    def test_touched_alias_moves_visibility_comments_and_spellings_recheck(self):
+    def test_comment_only_alias_edit_passes_and_added_reference_twin_fails(self):
+        # Council no-seat N3: with the lint enforced, a comment on an alias line flagged every unchanged use through
+        # the alias. A hunk of comments and whitespace alone is no change; a reference really added still fails.
+        self.write("src/os/windows.zig", "// reexports\n")
+        source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
+                  'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
+        self.write("probe.zig", source)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        commented = source.replace("kernel32;", "kernel32; // Win32 API")
+        for variant in (commented, source.replace("const w = std", "const  w =\n    std"),
+                        source.replace("const unrelated = 1;\n", "const unrelated = 1;\n// a comment line\n")):
+            self.write("probe.zig", variant)
+            head = self.commit()
+            self.assertIn("probe.zig", common.line_changes(self.repo, base, head))
+            self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
+        self.write("probe.zig", commented + "fn g() void { w.Sleep(2); }\n")
+        head = self.commit()
+        self.assertEqual([("probe.zig", 5, "error", "removed std.os.windows.kernel32.Sleep")],
+                         win.check(self.repo, base, head, upstream, removed))
+
+    def test_touched_alias_moves_visibility_and_spellings_recheck(self):
         self.write("src/os/windows.zig", "// reexports\n")
         source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
                   'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
@@ -846,7 +874,6 @@ class GitControls(unittest.TestCase):
         base = self.commit()
         upstream, removed, _ = self.inputs()
         variants = (source.replace("const w =", "pub const w ="),
-                    source.replace("kernel32;", "kernel32; // Win32 API"),
                     source.replace("const w = std.os.windows.kernel32;\n", "").replace(
                         "const unrelated = 1;", "const unrelated = 1;\nconst w = std.os.windows.kernel32;"),
                     source.replace("std.os.windows.kernel32;", '@import("std").os.windows.kernel32;'))
@@ -1084,6 +1111,20 @@ class HistoryControls(unittest.TestCase):
                 head = self.fixture(path, "".join(source), parent=base)
                 self.assertEqual({path: ({line + 1}, {line})}, common.line_changes(self.repo, base, head))
                 self.assertEqual([], self.check(base, head))
+
+    def test_real_comment_on_alias_line_and_added_reference_twin(self):
+        # Council no-seat N3, Sol's probe: once the lint was enforced, a comment on ipc_server.zig's alias line
+        # flagged its 40 unchanged uses. It now passes, and a reference added in the same edit still fails.
+        path = "src/apprt/win32/ipc_server.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        alias = "const windows = std.os.windows;\n"
+        self.assertEqual(1, source.count(alias))
+        commented = source.replace(alias, "const windows = std.os.windows; // council probe\n")
+        self.assertEqual([], self.check(self.base, self.fixture(path, commented)))
+        added = commented + "\nfn councilProbe() void {\n    windows.kernel32.Sleep(1);\n}\n"
+        self.assertEqual([(path, added.count("\n") - 1, "error", "removed std.os.windows.kernel32.Sleep")],
+                         self.check(self.base, self.fixture(path, added)))
+        print("Real comment on an alias line: 0 errors; added-reference twin: 1")
 
     def test_real_import_swap_and_ipc_alias_move_touch_definitions(self):
         path = "src/apprt/win32.zig"
