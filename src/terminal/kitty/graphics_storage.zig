@@ -2920,6 +2920,7 @@ test "storage: delete intersecting cursor checks interior row column" {
     defer t.deinit(alloc);
     t.width_px = 100;
     t.height_px = 100;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2937,6 +2938,7 @@ test "storage: delete intersecting cursor checks interior row column" {
         .image_id = 1,
         .placement_id = .{ .tag = .external, .id = 1 },
     }) != null);
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete intersecting cell checks interior row column" {
@@ -2947,6 +2949,7 @@ test "storage: delete intersecting cell checks interior row column" {
     defer t.deinit(alloc);
     t.width_px = 100;
     t.height_px = 100;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2965,6 +2968,7 @@ test "storage: delete intersecting cell checks interior row column" {
         .image_id = 1,
         .placement_id = .{ .tag = .external, .id = 1 },
     }) != null);
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete intersecting cursor plus unused" {
