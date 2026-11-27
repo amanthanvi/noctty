@@ -1,5 +1,14 @@
 #include "imgui.h"
 
+// dcimgui.h includes <stdint.h>, and below it does so inside `namespace
+// cimgui`, where the header's guard leaves the global uint64_t and friends
+// undeclared. For aarch64 the OpenGL3 loader's <windows.h> includes
+// intrin.h, whose arm_acle.h needs them (x86_64's intrinsics do not), so
+// there <stdint.h> comes first.
+#if defined(_WIN32) && defined(__aarch64__)
+#include <stdint.h>
+#endif
+
 // This file contains custom extensions for functionality that isn't
 // properly supported by Dear Bindings yet. Namely:
 // https://github.com/dearimgui/dear_bindings/issues/55

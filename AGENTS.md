@@ -701,7 +701,10 @@ that govern each symbol you change, or that none does.
   `src/extra/pkg-config.zig`, and the two checks that no build file copies
   the environment into a step, `Contracts.21-BuildEnvironment.ps1` and
   `scripts/check-configure-environment.ps1`; which files `test-lib-vt` parses and
-  compiles), the
+  compiles), the ARM64 build's aarch64-only compile fixes (the handoff
+  proxy's `sanitize_c` in `src/build/TerminalHandoffProxy.zig`, the
+  `std_options` of highway's library root `pkg/highway/src/detect.zig`,
+  the early `<stdint.h>` in `pkg/dcimgui/ext.cpp`), the
   Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
   `scripts/dev-windows.cmd` keeps when set and otherwise sets to
   `%LOCALAPPDATA%\zig`), the Windows target floor (`src/build/Config.zig`,

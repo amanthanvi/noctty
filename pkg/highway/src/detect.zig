@@ -1,5 +1,19 @@
+const std = @import("std");
 const builtin = @import("builtin");
 const HwyTargets = @import("targets.zig").Targets;
+
+/// This file is the root of highway's static library. Zig 0.17.1's stack
+/// tracing does not compile in an MSVC static library for aarch64:
+/// lib/std/debug/SelfInfo/Windows.zig:668 @ptrCasts an `*anyopaque` to a
+/// function pointer without @alignCast (a function is aligned 4 on aarch64,
+/// 1 on x86_64), and Debug's safety panics reach it through `defaultPanic`.
+/// There a panic here prints its message without a stack trace; elsewhere
+/// this is std's default. Remove once Zig fixes that line
+/// (ZIG017-AARCH64-SELFINFO-01 in docs/agents/log/build-release-ci.md).
+pub const std_options: std.Options = .{
+    .allow_stack_tracing = !builtin.strip_debug_info and
+        !(builtin.cpu.arch == .aarch64 and builtin.abi == .msvc),
+};
 
 const x86 = @import("detect/x86.zig");
 const aarch64_darwin = @import("detect/aarch64_darwin.zig");

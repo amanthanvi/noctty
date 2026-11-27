@@ -376,6 +376,8 @@
         "src/extra/pkg-config.zig",
         "src/update/**",
         "pkg/wuffs/**",
+        "pkg/highway/src/detect.zig",
+        "pkg/dcimgui/ext.cpp",
         "scripts/**",
         "dist/**",
         "test/windows/release-promote.ps1",
