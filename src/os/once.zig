@@ -8,9 +8,10 @@
 //! itself (`Io.Threaded`'s `parking_futex`, through
 //! `NtWaitForAlertByThreadId` and `NtAlertThreadByThreadId`), not through
 //! WaitOnAddress. The callers are the portable-root
-//! cache, the pty resolver (a LoadLibrary), the search icon font, the hint
-//! scheme regex, and, in tests only, `global.zig`'s temp folder for a test
-//! that runs without the global state (`testTmpDirPath`).
+//! cache, the pty resolver (a LoadLibrary), the search icon font's
+//! registration and its rejection log, the hint scheme regex, and, in tests
+//! only, `global.zig`'s temp folder for a test that runs without the global
+//! state (`testTmpDirPath`).
 //!
 //! Memory orders: the done check is an acquire load (on the fast path and in
 //! the waiters' loop), and the store that marks `f` done is a release, so
@@ -21,8 +22,15 @@
 //! Re-entry: 0.15.2's Debug mutex panicked "Deadlock detected" when `f` called
 //! back into its own once. In builds with runtime safety this one records the
 //! thread that runs `f` and panics the same way; without it a re-entering `f`
-//! waits forever, as 0.15.2's release builds did. 1B.6 re-checks this with the
-//! other sync primitives (PLAN decision 19's roles).
+//! waits forever, as 0.15.2's release builds did.
+//!
+//! Thread roles (1B.6's re-check with the other sync primitives, under PLAN
+//! decision 19's roles; the lead's QR-27): a once enters no role and takes
+//! no role-checked lock, so `f` runs under whatever role its first caller's
+//! thread has, as an `Io` task run inline does, and no caller's `f` reaches
+//! the renderer-state mutex. Its waits and wakes are on the process-wide
+//! futex whatever the `Io` instance, so a waiter on an `Io.Threaded` pool
+//! worker parks and wakes as any other thread does.
 const std = @import("std");
 const builtin = @import("builtin");
 
