@@ -138,8 +138,9 @@ function Get-AbiPinProblems {
     }
     $pending = [Collections.Generic.Queue[object]]::new()
     # Private declarations too (council T4): a file-local extern struct crosses the ABI as much as a public one.
-    # And one with its type annotated, `const X: type = extern struct {` (council U3).
-    foreach ($declaration in [regex]::Matches($Source, '(?m)^(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*type)?\s*=\s*extern (struct|union) \{')) {
+    # And one with its type annotated, `const X: type = extern struct {` (council U3), or indented inside a
+    # namespace (council V2).
+    foreach ($declaration in [regex]::Matches($Source, '(?m)^[ 	]*(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*type)?\s*=\s*extern (struct|union) \{')) {
         $pending.Enqueue(@{ Name = $declaration.Groups[1].Value; Path = $declaration.Groups[1].Value; Kind = $declaration.Groups[2].Value; Open = $declaration.Index + $declaration.Length })
     }
     $top = $pending.Count
@@ -205,6 +206,8 @@ $abiPinControls = @(
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', 'pub const FILETIME_ = extern struct {'); Expect = 'FILETIME_ has no size pin' }
     # A private one with no pins (council T4).
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const PRIVATE_PROBE = extern struct {`n    value: u32,`n};`n`npub const FILETIME = extern struct {"); Expect = 'PRIVATE_PROBE has no size pin' }
+    # One indented inside a namespace, with no pins (council V2).
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const Namespace = struct {`n    const INDENTED_PROBE = extern struct {`n        value: u32,`n    };`n};`n`npub const FILETIME = extern struct {"); Expect = 'INDENTED_PROBE has no size pin' }
     # One with its type annotated and no pins (council U3).
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const TYPED_PROBE: type = extern struct {`n    value: u32,`n};`n`npub const FILETIME = extern struct {"); Expect = 'TYPED_PROBE has no size pin' }
     @{ Source = $abiPinSource.Replace("    try testing.expectEqual(@as(usize, 0), @offsetOf(OverlappedOffsets, `"Offset`"));`n", ''); Expect = 'OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset has no offset pin' }
