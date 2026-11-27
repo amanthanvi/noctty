@@ -7,7 +7,9 @@
 # follows the open; such a site pins its check's whole text, and holds only while that text follows the open in
 # the same block: council W2 and Y1). The text is matched, not what the check does: a check moved into dead code,
 # or made weaker in meaning without a change of text, is code review's. A write-mode open refuses a directory
-# anyway. The fork's own `win32_sys.openFile` opens files only by default and is not this API. Only the options
+# anyway. The fork's own `win32_sys.openFile` opens files only by default and is not this API; its one-attempt
+# `dirOpenFileOnce` (ZIG017-SHARING-ONCE-01) takes std's options and opens a directory by default as std does, so
+# its calls, qualified or not, are read like std's, with no `sys.` exemption (QR-66). Only the options
 # argument, the call's last, is read (council W3), and it must be one plain struct literal whose top level sets
 # `.allow_directory = false` or a write `.mode`, exactly (council Y2): a computed, conditional or unparsed form
 # fails, and a real site in one is reviewed below. Any other mention of either name outside test code and `sys.`
@@ -45,7 +47,8 @@ function Get-OpenFileTestSpans([string] $Code) {
 # `path:function` for each read-mode open without `.allow_directory = false` outside test code.
 function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
     $mayEscape = $ZigText.Contains('\x') -or $ZigText.Contains('\u{')
-    if (-not $ZigText.Contains('openFile') -and -not $mayEscape) { return }
+    $namesOnce = $ZigText.Contains('dirOpenFileOnce')
+    if (-not $ZigText.Contains('openFile') -and -not $namesOnce -and -not $mayEscape) { return }
     $code = Remove-OpenFileNonCode $ZigText
     $spans = @(Get-OpenFileTestSpans $code)
     $functions = [regex]::Matches($code, '\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
@@ -79,19 +82,26 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
             "${Path}:${name} (an escaped identifier character)"
         }
     }
-    if (-not $ZigText.Contains('openFile')) { return }
+    if (-not $ZigText.Contains('openFile') -and -not $namesOnce) { return }
     # Council Y5: any other mention of either name outside test code and `sys.` (a quoted identifier, the name
     # as a string, a multi-line string line holding it (council AC2), or a reference without a call) is an open the
     # guard cannot read, and fails.
+    $onceMentions = @(
+        foreach ($m in [regex]::Matches($code, '\bdirOpenFileOnce\b(?!\s*\()')) { $m.Index }
+        foreach ($literal in $literals) {
+            if ($literal.Value -cmatch '^"dirOpenFileOnce"$' -or $literal.Value -cmatch '^\\\\dirOpenFileOnce$') { $literal.Index }
+        }
+    )
     $mentions = @(
         foreach ($m in [regex]::Matches($code, '\b(openFile|openFileAbsolute)\b(?!\s*\()')) { $m.Index }
         foreach ($literal in $literals) {
             if ($literal.Value -cmatch '^"(?:openFile|openFileAbsolute)"$' -or $literal.Value -cmatch '^\\\\(?:openFile|openFileAbsolute)$') { $literal.Index }
         }
+        $onceMentions
     )
     foreach ($at in $mentions) {
         $lead = $code.Substring([Math]::Max(0, $at - 16), [Math]::Min(16, $at))
-        if ($lead -match '\b(?:win32_)?sys\s*\.\s*@?$') { continue }
+        if ($onceMentions -notcontains $at -and $lead -match '\b(?:win32_)?sys\s*\.\s*@?$') { continue }
         $inTest = $false
         foreach ($span in $spans) { if ($at -gt $span[0] -and $at -lt $span[1]) { $inTest = $true; break } }
         if ($inTest) { continue }
@@ -99,11 +109,17 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
         foreach ($function in $functions) { if ($function.Index -lt $at) { $name = $function.Groups[1].Value } else { break } }
         "${Path}:${name} (a mention that is no direct call)"
     }
-    $calls = [regex]::Matches($code, '\.\s*(openFile|openFileAbsolute)\s*\(')
+    $calls = @(@(
+        foreach ($c in [regex]::Matches($code, '\.\s*(openFile|openFileAbsolute)\s*\(')) { @{ Index = $c.Index; Length = $c.Length; Std = $true } }
+        foreach ($c in [regex]::Matches($code, '\bdirOpenFileOnce\s*\(')) {
+            if ($code.Substring([Math]::Max(0, $c.Index - 16), [Math]::Min(16, $c.Index)) -match '\bfn\s+$') { continue }
+            @{ Index = $c.Index; Length = $c.Length; Std = $false }
+        }
+    ) | Sort-Object { $_.Index })
     if ($calls.Count -eq 0) { return }
     foreach ($call in $calls) {
         $lead = $code.Substring([Math]::Max(0, $call.Index - 16), [Math]::Min(16, $call.Index))
-        if ($lead -match '\b(?:win32_)?sys\s*$') { continue }
+        if ($call.Std -and $lead -match '\b(?:win32_)?sys\s*$') { continue }
         $inTest = $false
         foreach ($span in $spans) { if ($call.Index -gt $span[0] -and $call.Index -lt $span[1]) { $inTest = $true; break } }
         if ($inTest) { continue }
@@ -306,6 +322,17 @@ if ($mutantProblems -cnotcontains 'src/pty.zig:openConsoleMatchesArchitecture op
     throw 'The open-file directory check passed a product open that lost .allow_directory = false.'
 }
 $openFileControls++
+# QR-66: the option removed from a real dirOpenFileOnce site fails, with no `sys.` exemption.
+$oncePath = 'src/apprt/win32/palette_controller.zig'
+$onceText = (Get-Content -LiteralPath (Join-Path $repoRoot $oncePath) -Raw).Replace("`r`n", "`n")
+$onceMutant = $onceText.Replace('sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false })', 'sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{})')
+if ([string]::Equals($onceMutant, $onceText, [StringComparison]::Ordinal)) { throw 'The dirOpenFileOnce control changed nothing in palette_controller.zig.' }
+$onceHits = @{} + $openFileHits
+$onceHits[$oncePath] = @(Get-OpenFileDirectoryHits -ZigText $onceMutant -Path $oncePath)
+if ((Get-OpenFileDirectoryProblems -HitsByFile $onceHits) -cnotcontains "${oncePath}:loadPaletteMru opens without .allow_directory = false (1, reviewed 0)") {
+    throw 'The open-file directory check passed a dirOpenFileOnce site that lost .allow_directory = false.'
+}
+$openFileControls++
 # Council W2: each kind-check site, its check removed, fails.
 function Remove-OpenFileSwitch([string] $Text, [string] $Function) {
     $at = $Text.IndexOf('switch (stat.kind) {', $Text.IndexOf("fn $Function("))
@@ -410,6 +437,15 @@ foreach ($sample in @(
         # Council AE1: \u{0}, all zeros, reads as NUL; more than six significant digits is no character at all.
         @{ Text = "fn z5() void {`n    log.info(`"\u{0}`", .{});`n}`n"; Hits = 0 }
         @{ Text = "fn z6() void {`n    log.info(`"\u{100000041}`", .{});`n}`n"; Hits = 0 }
+        # QR-66: dirOpenFileOnce, qualified or not, is read like std's open; its declaration, a write mode, the
+        # option and a test block pass; a reference without a call fails, `sys.` or not.
+        @{ Text = "fn o1() !void {`n    const f = try sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn o2() !void {`n    const f = try win32_sys.dirOpenFileOnce(dir, name, .{ .allow_directory = false });`n}`n"; Hits = 0 }
+        @{ Text = "fn o3() !void {`n    const f = try dirOpenFileOnce(cwd, path, .{ .mode = .read_only });`n}`n"; Hits = 1 }
+        @{ Text = "fn o4() !void {`n    const f = try sys.dirOpenFileOnce(cwd, path, .{ .mode = .write_only });`n}`n"; Hits = 0 }
+        @{ Text = "pub fn dirOpenFileOnce(dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) !std.Io.File {`n    _ = dir;`n}`n"; Hits = 0 }
+        @{ Text = "const open = sys.dirOpenFileOnce;`n"; Hits = 1 }
+        @{ Text = "test `"t`" {`n    const f = try sys.dirOpenFileOnce(cwd, path, .{});`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
