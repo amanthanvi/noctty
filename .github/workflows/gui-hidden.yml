@@ -180,6 +180,7 @@ jobs:
             switch ($case) {
               Composite {
                 if ($code -ne 0 -or $compare -cnotcontains 'RESULT PASS (0 failures)') {
+                  $failures | ForEach-Object { Write-Host "$case $_" }
                   throw "Composite must pass the thread-role comparison. $summary"
                 }
                 Write-Host 'Composite PASS'
@@ -187,6 +188,7 @@ jobs:
               NoKey {
                 if ($code -ne 1 -or $failures.Count -ne 1 -or
                     $failures[0] -cne 'FAIL MISSING-REQUIRED-PAIR (src/Surface.zig:keyCallback, ui)') {
+                  $failures | ForEach-Object { Write-Host "$case $_" }
                   throw "NoKey must fail solely for the missing keyCallback/ui pair. $summary"
                 }
                 Write-Host 'NoKey FAIL MISSING-REQUIRED-PAIR (expected)'
@@ -196,6 +198,7 @@ jobs:
                 $kinds = @($failures | ForEach-Object { ($_ -split ' ', 3)[1] })
                 if ($code -ne 1 -or
                     ($kinds -join ',') -cne 'UNEXPECTED-EXIT,UNEXPECTED-PROCESS,MISSING-LAUNCH,MISSING-REQUIRED-PAIR,MISSING-REQUIRED-PAIR,MISSING-REQUIRED-PAIR') {
+                  $failures | ForEach-Object { Write-Host "$case $_" }
                   throw "NoLaunch must fail because the dump has no matching launch row. $summary"
                 }
                 Write-Host 'NoLaunch FAIL UNEXPECTED-EXIT, UNEXPECTED-PROCESS and MISSING-LAUNCH (expected)'
