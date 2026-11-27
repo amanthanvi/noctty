@@ -766,7 +766,8 @@ that govern each symbol you change, or that none does.
   the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
   the measure-AUMID builds an A/B compares
   (`Invoke-InteractiveWin11MeasureBuild` in
-  `scripts/interactive-win11-measure-lib.ps1`), the shared real-state guard
+  `scripts/interactive-win11-measure-lib.ps1`, and the package folder
+  it sets outside the source, `ZIG_LOCAL_PKG_DIR`), the shared real-state guard
   and its clipboard reading (`scripts/interactive-win11-state-guard.ps1`:
   `Test-InteractiveWin11ClipboardObservable`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
