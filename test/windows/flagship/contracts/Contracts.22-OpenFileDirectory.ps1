@@ -61,8 +61,13 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
         foreach ($literal in $literals) {
             if ($literal.Value.StartsWith('//')) { continue }
             $spells = $false
-            foreach ($e in [regex]::Matches($literal.Value, '(?<!\\)(?:\\\\)*\\(?:x(?<x>[0-9A-Fa-f]{2})|u\{(?<u>[0-9A-Fa-f]{1,6})\})')) {
-                $cp = [Convert]::ToInt32($(if ($e.Groups['x'].Success) { $e.Groups['x'].Value } else { $e.Groups['u'].Value }), 16)
+            # Every hex digit of a `\u{...}`, as Zig's parser reads them (`lib/std/zig/string_literal.zig:201`), its
+            # leading zeros stripped before the bounded conversion (council AD1): `\u{00000041}` is `A`.
+            foreach ($e in [regex]::Matches($literal.Value, '(?<!\\)(?:\\\\)*\\(?:x(?<x>[0-9A-Fa-f]{2})|u\{(?<u>[0-9A-Fa-f]+)\})')) {
+                $hex = if ($e.Groups['x'].Success) { $e.Groups['x'].Value } else { $e.Groups['u'].Value.TrimStart('0') }
+                if ($hex.Length -eq 0) { $hex = '0' }
+                if ($hex.Length -gt 6) { continue }
+                $cp = [Convert]::ToInt32($hex, 16)
                 if ($cp -le 0x7f -and [string][char]$cp -cmatch '^[A-Za-z0-9_]$') { $spells = $true; break }
             }
             if (-not $spells) { continue }
@@ -396,6 +401,12 @@ foreach ($sample in @(
         @{ Text = "fn n2() !void {`n    const marker = `"@`"; const f = try dir.@`"open\x46ile`"(io, `"x`", .{}); _ = marker;`n}`n"; Hits = 1 }
         @{ Text = "fn n3() !void {`n    const f = try @field(std.Io.Dir,`n        \\openFile`n    )(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
         @{ Text = "fn n4() !void {`n    const f = try @field(std.Io.Dir, (`"openFile`"))(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
+        # Council AD1: a \u{...} with more than six hex digits, leading zeros, still decodes; an escaped backslash
+        # and a terminal control character in that form pass.
+        @{ Text = "fn z1() void {`n    log.info(`"\u{00000041}`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn z2() !void {`n    const f = try dir.@`"open\u{0000046}ile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn z3() void {`n    log.info(`"\\u{00000041}`", .{});`n}`n"; Hits = 0 }
+        @{ Text = "fn z4() void {`n    log.info(`"\u{0000001b}`", .{});`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
