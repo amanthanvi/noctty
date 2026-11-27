@@ -905,6 +905,14 @@ foreach ($bad in @(
     )) {
     if ((& $guiVerdict $bad.Rows $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
 }
+# Council P5 on #768: only a noctty.com forwards. A launched noctty.exe (960, accounted by the launcher's record) that
+# exited with its command line unread does not vouch for a noctty.exe child (970) whose arguments were read and kept:
+# that child stays unaccounted, its only failure here.
+$guiExitedApp = Get-GuiHiddenProcessVerdict (& $guiWith @((& $guiRow 960 'noctty.exe' 100 96 -Exited $true), (& $guiRow 970 'noctty.exe' 960 97 -Argv $guiIpc))) `
+    @{ 200 = [long]20; 600 = [long]60; 960 = [long]96 } 13 1 $guiVerdictToken 100
+if ($guiExitedApp.passed -or $guiExitedApp.nocttyUnaccounted -ne 1 -or $guiExitedApp.nocttyArgvUnreadExited -ne 1 -or $guiExitedApp.nocttyArgumentRefused -ne 0) {
+    throw 'The process verdict let an exited noctty.exe vouch for a noctty.exe child, or failed it for another reason.'
+}
 
 # ---- (9b) a joiner the reader could not read because it had already exited is counted apart and passes (TD D112;
 # main's push runs 45561987608 and 44997457453 failed on such joiners alone). The live controls above ('a joiner that
