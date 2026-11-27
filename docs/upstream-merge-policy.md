@@ -103,9 +103,9 @@ not an adaptation to record.
   `PageList.compress` returns `.unsupported` and a release build never
   compresses; the test suite does (`builtin.is_test`). Windows reclaim
   (upstream `60b43068c`, in v1.4.0) comes after the stone, so from the
-  1B merge a release build compresses on Windows too, and the fork's UIA
-  and session readers read through `pagePreservingState()` (the
-  2026-11-27 READ-PRESERVED-01 entry in
+  1B merge a release build compresses on Windows too, and the fork's UIA,
+  session and local undo readers read through `pagePreservingState()`
+  (the 2026-11-27 READ-PRESERVED-01 and READ-PRESERVED-02 entries in
   docs/agents/log/terminal-core.md); the search window's reads moved at
   the stone merge itself (the last item below).
 - The page owner is `node.owned`, never the page's size: upstream's

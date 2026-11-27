@@ -319,7 +319,10 @@ that govern each symbol you change, or that none does.
   (`search/pattern.zig`: `Pattern`), one query over a terminal and its
   reports (`search/query_search.zig`: `QuerySearch.step`), the selection
   and search-highlight rows of `RenderState` (`render.zig`),
-  `TerminalFormatter`/`ScreenFormatter` output for undo snapshots and Copy as
+  `TerminalFormatter`/`ScreenFormatter` output for undo snapshots (the
+  snapshot's own page walk: `captureTerminalUndoStateBytes`,
+  `formatTerminalUndoVt` and `terminalUndoTrailingBlankRows` in
+  `src/apprt/win32.zig`) and Copy as
   HTML, Kitty graphics commands, placements and deletes in
   `kitty/graphics_command.zig`, `kitty/graphics_storage.zig` and
   `kitty/graphics_exec.zig`, the file reads of `kitty/graphics_image.zig`

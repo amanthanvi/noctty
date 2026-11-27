@@ -4234,15 +4234,119 @@ pub const RestoredTerminalUndoState = struct {
 
 const undo_snapshot_magic = "WUH3";
 
-fn terminalUndoTrailingBlankRows(terminal_state: *const terminal.Terminal) usize {
+// The local undo snapshot reads each page through `pagePreservingState`, never
+// `page()` (and so never the formatters' page walk or a row's `cells`) nor
+// `pageIfResident()`: a history page that page reclaim compressed is decoded
+// into memory the reader frees and stays compressed, where `page()` would
+// restore it and `pageIfResident()` would drop its rows (READ-PRESERVED-01 in
+// docs/agents/log/terminal-core.md).
+
+/// How many rows at the bottom of the active screen have no text, the rows
+/// the formatter trims.
+fn terminalUndoTrailingBlankRows(
+    alloc: Allocator,
+    terminal_state: *const terminal.Terminal,
+) Allocator.Error!usize {
     var rows: usize = 0;
-    var it = terminal_state.screens.active.pages.getBottomRight(.screen).?.rowIterator(.left_up, null);
-    while (it.next()) |pin| {
-        // Match the formatter's trailing-row trimming predicate.
-        if (terminal.page.Cell.hasTextAny(pin.cells(.all))) break;
-        rows += 1;
+    const bottom = terminal_state.screens.active.pages.getBottomRight(.screen).?;
+    var it = bottom.pageIterator(.left_up, null);
+    while (it.next()) |chunk| {
+        var preserved = try chunk.node.pagePreservingState(alloc);
+        defer preserved.deinit();
+        const page = preserved.page();
+        var y = chunk.end;
+        while (y > chunk.start) {
+            y -= 1;
+            // Match the formatter's trailing-row trimming predicate.
+            if (terminal.page.Cell.hasTextAny(page.getCells(page.getRow(y)))) return rows;
+            rows += 1;
+        }
     }
     return rows;
+}
+
+comptime {
+    // `formatTerminalUndoVt` writes each of these extras in
+    // `TerminalFormatter.format`'s order; an extra added upstream has to be
+    // placed there too.
+    const want_terminal = [_][]const u8{ "palette", "modes", "scrolling_region", "tabstops", "pwd", "keyboard", "screen" };
+    const want_screen = [_][]const u8{ "cursor", "style", "hyperlink", "protection", "kitty_keyboard", "charsets" };
+    for (.{
+        .{ terminal.formatter.TerminalFormatter.Extra, &want_terminal },
+        .{ terminal.formatter.ScreenFormatter.Extra, &want_screen },
+    }) |pair| {
+        const names = @typeInfo(pair[0]).@"struct".field_names;
+        if (names.len != pair[1].len) @compileError("the undo snapshot does not place every formatter extra");
+        for (names, pair[1]) |name, want| {
+            if (!std.mem.eql(u8, name, want)) @compileError("the undo snapshot does not place formatter extra " ++ name);
+        }
+    }
+}
+
+/// Write what `TerminalFormatter` with `.vt` and `extra = .all` but `pwd`
+/// writes for the active screen, in its order: the palette, the modes and the
+/// tab stops; the screen content; the scrolling region and the keyboard
+/// modes; then the screen's extras (cursor, style, hyperlink, protection,
+/// Kitty keyboard flags and charsets). Only the content differs in how it is
+/// read: `PageListFormatter` reads each chunk through `page()`, and this
+/// formats each preserved page with `PageFormatter`, as upstream's search
+/// window does (`SlidingWindow.append`). With `.vt`'s options (no unwrap,
+/// trim) neither `PageListFormatter`'s spacer-head step nor its trailing VT
+/// rows apply, so its page walk is all that is left of it. The cursor's
+/// pending-wrap cell is read through `page()`, but the cursor holds pointers
+/// into its page, so that page is resident.
+fn formatTerminalUndoVt(
+    alloc: Allocator,
+    terminal_state: *const terminal.Terminal,
+    writer: *std.Io.Writer,
+) (Allocator.Error || std.Io.Writer.Error)!void {
+    const fmt = terminal.formatter;
+    const opts: fmt.Options = .vt;
+    comptime std.debug.assert(!opts.unwrap and opts.trim);
+
+    var before: fmt.TerminalFormatter = .init(terminal_state, opts);
+    before.content = .none;
+    before.extra = .none;
+    before.extra.palette = true;
+    before.extra.modes = true;
+    before.extra.tabstops = true;
+    try before.format(writer);
+
+    const pages = &terminal_state.screens.active.pages;
+    const top_left = pages.getTopLeft(.screen);
+    const bottom_right = pages.getBottomRight(.screen).?;
+    var state: ?fmt.PageFormatter.TrailingState = null;
+    var it = top_left.pageIterator(.right_down, bottom_right);
+    while (it.next()) |chunk| {
+        std.debug.assert(chunk.start < chunk.end);
+        var preserved = try chunk.node.pagePreservingState(alloc);
+        defer preserved.deinit();
+        var page_formatter: fmt.PageFormatter = .init(preserved.page(), opts);
+        page_formatter.start_y = chunk.start;
+        page_formatter.end_y = chunk.end - 1;
+        page_formatter.trailing_state = state;
+        if (chunk.node == top_left.node) page_formatter.start_x = top_left.x;
+        if (chunk.node == bottom_right.node) page_formatter.end_x = bottom_right.x;
+        state = try page_formatter.formatWithState(writer);
+    }
+
+    var after: fmt.TerminalFormatter = .init(terminal_state, opts);
+    after.content = .none;
+    after.extra = .none;
+    after.extra.scrolling_region = true;
+    after.extra.keyboard = true;
+    try after.format(writer);
+
+    // In origin mode (DECOM), which the modes above restore, CUP counts from
+    // the corner of the scrolling region restored above.
+    var screen: fmt.ScreenFormatter = .init(terminal_state.screens.active, opts);
+    screen.content = .none;
+    screen.extra = .all;
+    if (terminal_state.modes.get(.origin)) screen.cursor_origin = .{
+        .x = terminal_state.scrolling_region.left,
+        .y = terminal_state.scrolling_region.top,
+    };
+    try screen.format(writer);
 }
 
 pub fn captureTerminalUndoStateBytes(
@@ -4251,14 +4355,7 @@ pub fn captureTerminalUndoStateBytes(
 ) ![]u8 {
     var vt_buf: std.Io.Writer.Allocating = .init(alloc);
     defer vt_buf.deinit();
-
-    var formatter = terminal.formatter.TerminalFormatter.init(
-        terminal_state,
-        .vt,
-    );
-    formatter.extra = .all;
-    formatter.extra.pwd = false;
-    try formatter.format(&vt_buf.writer);
+    try formatTerminalUndoVt(alloc, terminal_state, &vt_buf.writer);
 
     const vt_bytes = try vt_buf.toOwnedSlice();
     defer alloc.free(vt_bytes);
@@ -4277,7 +4374,7 @@ pub fn captureTerminalUndoStateBytes(
     // text row so neither changes which content is shifted to the live row.
     try buf.writer.writeInt(i64, @as(i64, terminal_state.screens.active.cursor.y) -
         @as(i64, terminal_state.rows - 1) +
-        @as(i64, @intCast(terminalUndoTrailingBlankRows(terminal_state))), .little);
+        @as(i64, @intCast(try terminalUndoTrailingBlankRows(alloc, terminal_state))), .little);
     try buf.writer.writeAll(title);
     try buf.writer.writeAll(pwd);
     try buf.writer.writeAll(vt_bytes);
@@ -4428,6 +4525,233 @@ test "win32 terminal undo aligns content with scrollback and trailing blank rows
     try std.testing.expect(std.mem.indexOf(u8, all, "1\n2\n3\n4\n5\nprompt") != null);
 }
 
+/// The undo snapshot as `captureTerminalUndoStateBytes` wrote it before it
+/// read pages through `pagePreservingState`: `TerminalFormatter` with `.vt`
+/// and `extra = .all` but `pwd`, and the trailing blank rows from a row
+/// iterator, both reading through `page()`. An oracle for resident pages.
+fn testFormatterTerminalUndoStateBytes(alloc: Allocator, terminal_state: *const terminal.Terminal) ![]u8 {
+    var vt_buf: std.Io.Writer.Allocating = .init(alloc);
+    defer vt_buf.deinit();
+    var formatter = terminal.formatter.TerminalFormatter.init(terminal_state, .vt);
+    formatter.extra = .all;
+    formatter.extra.pwd = false;
+    try formatter.format(&vt_buf.writer);
+
+    var trailing: usize = 0;
+    var it = terminal_state.screens.active.pages.getBottomRight(.screen).?.rowIterator(.left_up, null);
+    while (it.next()) |pin| {
+        if (terminal.page.Cell.hasTextAny(pin.cells(.all))) break;
+        trailing += 1;
+    }
+
+    const title = terminal_state.getTitle() orelse "";
+    const pwd = terminal_state.getPwd() orelse "";
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try buf.writer.writeAll(undo_snapshot_magic);
+    try buf.writer.writeInt(u32, @intCast(title.len), .little);
+    try buf.writer.writeInt(u32, @intCast(pwd.len), .little);
+    try buf.writer.writeInt(u32, terminal_state.cols, .little);
+    try buf.writer.writeInt(i64, @as(i64, terminal_state.screens.active.cursor.y) -
+        @as(i64, terminal_state.rows - 1) + @as(i64, @intCast(trailing)), .little);
+    try buf.writer.writeAll(title);
+    try buf.writer.writeAll(pwd);
+    try buf.writer.writeAll(vt_buf.written());
+    return try buf.toOwnedSlice();
+}
+
+/// Feed `first_line`, then numbered, styled lines (every fourth one long
+/// enough to wrap twice, every seventh blank, with a wide character and a
+/// hyperlink) or blank ones, until the active area starts on the third page.
+/// The two pages before it are then complete history that `PageList.compress`
+/// takes. Returns how many lines were fed.
+fn feedUndoColdPages(terminal_state: *terminal.Terminal, first_line: []const u8, numbered: bool) !usize {
+    var stream = terminal_state.vtStream();
+    defer stream.deinit();
+    const pages = &terminal_state.screens.active.pages;
+    stream.nextSlice(first_line);
+    stream.nextSlice("\r\n");
+    var line: [32]u8 = undefined;
+    var count: usize = 1;
+    while (true) : (count += 1) {
+        const active = pages.getTopLeft(.active).node;
+        if (active.prev) |prev| if (prev.prev != null) break;
+        if (numbered and count % 7 != 0) {
+            stream.nextSlice(try std.fmt.bufPrint(&line, "\x1b[1;3{d}mrow-{d:0>5}\x1b[0m ", .{ count % 8, count }));
+            stream.nextSlice("\u{4E2D} \x1b]8;;https://example.com/x\x1b\\link\x1b]8;;\x1b\\");
+            if (count % 4 == 0) for (0..18) |_| stream.nextSlice(" ten chars");
+        }
+        stream.nextSlice("\r\n");
+    }
+    return count;
+}
+
+test "win32 terminal undo snapshot writes what the formatter wrote while every page is resident" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { cols: u16, rows: u16, input: []const u8 }{
+        // Modes, origin mode inside left and right margins, tab stops, a
+        // palette entry, Kitty keyboard flags, modifyOtherKeys, charsets,
+        // protection, a style and an open hyperlink.
+        .{ .cols = 20, .rows = 6, .input = "\x1b]4;1;rgb:ab/cd/ef\x1b\\\x1b[?2004h\x1b[3g\x1b[6G\x1bH\x1b[13G\x1bH\r" ++
+            "one\r\ntwo\r\nthree\x1b[?69h\x1b[2;5r\x1b[4;15s\x1b[?6h\x1b[2;3H" ++
+            "\x1b[=5;1u\x1b[>4;2m\x1b)0\x0e\x1b[1\"q\x1b[1;31m\x1b]8;id=a;https://example.com\x1b\\" },
+        // A pending wrap after text at the right edge.
+        .{ .cols = 12, .rows = 5, .input = "one\r\ntwo\r\n0123456789ab" },
+        // A pending wrap on a wide character's spacer tail.
+        .{ .cols = 12, .rows = 5, .input = "one\r\n0123456789\u{4E2D}" },
+        // The alternate screen.
+        .{ .cols = 12, .rows = 5, .input = "\x1b[?1049hone\r\ntwo\r\nthree\r\nfour" },
+        // Scrollback above trailing blank rows.
+        .{ .cols = 12, .rows = 5, .input = "1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\x1b[4;1H\x1b[Jprompt" },
+    };
+    for (cases) |case| {
+        var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = case.cols, .rows = case.rows });
+        defer t.deinit(alloc);
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(case.input);
+        const want = try testFormatterTerminalUndoStateBytes(alloc, &t);
+        defer alloc.free(want);
+        const got = try captureTerminalUndoStateBytes(alloc, &t);
+        defer alloc.free(got);
+        try std.testing.expectEqualSlices(u8, want, got);
+    }
+    // The first case wrote every extra its comment names.
+    {
+        var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 6 });
+        defer t.deinit(alloc);
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(cases[0].input);
+        const got = try captureTerminalUndoStateBytes(alloc, &t);
+        defer alloc.free(got);
+        for ([_][]const u8{
+            "\x1b]4;1;rgb:ab/cd/ef\x1b\\",
+            "\x1b[?2004h",
+            "\x1b[?6h",
+            "\x1b[3g\x1b[6G\x1bH\x1b[13G\x1bH",
+            "\x1b[2;5r",
+            "\x1b[4;15s",
+            "\x1b[>4;2m",
+            "\x1b[=5;1u",
+            "\x1b)0\x0e",
+            "\x1b[1\"q",
+            "\x1b]8;id=a;https://example.com\x1b\\",
+        }) |part| {
+            if (std.mem.indexOf(u8, got, part) == null) {
+                std.debug.print("missing {f}\n", .{std.zig.fmtString(part)});
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+
+    // History over three pages, with a soft-wrapped line across a page
+    // boundary, so the page walk carries its trailing state between pages.
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = 10_000_000,
+    });
+    defer t.deinit(alloc);
+    _ = try feedUndoColdPages(&t, "row-00000", true);
+    const wrapsAcrossPages = struct {
+        fn check(pages: *terminal.PageList) bool {
+            var node = pages.pages.first;
+            while (node) |n| : (node = n.next) {
+                if (n.next == null) return false;
+                if (n.page().getRow(n.rows() - 1).wrap) return true;
+            }
+            return false;
+        }
+    }.check;
+    {
+        // Lines three rows long until one crosses a page boundary.
+        var stream = t.vtStream();
+        defer stream.deinit();
+        var long_lines: usize = 0;
+        while (!wrapsAcrossPages(&t.screens.active.pages)) : (long_lines += 1) {
+            try std.testing.expect(long_lines < 3000);
+            for (0..20) |_| stream.nextSlice(" ten chars");
+            stream.nextSlice("\r\n");
+        }
+    }
+    const want = try testFormatterTerminalUndoStateBytes(alloc, &t);
+    defer alloc.free(want);
+    const got = try captureTerminalUndoStateBytes(alloc, &t);
+    defer alloc.free(got);
+    try std.testing.expectEqualSlices(u8, want, got);
+}
+
+test "win32 terminal undo snapshot reads reclaim-compressed history without restoring it" {
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = 10_000_000,
+    });
+    defer t.deinit(alloc);
+    _ = try feedUndoColdPages(&t, "row-00000", true);
+    const pages = &t.screens.active.pages;
+    const first = pages.pages.first.?;
+    const second = first.next.?;
+
+    const resident = try captureTerminalUndoStateBytes(alloc, &t);
+    defer alloc.free(resident);
+    // The first page's oldest line is in it.
+    try std.testing.expect(std.mem.indexOf(u8, resident, "row-00000") != null);
+
+    _ = pages.compress(.full);
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    const stats = pages.memoryStats();
+
+    // The same snapshot from the compressed pages, which stay compressed.
+    const compressed = try captureTerminalUndoStateBytes(alloc, &t);
+    defer alloc.free(compressed);
+    try std.testing.expectEqualSlices(u8, resident, compressed);
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    try std.testing.expectEqual(stats, pages.memoryStats());
+}
+
+test "win32 terminal undo snapshot's trailing blank rows read reclaim-compressed history without restoring it" {
+    // Text only on the first row of the first page, under blank history and
+    // a blank active area, so the scan for the last text row reads both
+    // compressed pages.
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = 10_000_000,
+    });
+    defer t.deinit(alloc);
+    _ = try feedUndoColdPages(&t, "painted", false);
+    const pages = &t.screens.active.pages;
+    const first = pages.pages.first.?;
+    const second = first.next.?;
+    const resident = try captureTerminalUndoStateBytes(alloc, &t);
+    defer alloc.free(resident);
+
+    _ = pages.compress(.full);
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    const stats = pages.memoryStats();
+
+    // Every row below the first is blank.
+    try std.testing.expectEqual(pages.total_rows - 1, try terminalUndoTrailingBlankRows(alloc, &t));
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    try std.testing.expectEqual(stats, pages.memoryStats());
+
+    // The whole snapshot, which anchors the cursor to that row.
+    const compressed = try captureTerminalUndoStateBytes(alloc, &t);
+    defer alloc.free(compressed);
+    try std.testing.expectEqualSlices(u8, resident, compressed);
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    try std.testing.expectEqual(stats, pages.memoryStats());
+}
+
 pub fn restoreTerminalUndoState(
     terminal_state: *terminal.Terminal,
     state_bytes: []const u8,
@@ -4467,8 +4791,18 @@ pub fn restoreTerminalUndoState(
         // above the screen retained in scrollback. Ignore the snapshot's
         // margins while shifting the whole screen, then put them back.
         const saved_y: u64 = if (cursor_from_last_text) |offset| row: {
+            // Only a compressed page allocates here, and the replay above
+            // leaves none; without the anchor the replayed cursor row stands,
+            // as for a snapshot from another width.
+            const trailing = terminalUndoTrailingBlankRows(
+                terminal_state.screens.active.alloc,
+                terminal_state,
+            ) catch |err| {
+                log.warn("undo snapshot cursor anchor failed err={}", .{err});
+                break :row terminal_state.screens.active.cursor.y;
+            };
             const last_text_y = @as(i64, terminal_state.rows - 1) -
-                @as(i64, @intCast(terminalUndoTrailingBlankRows(terminal_state)));
+                @as(i64, @intCast(trailing));
             break :row @intCast(@max(0, last_text_y + offset));
         } else terminal_state.screens.active.cursor.y;
         const region = terminal_state.scrolling_region;
