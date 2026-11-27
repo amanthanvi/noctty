@@ -1863,10 +1863,11 @@ test "held file: the PowerShell install leaves a busy copy at once, and fails at
     // which does not wait here. The target's holder shares no delete, so
     // `FileRenameInformationEx` returns `STATUS_SHARING_VIOLATION`, which std
     // 0.17's rename has no arm for: `error.Unexpected` at once, as on 0.15
-    // (std retries only `STATUS_ACCESS_DENIED` from a rename; in a Debug
-    // build `unexpectedStatus` also prints a stack trace, hence the looser
-    // bound). The overwrite after it is one attempt, so the install fails at
-    // once and leaves the copy for the next launch.
+    // (std retries only `STATUS_ACCESS_DENIED` from a rename). In a Debug
+    // build `unexpectedStatus` also prints a stack trace, which took 127 ms
+    // alone and 615 ms in the full suite, so the bound is std's retry: no
+    // wait of std's. The overwrite after it is one attempt, so the install
+    // fails at once and leaves the copy for the next launch.
     var fx = try InstallFixture.init("# an older script\n");
     defer fx.deinit();
     {
@@ -1876,7 +1877,7 @@ test "held file: the PowerShell install leaves a busy copy at once, and fails at
         try std.testing.expectEqual(InstallResult.failed, installIfStale(std.testing.allocator, fx.path));
         const ms = win32_sys.HeldFile.msSince(start);
         std.debug.print("held file: PowerShell install against deny_write: failed after {d} ms\n", .{ms});
-        try std.testing.expect(ms < 1000);
+        try std.testing.expect(ms < win32_sys.HeldFile.std_retry_floor_ms);
     }
     const kept = try fx.read();
     defer std.testing.allocator.free(kept);
