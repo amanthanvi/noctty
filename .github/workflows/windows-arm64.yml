@@ -106,7 +106,7 @@ jobs:
         # -Dtest-shards=4 runs it as four processes on the runner's four cores
         # (src/test_runner.zig), as test.yml's Full Zig test suite does.
         run: |
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-shards=4 --summary all --test-timeout 120s
+          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-shards=4 --summary all --test-timeout 240s
 
   arm64-build:
     name: Native Windows ARM64 Build

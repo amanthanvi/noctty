@@ -99,7 +99,7 @@ $win10WorkflowSteps = [ordered]@{
         '(?m)^if \(\$build -ge 22000\) \{\s*throw '
     )
     'Full Zig test suite' = @(
-        '(?m)^zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 120s 2>&1 \| Tee-Object -FilePath zig-test\.log\s*\r?\n\$code = \$LASTEXITCODE\s*$'
+        '(?m)^zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 240s 2>&1 \| Tee-Object -FilePath zig-test\.log\s*\r?\n\$code = \$LASTEXITCODE\s*$'
         '(?m)^if \(\$code -ne 0\) \{ exit \$code \}\s*$'
     )
     'noctty +version smoke' = @(

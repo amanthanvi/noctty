@@ -235,7 +235,8 @@ jobs:
 
       - name: Run full test suite
         shell: pwsh
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 120s
+        # 240 s, as test.yml's full suite step says why (ZIG017-DEBUG-TEST-TIME-01).
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 240s
 
       - name: Run native Win32 compositor tests
         shell: pwsh

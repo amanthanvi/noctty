@@ -76,7 +76,8 @@ jobs:
       - name: Full Zig test suite
         shell: pwsh
         run: |
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 120s 2>&1 | Tee-Object -FilePath zig-test.log
+          # 240 s, as test.yml's full suite step says why (ZIG017-DEBUG-TEST-TIME-01).
+          zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 240s 2>&1 | Tee-Object -FilePath zig-test.log
           $code = $LASTEXITCODE
           $summary = Select-String -Path zig-test.log -Pattern 'tests passed' | Select-Object -Last 1
           "Zig suite on build ${env:windows_build}: $($summary.Line)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

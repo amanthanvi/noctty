@@ -350,7 +350,13 @@ jobs:
         # four cores, most of it in a few long tests. Four shards of the one
         # executable (src/test_runner.zig) run side by side, each test once,
         # and the Build Summary adds their counts up as before.
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all --test-timeout 120s
+        # --test-timeout 240s, not 120s (the 1B.6 timeout ruling; ZIG017-DEBUG-TEST-TIME-01 in
+        # docs/agents/log/test-harnesses.md). Three tests run longer in Debug on Zig 0.17.1 and 1.4's code:
+        # PageList resize backfill keeps source pins (42.8-48.5 s locally), PageList resize (no reflow) more
+        # cols remaps viewport pin (54.7-62.7 s) and Terminal: printSlice differential fuzz vs print
+        # (57.6-59.4 s). CI runs about 2.1x local, and timed them out at 120 s. In ReleaseSafe the two PageList
+        # tests take 0.08 s, so the cost is Debug-only. A real hang still fails, 120 s later.
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all --test-timeout 240s
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
@@ -665,7 +671,8 @@ jobs:
       # two shards each (four processes) left the step's time unchanged
       # (TEST-SHARDS-01 in docs/agents/log/test-harnesses.md).
       - name: Run libghostty-vt and C API tests
-        run: zig build test-lib-vt -Demit-lib-vt=true --summary all --test-timeout 120s
+        # 240 s, as the full suite's step says why (the same PageList and Terminal tests run here).
+        run: zig build test-lib-vt -Demit-lib-vt=true --summary all --test-timeout 240s
 
       - name: Build app-profile differential oracle (no capture)
         run: zig build oracle -Dvt-api=v140 -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
