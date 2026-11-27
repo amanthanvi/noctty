@@ -562,8 +562,13 @@ bound to the tree carries over from the tip. The Test workflow runs again on
 the merge SHA, because `release.yml` releases only `main`'s head, and only
 with a successful Test run for that exact SHA.
 
-If that run fails, re-run each failed job once: the tree has already passed,
-so a first failure is not yet a regression. A job that never reached a verdict
+If that run fails, start one new Test run (the dispatch below): the tree has
+already passed, so a first failure is not yet a regression. The budget is
+counted in runs, since a new run runs every job again: each failed run whose
+failed jobs had passed every earlier run gets one new run. A job that fails in
+two runs has reproduced. A job that passed before and fails in a new run has
+failed once, so it gets the next new run, but its earlier pass does not count:
+`release.yml` takes only a run whose jobs all passed. A job that never reached a verdict
 (a hosted outage, a cancellation) has not failed the tree: start it again when
 the runner is back, as often as that takes, and the prerelease waits for it.
 The same holds for a job that failed only in a step that does not run the
