@@ -219,9 +219,14 @@ pub fn writeFileAtomicOrInPlace(
     return .{ .in_place = failure };
 }
 
+/// The startup ledger's fallback once its atomic replace failed, on the UI
+/// thread. One attempt (re-check item 34): the holder that refused the
+/// replace usually refuses this open too, and std 0.17 would wait about four
+/// seconds for it first; `FileBusy` (a holder that denies writes, or a
+/// pending delete) is retried by the ready marker on a later tick.
 pub fn writeFileInPlace(absolute_path: []const u8, bytes: []const u8) !void {
     const io = global.io();
-    var file = try std.Io.Dir.createFileAbsolute(io, absolute_path, .{ .truncate = true });
+    var file = try sys.dirCreateFileOnce(std.Io.Dir.cwd(), absolute_path, .{ .truncate = true });
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
     try file.sync(io);

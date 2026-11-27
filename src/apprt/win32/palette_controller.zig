@@ -818,7 +818,10 @@ pub const AppControls = struct {
         defer self.core_app.alloc.free(path);
 
         const io = global.io();
-        const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch return;
+        // One attempt, at start on the UI thread (re-check item 34): a busy
+        // file starts the list empty at once, where std 0.17 would wait
+        // about four seconds first.
+        const file = sys.dirOpenFileOnce(std.Io.Dir.cwd(), path, .{ .allow_directory = false }) catch return;
         defer file.close(io);
 
         // Cap read size at 64 KB — way more than the 5 × ~200-char
@@ -851,7 +854,9 @@ pub const AppControls = struct {
             };
         }
 
-        const file = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }) catch |err| {
+        // One attempt (re-check item 34): a busy file loses this save at
+        // once, where std 0.17 would hold up the quit about four seconds.
+        const file = sys.dirCreateFileOnce(std.Io.Dir.cwd(), path, .{ .truncate = true }) catch |err| {
             std.log.warn("palette MRU: create failed path={f} err={}", .{ redact.bytes(path), err });
             return;
         };

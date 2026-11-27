@@ -1433,7 +1433,11 @@ pub const JumpList = struct {
             return false;
         };
         defer self.alloc.free(lock_path);
-        const lock_file = std.Io.Dir.createFileAbsolute(global.io(), lock_path, .{
+        // One attempt, on the UI thread's flush timer and at quit (re-check
+        // item 34): a lock file another program holds, or one left pending
+        // delete, fails this persist at once (`FileBusy`), and `flush`
+        // retries it, where std 0.17 would wait about four seconds first.
+        const lock_file = sys.dirCreateFileOnce(std.Io.Dir.cwd(), lock_path, .{
             .read = true,
             .truncate = false,
             .lock = .exclusive,
