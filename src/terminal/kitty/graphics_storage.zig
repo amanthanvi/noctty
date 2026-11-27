@@ -4331,6 +4331,7 @@ test "storage: scroll margins placement inside region scrolls and clips at top" 
         .width = 10,
         .height = 20,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 2 }) },
     });
@@ -4362,9 +4363,10 @@ test "storage: scroll margins placement inside region scrolls and clips at top" 
         try testing.expectEqual(@as(u32, 10), p.source_height);
     }
 
-    // Fully clipped: deleted.
+    // Fully clipped: deleted, and its tracked pin released.
     try t.index();
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
     // The image itself is retained.
     try testing.expectEqual(@as(usize, 1), storage.images.count());
 }
@@ -4453,6 +4455,7 @@ test "storage: scroll margins reverse index clips at bottom" {
         .width = 10,
         .height = 20,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 3 }) },
     });
@@ -4475,6 +4478,7 @@ test "storage: scroll margins reverse index clips at bottom" {
     // Fully clipped: deleted.
     t.reverseIndex();
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: scroll margins scaled placement clips proportionally" {
@@ -4656,6 +4660,7 @@ test "storage: scroll margins large scroll deletes inside placement" {
         .width = 10,
         .height = 10,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 2 }) },
     });
@@ -4663,6 +4668,7 @@ test "storage: scroll margins large scroll deletes inside placement" {
 
     try t.scrollUp(10);
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: scroll margins straddling placement pin inside region restored" {
@@ -4718,6 +4724,7 @@ test "storage: scroll margins multi-line scroll up with scrollback" {
         .width = 10,
         .height = 10,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 2 }) },
     });
@@ -4736,6 +4743,7 @@ test "storage: scroll margins multi-line scroll up with scrollback" {
     // Another two rows scrolls it out of the region: deleted.
     try t.scrollUp(2);
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: resolveChain accumulates offsets to the pin root" {
