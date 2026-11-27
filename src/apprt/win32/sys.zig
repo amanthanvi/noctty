@@ -1823,14 +1823,31 @@ test "the final path name keeps an 8.3 alias as opened, and matches a case varia
     const alloc = std.testing.allocator;
     // In the temp folder, through `GetShortPathNameW`: the checkout's drive may
     // make no 8.3 names (a ReFS Dev Drive, a CI work volume), and a hand-made
-    // alias may name nothing (NTFS hashes some short bases).
-    var tmp = try @import("../../os/TempDir.zig").init();
-    defer tmp.deinit();
+    // alias may name nothing (NTFS hashes some short bases). The temp folder
+    // through `GetTempPathW`, as `os/TempDir.zig` finds it, but without it or
+    // `os/file.zig`: both reach the global state, lib-vt's tests reach this
+    // file (through `os/local_path.zig`), and lib-vt refuses `global.zig`.
+    // `os/windows.zig` is already in lib-vt (`terminal/page.zig`).
+    var tmp_w: [windows.MAX_PATH + 1:0]u16 = undefined;
+    const tmp_len = @import("../../os/windows.zig").exp.kernel32.GetTempPathW(tmp_w.len, &tmp_w);
+    if (tmp_len == 0 or tmp_len > tmp_w.len) return error.SkipZigTest;
+    const tmp_path = try std.unicode.wtf16LeToWtf8Alloc(alloc, tmp_w[0..tmp_len]);
+    defer alloc.free(tmp_path);
+    const tmp_root = try std.Io.Dir.cwd().openDir(io, tmp_path, .{});
+    defer tmp_root.close(io);
+    var random: [8]u8 = undefined;
+    io.random(&random);
+    var name_buf: [48]u8 = undefined;
+    const scratch_name = try std.fmt.bufPrint(&name_buf, "noctty-final-path-{s}", .{&std.fmt.bytesToHex(random, .lower)});
+    try tmp_root.createDir(io, scratch_name, .default_dir);
+    defer tmp_root.deleteTree(io, scratch_name) catch {};
+    const scratch = try tmp_root.openDir(io, scratch_name, .{});
+    defer scratch.close(io);
     const folder = "noctty final path folder";
     const leaf = "present file.txt";
-    try tmp.dir.createDir(io, folder, .default_dir);
-    try tmp.dir.writeFile(io, .{ .sub_path = folder ++ "\\" ++ leaf, .data = "x" });
-    const long = try tmp.dir.realPathFileAlloc(io, folder ++ "\\" ++ leaf, alloc);
+    try scratch.createDir(io, folder, .default_dir);
+    try scratch.writeFile(io, .{ .sub_path = folder ++ "\\" ++ leaf, .data = "x" });
+    const long = try scratch.realPathFileAlloc(io, folder ++ "\\" ++ leaf, alloc);
     defer alloc.free(long);
 
     // The file's name in other case: the file system gives its own case back
