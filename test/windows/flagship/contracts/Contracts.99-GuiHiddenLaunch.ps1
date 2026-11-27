@@ -930,13 +930,22 @@ foreach ($good in @(
         # Council no-seat N7: a real forward keeps its child row. The launched CLI (600) exited before its command line
         # was read; the noctty.exe it forwarded (700), its own arguments read and kept, is still accounted. The forward
         # is an actionless one, the kind that returns at once (council Q2 on #768).
-        @{ Name = 'a noctty forwarded by a launched CLI that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Argv $guiActionless } else { $_ } }); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyUnaccounted' }
+        @{ Name = 'a noctty forwarded by a launched CLI that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Argv $guiActionless } else { $_ } }); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyUnaccounted'; Actionless = 700 }
         @{ Name = 'a launched CLI that had exited before its image was read'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
         # Sourcery on #752: the exited rows are keyed by PID and creation time, so a later generation of the same PID
         # (creation 61) after the launcher's (60) does not hide it.
         @{ Name = 'a launched CLI that had exited before its image was read, its PID reused by a later exited joiner'; Rows = (@(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }) + @(& $guiRow 600 $null 100 61 -Exited $true)); Total = 11; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
     )) {
     $verdict = & $guiVerdict $good.Rows $good.Total 1
+    # Council R2 on #768: N7's positive row is the forward that returns at once, so its child's arguments name no
+    # action (`+name`) before `-e`; an IPC action such as +list-windows makes the wrapper wait instead.
+    if ($good.Actionless) {
+        $guiForwardArgv = @(@($good.Rows | Where-Object { $_.Pid -eq $good.Actionless })[0].Argv | Select-Object -Skip 1)
+        $guiBeforeCommand = $(if ($guiForwardArgv -ccontains '-e') { $guiForwardArgv[0..([array]::IndexOf($guiForwardArgv, '-e'))] } else { $guiForwardArgv })
+        if ($guiForwardArgv.Count -eq 0 -or @($guiBeforeCommand | Where-Object { $_ -like '+*' }).Count -ne 0) {
+            throw "The N7 forward fixture ($($good.Name)) names an action before -e, so its wrapper would not return at once."
+        }
+    }
     if (-not $verdict.passed -or $verdict[$good.Exited] -ne 1 -or $verdict[$good.Live] -ne 0) {
         throw "The process verdict did not count $($good.Name) apart ($($good.Exited) $($verdict[$good.Exited]), $($good.Live) $($verdict[$good.Live]), passed $($verdict.passed))."
     }
