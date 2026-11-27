@@ -73,7 +73,7 @@ equivalent:
 | `CursorType`                           | `cursor-style`                         | `block`, `bar`, `underline`.                                               |
 | `CursorBlinks`                         | `cursor-style-blink`                   |                                                                            |
 | `Transparency`                         | `background-opacity`                   | mintty uses named levels; Noctty takes a number from 0 to 1.               |
-| `ScrollbackLines`                      | `scrollback-limit`                     | Different unit: mintty counts lines, Noctty counts bytes. Default 10 MB.   |
+| `ScrollbackLines`                      | `scrollback-limit-lines`               | Lines, as mintty counts. `scrollback-limit-bytes` (10 MB) also caps it.    |
 | `CopyOnSelect`                         | `copy-on-select`                       |                                                                            |
 | `Columns`, `Rows`                      | `window-width`, `window-height`        | Grid cells. Both must be set or both are ignored.                          |
 | `ConfirmExit`                          | `confirm-close-surface`                |                                                                            |
