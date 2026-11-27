@@ -50,8 +50,10 @@ C9, D83).
 2. **A region below the top whose top row is page row 0:** the pressed column is kept, where `main` resets it to 0.
 3. **A scroll region below the top with an SGR background:** pins move with their rows, so a Ctrl+click during
    output opens nothing. `main` doesn't move them.
-4. **A top-anchored region above a status line:** the top-row pin stays on row 0, where `main` moves it into history.
-   The click outcome is the same on both.
+4. **A top-anchored region above a status line** (a full-width, multi-row region, on a screen without scrollback,
+   whose active top is page row 0): the top-row pin stays on row 0, where `main` moves it into history. The click
+   outcome is the same on both. Outside those conditions this difference does not hold: with scrollback, a
+   full-width top-anchored region takes the scroll path that makes history, and a top pin below page row 0 moves up.
 5. **libghostty-vt tracked grid refs and `SelectionGesture.left_click_pin`:** no `main` baseline.
 
 ## Plan deltas in force
