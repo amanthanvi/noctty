@@ -28,7 +28,12 @@
         "test/windows/hidden-win11-conpty-reply-path.ps1",
         "test/windows/console-reply-reader.c",
         "src/os/local_path.zig",
-        "src/apprt/win32_prefixed_path.zig"
+        "src/apprt/win32_prefixed_path.zig",
+        "src/build/uucode_config.zig",
+        "src/unicode/main.zig",
+        "src/unicode/testdata/conpty_width.tsv",
+        "test/windows/hidden-win11-conpty-width.ps1",
+        "test/windows/conpty-width-probe.c"
       ]
     },
     {

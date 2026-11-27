@@ -276,7 +276,13 @@ that govern each symbol you change, or that none does.
   terminal replies reach a console program through ConPTY's input and in what
   shape (the reply-path harness
   `test/windows/hidden-win11-conpty-reply-path.ps1` and its reader
-  `test/windows/console-reply-reader.c`), the
+  `test/windows/console-reply-reader.c`), the width ConPTY gives a code
+  point and the pins that make noctty's match it (`conpty_width_pins` in
+  `src/build/uucode_config.zig`, the probe's table
+  `src/unicode/testdata/conpty_width.tsv` and its test in
+  `src/unicode/main.zig`, the width harness
+  `test/windows/hidden-win11-conpty-width.ps1` and its probe
+  `test/windows/conpty-width-probe.c`), the
   Ctrl+C-ignore attribute hosted shells inherit
   (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under
