@@ -261,7 +261,8 @@ that govern each symbol you change, or that none does.
   uses, `stackUse` in `os/main.zig`, `win32_prefixed_path.convert`'s frame
   among it, including the reparse walk the kitty
   file open runs there: `os/local_path.zig` `walk`, `openRoot`,
-  `readLinkTarget`) and write pool in
+  `readLinkTarget`; and the stacks of the global `Io.Threaded` instance's
+  workers, `src/global.zig` `io_impl`) and write pool in
   `termio/Exec.zig`, `ResizePseudoConsole` and the renderer lock
   `Termio.resize` holds across it, in-box conhost
   versus the bundled `conpty.dll`/`OpenConsole.exe`

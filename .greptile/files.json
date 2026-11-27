@@ -8,6 +8,7 @@
       "path": "docs/agents/log/conpty.md",
       "description": "Self-Correction Log: ConPTY, pty I/O and resize.",
       "scope": [
+        "src/global.zig",
         "src/pty.zig",
         "src/pty_transport_probe.zig",
         "src/termio/**",
