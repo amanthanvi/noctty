@@ -143,12 +143,13 @@ function Get-AbiPinProblems {
     # namespace (council V2).
     # Pins are read by a type's bare name, so two discovered types of one name would share them: an unpinned one
     # would pass on its namesake's pins (council X1). That fails, whichever namespaces hold them.
-    $discovered = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $discovered = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     $noteName = {
         param([string]$Name)
-        if (-not $discovered.Add($Name)) {
+        if ($discovered.ContainsKey($Name)) {
+            $discovered[$Name]++
             $problems.Add("two extern types are named $Name, and pins are read by bare name: rename one, or move it to its own file")
-        }
+        } else { $discovered[$Name] = 1 }
     }
     foreach ($declaration in [regex]::Matches($Source, '(?m)^[ \t]*(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*type)?\s*=\s*extern (struct|union) \{')) {
         & $noteName $declaration.Groups[1].Value
@@ -203,6 +204,14 @@ function Get-AbiPinProblems {
             $previous = @{ Field = $field; Offset = $offset }
         }
     }
+    # Any other `const` of a discovered type's name, a plain struct or an alias included, lends its pins the same
+    # way (council Z1).
+    foreach ($name in $discovered.Keys) {
+        $declared = [regex]::Matches($Source, '(?m)^[ \t]*(?:pub )?const ' + [regex]::Escape($name) + '\s*[:=]').Count
+        if ($declared -gt $discovered[$name]) {
+            $problems.Add("another const declaration is named $name, as an extern type is, and pins are read by bare name: rename one, or move it to its own file")
+        }
+    }
     return [pscustomobject]@{ Problems = $problems.ToArray(); Top = $top; Nested = $nested }
 }
 
@@ -220,6 +229,8 @@ $abiPinControls = @(
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const PRIVATE_PROBE = extern struct {`n    value: u32,`n};`n`npub const FILETIME = extern struct {"); Expect = 'PRIVATE_PROBE has no size pin' }
     # One indented inside a namespace, with no pins (council V2).
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const Namespace = struct {`n    const INDENTED_PROBE = extern struct {`n        value: u32,`n    };`n};`n`npub const FILETIME = extern struct {"); Expect = 'INDENTED_PROBE has no size pin' }
+    # Council Z1: a plain struct Record pinned by bare name, beside an unpinned extern Record.
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const NamespaceA = struct {`n    const Record = struct {`n        value: u32,`n    };`n};`nconst NamespaceB = struct {`n    const Record = extern struct {`n        value: u32,`n    };`n};`ntest `"records`" {`n    try testing.expectEqual(@as(usize, 4), @sizeOf(Record));`n    try testing.expectEqual(@as(usize, 0), @offsetOf(Record, `"value`"));`n}`n`npub const FILETIME = extern struct {"); Expect = 'another const declaration is named Record, as an extern type is, and pins are read by bare name: rename one, or move it to its own file' }
     # Council X1: sibling namespaces that each declare a Record, sharing one set of bare-name pins.
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const NamespaceA = struct {`n    const Record = extern struct {`n        value: u32,`n    };`n};`nconst NamespaceB = struct {`n    const Record = extern struct {`n        value: u32,`n    };`n};`ntest `"records`" {`n    try testing.expectEqual(@as(usize, 4), @sizeOf(Record));`n    try testing.expectEqual(@as(usize, 0), @offsetOf(Record, `"value`"));`n}`n`npub const FILETIME = extern struct {"); Expect = 'two extern types are named Record, and pins are read by bare name: rename one, or move it to its own file' }
     # One with its type annotated and no pins (council U3).
