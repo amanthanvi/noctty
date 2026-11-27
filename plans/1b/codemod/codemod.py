@@ -335,6 +335,8 @@ def _freed_or_read(toks, lo, hi, decl):
 
 
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
+IS_DIR = ("the file names IsDir: 0.17's statFile reports a directory as kind = .directory, where 0.15's refused one "
+          "with IsDir (council H2)")
 LIMIT_SHAPE = ("readFileAlloc's limit is no integer literal, so `+ 1` (0.15's inclusive bound) could change it "
                "(`1 << 20 + 1` is `1 << 21`) or overflow (a name bound to `maxInt(usize)`)")
 INT_LITERAL = re.compile(r"0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*")
@@ -559,7 +561,9 @@ def rule_test_dir_io(text, toks):
     the `Io.Limit` `.limited(n + 1)`, since 0.15 accepted a file of exactly `n` bytes and 0.17's limit refuses a file
     that reaches it; a bound that is not an integer literal (a name may be `maxInt(usize)`) is a hand edit. Its
     oversize error is `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a
-    helper outside the test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a
+    helper outside the test may consume it), every readFileAlloc is a hand edit. statFile in 0.17 reports a directory
+    as `kind = .directory` where 0.15's refused one with `IsDir`: in a file that names `IsDir`, every statFile is a
+    hand edit (council H2). realpathAlloc's 0.17 result is a
     `[:0]u8`, so it is rewritten only as the whole initializer of an untyped `const` bound once in the test, whose
     every use is a direct `<allocator>.free(<name>)` or a read in place (`.len`, an index), so a free keeps the
     sentinel's size.
@@ -575,6 +579,7 @@ def rule_test_dir_io(text, toks):
     is left alone."""
     hits = []
     names_file_too_big = "FileTooBig" in text   # code, a string or a comment: when in doubt, a hand edit
+    names_is_dir = "IsDir" in text   # the same for statFile's directory (council H2)
     blocks = test_blocks(toks)
     for i, t in enumerate(toks):
         # Product code: a 0.15 openFile the rule knows the receiver of, outside every test block.
@@ -614,6 +619,8 @@ def rule_test_dir_io(text, toks):
                     raise HandEdit(REUSED_RECEIVER.format(toks[i - 4].text))
                 if t.text == "readFileAlloc" and names_file_too_big:
                     raise HandEdit(FILE_TOO_BIG)
+                if t.text == "statFile" and names_is_dir:
+                    raise HandEdit(IS_DIR)
                 if t.text == "realpathAlloc":
                     s = i - (4 if recv == "tmp" else 8)
                     if not _untyped_const_init(toks, s, close):

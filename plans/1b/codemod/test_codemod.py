@@ -207,6 +207,22 @@ class RuleTests(unittest.TestCase):
         self.assertIn('tmp.dir.readFileAlloc(alloc, "a", 0)', got)
         self.assertIn(("test-dir-io", 4, "hand edit: " + codemod.FILE_TOO_BIG), rows)
 
+    def test_a_file_naming_is_dir_keeps_its_stat_file(self):
+        # council H2: 0.17's statFile reports a directory as kind = .directory, where 0.15's refused it with IsDir.
+        head = 'test "st" {\n    var tmp = std.testing.tmpDir(.{});\n'
+        call = '    _ = try tmp.dir.statFile("a");\n'
+        rows = []
+        got, _ = codemod.rewrite(head + call + '}\n', None, None, rows)
+        self.assertIn('tmp.dir.statFile(std.testing.io, "a", .{})', got)
+        for tail in ('    try testing.expectError(error.IsDir, tmp.dir.statFile("b"));\n}\n',
+                     '}\nfn helper(err: anyerror) bool {\n    return err == error.IsDir;\n}\n',
+                     '    // a directory gave IsDir on 0.15\n}\n'):
+            with self.subTest(tail=tail):
+                rows = []
+                got, _ = codemod.rewrite(head + call + tail, None, None, rows)
+                self.assertIn('tmp.dir.statFile("a")', got)
+                self.assertIn(("test-dir-io", 3, "hand edit: " + codemod.IS_DIR), rows)
+
     def test_read_file_alloc_keeps_the_inclusive_bound(self):
         # council F2 (QR-30): 0.15 read a file of exactly n bytes, which 0.17's `.limited(n)` refuses; `n + 1` keeps
         # the bound where n is an integer literal (council G6: no longer a name, which may be the maximum).

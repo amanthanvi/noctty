@@ -82,3 +82,5 @@ test-dir-io (also):
   the same way. A literal at the type's maximum would overflow too, which the compile reports;
 - every readFileAlloc in a file that names `FileTooBig` anywhere (code, string or comment): 0.17's oversize error
   is `StreamTooLong`, and a helper outside the test may consume the old name.
+- every statFile in a file that names `IsDir` anywhere: 0.17's statFile reports a directory as
+  `kind = .directory`, where 0.15's refused one with `IsDir` (council H2).
