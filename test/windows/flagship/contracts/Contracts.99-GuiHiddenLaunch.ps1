@@ -1275,27 +1275,56 @@ try {
     # signalled, as the reader opens queued joiners there; a handle that signals ends the wait at the next slice. A live,
     # suspended process: the wait runs its whole bound with `between` called inside it; then `between` ends the process
     # on its second call, and the wait returns signalled without a third.
+    # Council CodeRabbit thread on #768 (T1's pattern): each control needs two calls before the wait's deadline, so a
+    # host pause of ExitWaitMs or more after the first call fails it on a sound tree. Up to 3 attempts; an attempt whose
+    # timing precondition failed is a stall and is skipped; a counted attempt with the wrong result fails, and so does
+    # having no counted attempt. The stall shape is narrow, so no mutant can look like one: the wait ended unsignalled at
+    # its deadline after exactly one call, with a measured pause of at least ExitWaitMs between that call's start and the
+    # wait's return (a pause inside or after the call). A wait that never calls its pump makes no call, so it fails on its first attempt.
+    $guiPumpRun = {
+        param([IntPtr] $Process, [scriptblock] $OnCall)
+        $calls = [Collections.Generic.List[long]]::new()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $pump = { $calls.Add($clock.ElapsedMilliseconds); & $OnCall $calls.Count }.GetNewClosure()
+        $signalled = [GuiHiddenRunnerNative]::WaitExit($Process, [Action] $pump)
+        $end = $clock.ElapsedMilliseconds
+        [pscustomobject]@{ Signalled = $signalled; Calls = $calls.Count; Elapsed = $end
+            Stalled = (-not $signalled -and $calls.Count -eq 1 -and ($end - $calls[0]) -ge [GuiHiddenRunnerNative]::ExitWaitMs) }
+    }
     $pumped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
     $guiJoinerOpen.Add($pumped)
-    $guiPumps = [int[]]@(0)
-    $waited = [Diagnostics.Stopwatch]::StartNew()
-    if ([GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] { $guiPumps[0]++ })) { throw 'WaitExit counted a live process as signalled.' }
-    if ($guiPumps[0] -lt 2 -or $waited.ElapsedMilliseconds -lt ([GuiHiddenRunnerNative]::ExitWaitMs - 10)) {
-        throw "WaitExit did not run its pump inside its whole wait ($($guiPumps[0]) calls, $($waited.ElapsedMilliseconds) ms)."
+    $guiPumpCounted = 0
+    for ($guiPumpAttempt = 1; $guiPumpAttempt -le 3 -and $guiPumpCounted -eq 0; $guiPumpAttempt++) {
+        $run = & $guiPumpRun $pumped.process { param($Call) }
+        if ($run.Stalled) { Write-Host "Contracts.99-GuiHiddenLaunch pump control: attempt $guiPumpAttempt stalled; not counted"; continue }
+        $guiPumpCounted++
+        if ($run.Signalled) { throw 'WaitExit counted a live process as signalled.' }
+        if ($run.Calls -lt 2 -or $run.Elapsed -lt ([GuiHiddenRunnerNative]::ExitWaitMs - 10)) {
+            throw "WaitExit did not run its pump inside its whole wait ($($run.Calls) calls, $($run.Elapsed) ms; attempt $guiPumpAttempt, the first counted)."
+        }
     }
-    $guiPumps[0] = 0
-    $guiPumpedProcess = $pumped.process
+    if ($guiPumpCounted -eq 0) { throw 'The pump control had 3 stalls, no attempt counted.' }
     # TerminateProcess returns before the process signals, so the second call waits on its own handle until it has
     # (council P3 on #768): a child slower than one slice to signal would otherwise rightly earn a third call.
-    if (-not [GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] {
-                $guiPumps[0]++
-                if ($guiPumps[0] -eq 2) {
-                    [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7)
-                    if ([GuiHiddenContractJoiner]::WaitForSingleObject($guiPumpedProcess, 5000) -ne 0) { throw 'The pumped process did not signal after its end.' }
-                }
-            }) -or $guiPumps[0] -ne 2) {
-        throw "WaitExit did not end at the slice after its pump ended the process ($($guiPumps[0]) calls)."
+    $guiPumpCounted = 0
+    for ($guiPumpAttempt = 1; $guiPumpAttempt -le 3 -and $guiPumpCounted -eq 0; $guiPumpAttempt++) {
+        $ending = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+        $guiJoinerOpen.Add($ending)
+        $guiPumpedProcess = $ending.process
+        $run = & $guiPumpRun $ending.process {
+            param($Call)
+            if ($Call -eq 2) {
+                [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7)
+                if ([GuiHiddenContractJoiner]::WaitForSingleObject($guiPumpedProcess, 5000) -ne 0) { throw 'The pumped process did not signal after its end.' }
+            }
+        }.GetNewClosure()
+        if ($run.Stalled) { Write-Host "Contracts.99-GuiHiddenLaunch pump-end control: attempt $guiPumpAttempt stalled; not counted"; continue }
+        $guiPumpCounted++
+        if (-not $run.Signalled -or $run.Calls -ne 2) {
+            throw "WaitExit did not end at the slice after its pump ended the process ($($run.Calls) calls; attempt $guiPumpAttempt, the first counted)."
+        }
     }
+    if ($guiPumpCounted -eq 0) { throw 'The pump-end control had 3 stalls, no attempt counted.' }
     # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When the PID opens (reused,
     # or the exited process kept alive by another process's open handle) or a process refuses the open, the control is
     # skipped and says so.
