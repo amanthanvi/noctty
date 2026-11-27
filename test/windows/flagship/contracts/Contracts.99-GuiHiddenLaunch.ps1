@@ -1225,7 +1225,15 @@ try {
     }
     $guiPumps[0] = 0
     $guiPumpedProcess = $pumped.process
-    if (-not [GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] { $guiPumps[0]++; if ($guiPumps[0] -eq 2) { [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7) } }) -or $guiPumps[0] -ne 2) {
+    # TerminateProcess returns before the process signals, so the second call waits on its own handle until it has
+    # (council P3 on #768): a child slower than one slice to signal would otherwise rightly earn a third call.
+    if (-not [GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] {
+                $guiPumps[0]++
+                if ($guiPumps[0] -eq 2) {
+                    [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7)
+                    if ([GuiHiddenContractJoiner]::WaitForSingleObject($guiPumpedProcess, 5000) -ne 0) { throw 'The pumped process did not signal after its end.' }
+                }
+            }) -or $guiPumps[0] -ne 2) {
         throw "WaitExit did not end at the slice after its pump ended the process ($($guiPumps[0]) calls)."
     }
     # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When the PID opens (reused,
