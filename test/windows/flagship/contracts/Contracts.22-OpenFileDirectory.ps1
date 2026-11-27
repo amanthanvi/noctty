@@ -10,7 +10,9 @@
 # anyway. The fork's own `win32_sys.openFile` opens files only by default and is not this API. Only the options
 # argument, the call's last, is read (council W3), and it must be one plain struct literal whose top level sets
 # `.allow_directory = false` or a write `.mode`, exactly (council Y2): a computed, conditional or unparsed form
-# fails, and a real site in one is reviewed below. A new open, or one that loses the option, fails here.
+# fails, and a real site in one is reviewed below. Any other mention of either name outside test code and `sys.`
+# (a quoted identifier, the name as a string, a reference without a call) fails too (council Y5). A new open, or
+# one that loses the option, fails here.
 
 # Blanks comments, multi-line-string lines and string and character literals, keeping the length. With
 # -KeepStrings the string and character literals stay as written (a pinned check's text holds its strings).
@@ -40,11 +42,28 @@ function Get-OpenFileTestSpans([string] $Code) {
 function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
     if (-not $ZigText.Contains('openFile')) { return }
     $code = Remove-OpenFileNonCode $ZigText
-    $calls = [regex]::Matches($code, '\.\s*(openFile|openFileAbsolute)\s*\(')
-    if ($calls.Count -eq 0) { return }
     $spans = @(Get-OpenFileTestSpans $code)
     $functions = [regex]::Matches($code, '\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
     $withStrings = $null
+    # Council Y5: any other mention of either name outside test code and `sys.` (a quoted identifier, the name
+    # as a string, or a reference without a call) is an open the guard cannot read, and fails.
+    $mentions = @(
+        foreach ($m in [regex]::Matches($code, '\b(openFile|openFileAbsolute)\b(?!\s*\()')) { $m.Index }
+        $withStrings = Remove-OpenFileNonCode $ZigText -KeepStrings
+        foreach ($m in [regex]::Matches($withStrings, '"(?:openFile|openFileAbsolute)"')) { $m.Index }
+    )
+    foreach ($at in $mentions) {
+        $lead = $code.Substring([Math]::Max(0, $at - 16), [Math]::Min(16, $at))
+        if ($lead -match '\b(?:win32_)?sys\s*\.\s*@?$') { continue }
+        $inTest = $false
+        foreach ($span in $spans) { if ($at -gt $span[0] -and $at -lt $span[1]) { $inTest = $true; break } }
+        if ($inTest) { continue }
+        $name = '(top level)'
+        foreach ($function in $functions) { if ($function.Index -lt $at) { $name = $function.Groups[1].Value } else { break } }
+        "${Path}:${name} (a mention that is no direct call)"
+    }
+    $calls = [regex]::Matches($code, '\.\s*(openFile|openFileAbsolute)\s*\(')
+    if ($calls.Count -eq 0) { return }
     foreach ($call in $calls) {
         $lead = $code.Substring([Math]::Max(0, $call.Index - 16), [Math]::Min(16, $call.Index))
         if ($lead -match '\b(?:win32_)?sys\s*$') { continue }
@@ -269,6 +288,13 @@ foreach ($sample in @(
         @{ Text = "fn u() !void {`n    const f = try dir.openFile(io, `"x`", .{ .allow_directory = false, extra });`n}`n"; Hits = 1 }
         @{ Text = "fn v() !void {`n    const f = try dir.openFile(io, `"x`", options);`n}`n"; Hits = 1 }
         @{ Text = "fn p() !void {`n    const f = try dir.openFile(io, `"x`", .{ .mode = .read_only, .allow_directory = false });`n}`n"; Hits = 0 }
+        # Council Y5: a quoted identifier, the name as a string and a reference without a call each fail; the
+        # fork's sys reference and a test block's do not.
+        @{ Text = "fn q() !void {`n    const f = try dir.@`"openFile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn r() !void {`n    const f = try @field(std.Io.Dir, `"openFile`")(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "const open = std.Io.Dir.openFileAbsolute;`n"; Hits = 1 }
+        @{ Text = "const open = win32_sys.openFile;`n"; Hits = 0 }
+        @{ Text = "test `"t`" {`n    const open = std.Io.Dir.openFile;`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
