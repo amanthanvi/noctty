@@ -78,7 +78,7 @@ See also:
     - the call sites' patterns;
     - truth tables for `Pinned` and `GoneBeforeStop`;
     - `ExitedBy` on a real exited process: a non-termination failure, another creation time, an exit after the sample plus the wait, and an exit at the stop each refuse;
-    - `ExitedBeforeStop` on a live process the stopper kills during the wait, its stop noted first: refused, and then the same `ExitedBy` with no stop bound must hold, so the kill landed inside the window and a stop time read before the wait would have excused it; an attempt whose kill missed is retried, three in all (council no-seat N2);
+    - `ExitedBeforeStop` on a live, suspended process whose wait's `between`, on its first call (after a slice in which the process did not signal), notes the stop and then ends it: refused, and then the same `ExitedBy` with no stop bound must hold, so a stop time read on entry would have excused it (council no-seat N2, synchronized through `between` by council P2 on #768; a 30 ms stopper thread could miss the window and let an early read pass);
     - class 27 on that exited process: `NtImagePathOf` reads it, and `SameImage` takes its path as System32's cmd.exe and not as another file; the image read's fallback call site;
     - a stray noctty.exe, and a forwarded one outside the copy, whose images class 27 read after they exited, failing the verdict;
     - a launched noctty.com exited with its command line unread that still accounts for the noctty.exe it forwarded, and the same forward refused when the child's arguments were not read, when the child is older than the CLI, or when the leaf started the CLI itself;

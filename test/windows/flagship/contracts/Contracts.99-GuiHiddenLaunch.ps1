@@ -1017,12 +1017,6 @@ public static class GuiHiddenContractJoiner {
     // Creation and exit time of `process`, or null.
     public static long[] Times(IntPtr process) { long c, e, k, u; return GetProcessTimes(process, out c, out e, out k, out u) ? new long[] { c, e } : null; }
     public static long Now() { long t; GetSystemTimePreciseAsFileTime(out t); return t; }
-    // The runner's end of the job during ExitedBy's wait: after `delayMs`, note the stop time in `cell[0]` and then
-    // terminate `process`, the order StopRunJob keeps (NoteStop, then TerminateJobObject).
-    public static Thread StopAndTerminateAfter(IntPtr process, int delayMs, long[] cell) {
-        var thread = new Thread(() => { Thread.Sleep(delayMs); Interlocked.Exchange(ref cell[0], Now()); TerminateProcess(process, 1); });
-        thread.IsBackground = true; thread.Start(); return thread;
-    }
     public static long ReadStop(long[] cell) { return Interlocked.Read(ref cell[0]); }
     // The error of opening `pid` for SYNCHRONIZE alone, 0 when it opens: ERROR_INVALID_PARAMETER (87) when no process
     // holds the PID, anything else when one does.
@@ -1194,28 +1188,29 @@ try {
     if (-not [GuiHiddenRunnerNative]::ExitedBeforeStop($exited.process, $times[0], [GuiHiddenContractJoiner]::Now(), $true, [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) })) {
         throw 'ExitedBeforeStop refused an exited process with no stop.'
     }
-    # Council no-seat N2 (Opus F3, Sol's 2): the refusal proves the late stop read only when the kill landed inside the
-    # wait's window, so after the call the same ExitedBy with no stop bound must hold: the handle signalled during the
-    # wait, with an exit time inside it. Then a stop time read before the wait (long.MaxValue, the stopper not yet run)
-    # would have excused the process, and the refusal shows it was read after. An attempt whose kill missed the window
-    # (a slow stopper thread) proves nothing and is retried, three in all; none passes vacuously.
-    $guiStopDelayMs = 30
-    $guiStopLanded = $false
-    for ($guiStopAttempt = 1; $guiStopAttempt -le 3 -and -not $guiStopLanded; $guiStopAttempt++) {
-        $guiStopCell[0] = $guiMax
-        $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
-        $guiJoinerOpen.Add($stopped)
-        $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
-        $stoppedFailedAt = [GuiHiddenContractJoiner]::Now()
-        $stopper = [GuiHiddenContractJoiner]::StopAndTerminateAfter($stopped.process, $guiStopDelayMs, $guiStopCell)
-        $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, $stoppedFailedAt, $true, [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) })
-        if (-not $stopper.Join(5000)) { throw 'The stop control''s thread did not finish.' }
-        if ([GuiHiddenContractJoiner]::ReadStop($guiStopCell) -eq $guiMax) { throw 'The stop control never noted its stop.' }
-        if ($stoppedExited) { throw 'ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop.' }
-        $guiStopLanded = [GuiHiddenRunnerNative]::ExitedBy($stopped.process, $stoppedCreation, $stoppedFailedAt, $true, $guiMax)
-        if (-not $guiStopLanded) { Write-Host "Contracts.99-GuiHiddenLaunch stop control: attempt $guiStopAttempt's kill missed ExitedBy's window" }
+    # Council P2 on #768 (Sol's 2 and Opus L1): the runner's end of the job lands inside the wait, synchronized through
+    # the wait's own `between`, which runs only after a slice in which the live, suspended child did not signal: on its
+    # first call it notes the stop and then ends the child, the order StopRunJob keeps (NoteStop, then
+    # TerminateJobObject). So the stop is always noted after ExitedBeforeStop began and before the child exits; a stop
+    # time read on entry (long.MaxValue then) would excuse the child, and only one read after the wait refuses it. After
+    # the call, the same ExitedBy with no stop bound must hold: the child exited inside the wait's window.
+    $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+    $guiJoinerOpen.Add($stopped)
+    $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
+    $stoppedFailedAt = [GuiHiddenContractJoiner]::Now()
+    $guiStoppedProcess = $stopped.process
+    $guiStopCalls = [int[]]@(0)
+    $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, $stoppedFailedAt, $true,
+        [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) },
+        [Action] {
+            $guiStopCalls[0]++
+            if ($guiStopCalls[0] -eq 1) { $guiStopCell[0] = [GuiHiddenContractJoiner]::Now(); [void][GuiHiddenContractJoiner]::TerminateProcess($guiStoppedProcess, 1) }
+        })
+    if ($guiStopCalls[0] -lt 1 -or $guiStopCell[0] -eq $guiMax) { throw 'The stop control''s pump never noted its stop inside the wait.' }
+    if ($stoppedExited) { throw 'ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop.' }
+    if (-not [GuiHiddenRunnerNative]::ExitedBy($stopped.process, $stoppedCreation, $stoppedFailedAt, $true, $guiMax)) {
+        throw 'The stop control''s child did not exit inside ExitedBy''s window, so its refusal proves nothing.'
     }
-    if (-not $guiStopLanded) { throw 'The stop control''s kill never landed inside ExitedBy''s window in three attempts, so its refusal proves nothing.' }
     # Council no-seat N1: with a `between`, the wait (WaitExit) calls it between slices while the handle has not
     # signalled, as the reader opens queued joiners there; a handle that signals ends the wait at the next slice. A live,
     # suspended process: the wait runs its whole bound with `between` called inside it; then `between` ends the process
