@@ -6,7 +6,8 @@
 # residue list's "checked, left" rows and the lead's QF3 ruling give them (keep upstream's line where a kind check
 # follows the open; such a site names its check, and holds only while the check follows the open in the same
 # block: council W2). A write-mode open refuses a directory anyway. The fork's own `win32_sys.openFile` opens files
-# only by default and is not this API. A new open, or one that loses the option, fails here.
+# only by default and is not this API. Only the options argument, the call's last, is read (council W3). A new
+# open, or one that loses the option, fails here.
 
 # Blanks comments, multi-line-string lines and string and character literals, keeping the length.
 function Remove-OpenFileNonCode([string] $Text) {
@@ -49,8 +50,11 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
             if ($paren.Value -eq '(') { $depth++ } else { $depth--; if ($depth -eq 0) { $callArgs = $code.Substring($open, $paren.Index - $open); $callEnd = $paren.Index; break } }
         }
         if ($null -eq $callArgs) { continue }
-        if ($callArgs -match '\ballow_directory\s*=\s*false\b') { continue }
-        if ($callArgs -match '\.mode\s*=\s*\.(?:write_only|read_write)\b') { continue }
+        # Only the last top-level argument, the options, counts: a struct inside the path argument says
+        # nothing about the open (council W3).
+        $options = Get-OpenFileLastArgument $callArgs
+        if ($options -match '\ballow_directory\s*=\s*false\b') { continue }
+        if ($options -match '\.mode\s*=\s*\.(?:write_only|read_write)\b') { continue }
         $name = '(top level)'
         foreach ($function in $functions) { if ($function.Index -lt $call.Index) { $name = $function.Groups[1].Value } else { break } }
         # A site reviewed for the kind check that follows its open holds only while that check is still there,
@@ -62,6 +66,25 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
         }
         $site
     }
+}
+
+# The last top-level argument of `$CallArgs` (a call's arguments, strings blanked), a trailing comma skipped.
+function Get-OpenFileLastArgument([string] $CallArgs) {
+    $depth = 0
+    $starts = [System.Collections.Generic.List[int]]::new()
+    $starts.Add(0)
+    foreach ($d in [regex]::new('[()\[\]{},]').Matches($CallArgs)) {
+        $c = $d.Value
+        if ($c -eq ',') { if ($depth -eq 0) { $starts.Add($d.Index + 1) } }
+        elseif ($c -eq '(' -or $c -eq '[' -or $c -eq '{') { $depth++ }
+        else { $depth-- }
+    }
+    for ($i = $starts.Count - 1; $i -ge 0; $i--) {
+        $end = if ($i + 1 -lt $starts.Count) { $starts[$i + 1] - 1 } else { $CallArgs.Length }
+        $piece = $CallArgs.Substring($starts[$i], $end - $starts[$i])
+        if ($piece.Trim().Length -gt 0) { return $piece }
+    }
+    return ''
 }
 
 # Whether `$Check` (its spaces read as any whitespace) appears in `$Code` after offset `$After` and before the
@@ -177,6 +200,10 @@ foreach ($sample in @(
         @{ Text = "fn w() !void {`n    const f = try dir.openFile(io, `"x`", .{ .mode = .write_only });`n}`n"; Hits = 0 }
         @{ Text = "fn s() !void {`n    const h = try win32_sys.openFile(name, .{});`n}`n"; Hits = 0 }
         @{ Text = "fn r() !void {`n    // dir.openFile(io, `"x`", .{})`n    const f = try dir.openFile(io, `"x`", .{ .mode = .read_only });`n}`n"; Hits = 1 }
+        # Council W3: a misleading field inside the path argument; the options still decide, trailing comma or not.
+        @{ Text = "fn m() !void {`n    const f = try dir.openFile(io, pick(.{ .mode = .read_write }), .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn a() !void {`n    const f = try dir.openFile(io, pick(.{ .allow_directory = false }), .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn t() !void {`n    const f = try dir.openFile(`n        io,`n        pick(.{ .x = 1 }),`n        .{ .allow_directory = false },`n    );`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
