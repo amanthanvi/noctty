@@ -570,7 +570,8 @@ that govern each symbol you change, or that none does.
   `origin.Derivation` at `.automatic`,
   `useRecovery`, the queries `defaultProfile`, `nocttyCommand`,
   `commandLineNamesProfile`, `filesDefine` and `defaultProfileForKey`, and
-  `keepSources`), profile
+  `keepSources`; the process environment it reads: `src/global.zig`
+  `environ`, `environMap` and `syncEnviron`, `os/env.zig` `setenv`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`, profile key equality

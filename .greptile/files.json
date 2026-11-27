@@ -237,6 +237,7 @@
       "path": "docs/agents/log/launch-and-paths.md",
       "description": "Self-Correction Log: default shell, process launch, WSL, terminfo, path safety and links.",
       "scope": [
+        "src/global.zig",
         "src/config/windows_shell.zig",
         "src/termio/Exec.zig",
         "src/termio/wsl_env.zig",
