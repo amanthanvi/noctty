@@ -1756,7 +1756,11 @@ ones, and any of those fails the leaf. A launcher-recorded process gone at its
 open counts in `unopenedExited` and in `launcherNotSeen`, which fails the leaf:
 with no creation time it cannot match the launcher's record. An exited joiner
 vouches for no child, not even a noctty whose image was read (its own launcher
-record still counts),
+record still counts), with one exception: an accounted `noctty.com` whose
+command line went unread because it had exited still accounts for the exact
+child `noctty.exe` it forwarded, when that child's own arguments were read and
+kept the argument rule, since `noctty.com` forwards its command line verbatim
+(council no-seat N7);
 and a `cmd.exe` whose command line was not read fails whether or not it had
 exited. Such a joiner is no evidence either way: what was not read was not
 checked (its image, or a noctty's argument rule). Any other failure, or an exit

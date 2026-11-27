@@ -892,7 +892,9 @@ function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPi
 # failed (NtImagePathOf) is read, exited or not, so every rule but its command line's applies to it: a stray noctty
 # that exits fast fails the copy or accounting rule (council no-seat N6). An exited one vouches for no child (`parentOf`), not
 # even a noctty whose image was read and whose command line was not, though a launcher record still accounts for that
-# noctty itself (CodeRabbit and Sourcery on #752). A cmd whose command line was not read still fails the leaf whether
+# noctty itself (CodeRabbit and Sourcery on #752). The one exception: an accounted noctty.com so exited still vouches
+# for the exact child noctty.exe it forwarded when that child's own arguments were read and kept the argument rule,
+# since noctty.com forwards its command line verbatim (`exitedForwarder`, council no-seat N7). A cmd whose command line was not read still fails the leaf whether
 # or not it had exited, since its /D is what the shell rule proves.
 function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalProcesses, [int] $ExpectedShells, [string] $Token, [int] $LeafPid) {
     # A joiner counts as read only with its image too: one whose image could not be read (opened and pinned, but
@@ -911,12 +913,25 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         if ($null -eq $parent -or $parent.ExitedBeforeRead -eq $true -or $parent.Pid -eq $Row.Pid -or $parent.Creation -gt $Row.Creation) { return $null }
         return $parent
     }
+    # Council no-seat N7: a noctty.com not running a CLI action returns right after CreateProcessW, so it may exit before
+    # its command line is read, and `parentOf` drops it. It forwards its command line verbatim, so such a CLI, read
+    # (its image) and exited with its command line unread, is the exact parent the forward rule may still take for a
+    # noctty.exe whose own arguments were read and kept the argument rule.
+    $exitedForwarder = {
+        param($Row)
+        $cli = $byPid[$Row.Parent]
+        if ($null -eq $cli -or $cli.Pid -eq $Row.Pid -or $cli.Creation -gt $Row.Creation -or $cli.Image -ine 'noctty.com' -or
+            $cli.ExitedBeforeRead -ne $true -or ($null -ne $cli.Argv -and $cli.Argv.Count -ge 1)) { return $null }
+        return $cli
+    }
     $accounted = @{}
     $argumentRefused = 0; $argvUnread = 0; $argvExited = 0; $outsideCopy = 0
     foreach ($row in @($nocttyRows | Sort-Object Creation)) {
         if (-not $row.InCopy) { $outsideCopy++ }
+        $argvKept = $false
         if ($null -eq $row.Argv -or $row.Argv.Count -lt 1) { if ($row.ExitedBeforeRead -eq $true) { $argvExited++ } else { $argvUnread++ } }
         elseif (Get-InteractiveWin11HostedArgumentRefusal -Arguments @($row.Argv | Select-Object -Skip 1) -Token $Token) { $argumentRefused++ }
+        else { $argvKept = $true }
         $recorded = $Launcher.ContainsKey($row.Pid) -and $Launcher[$row.Pid] -eq $row.Creation
         $parent = & $parentOf $row
         $viaShell = $false; $forwarded = $false
@@ -927,6 +942,10 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         }
         if ($null -ne $parent -and $row.Image -ieq 'noctty.exe') {
             $forwarded = $parent.Image -ieq 'noctty.com' -and $accounted.ContainsKey($parent.Pid)
+        }
+        elseif ($row.Image -ieq 'noctty.exe' -and $argvKept) {
+            $cli = & $exitedForwarder $row
+            $forwarded = $null -ne $cli -and $accounted.ContainsKey($cli.Pid)
         }
         if ($row.InCopy -and ($recorded -or $viaShell -or $forwarded)) { $accounted[$row.Pid] = $true }
     }
