@@ -158,7 +158,10 @@ mixed hunks, P1 and Q1, each failed open on twin scopes). Two limits follow:
   whose own line is untouched bind somewhere else (a removed `else` boundary,
   merged blocks), no touched definition rechecks them. This limit of the
   definition-span rule is older than #753; with the comment-only hunk a no-op,
-  a comment on the alias in a hunk of its own is this case too. 1B's compile
+  a comment on the alias in a hunk of its own is this case too. In a file with
+  a real change, a comment still takes part in git's line alignment, so
+  whether such a case is caught can depend on a comment (whether git puts the
+  alias's line in a hunk), as it could before #768. 1B's compile
   catches it at a forward merge, since the removed names do not exist in
   0.17.1. Comparing the resolved targets of unchanged calls across base and
   head is the way to close it, and to remove the over-report above, later.
