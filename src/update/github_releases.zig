@@ -1093,25 +1093,27 @@ pub fn applyLogPathAlloc(alloc: Allocator, artifact_path: []const u8) ![]u8 {
 /// Whether a process is running from the file at `path`. Windows refuses
 /// write access to an image that is mapped, so a Setup that is still running
 /// shows up as a sharing violation on its own file, with no process id or
-/// clock to record at launch (and none to go stale). Zig reports that
-/// violation as `AccessDenied` or `SharingViolation`, depending on the path;
-/// a real permission failure on a file in the user's own profile reads the
-/// same way, and only delays the report to a later start.
+/// clock to record at launch (and none to go stale). A real permission
+/// failure on a file in the user's own profile reads the same way, and only
+/// delays the report to a later start.
 ///
-/// The open is `win32_sys.openFile`, std 0.15's `OpenFile` with its status
-/// mapping, which reads a sharing violation as `AccessDenied` at once. Zig
-/// 0.17's `openFile` retries a sharing violation for about four seconds and
-/// then reports `FileBusy`, which would stall a start while Setup runs and
-/// then read as no Setup at all.
+/// The open is one attempt, `win32_sys.openFileOnce`, on the UI thread at
+/// start: a sharing violation is `FileBusy` at once. Zig 0.17's `openFile`
+/// retries one for about four seconds and then reports `FileBusy`, which
+/// would stall a start while Setup runs. A file left pending delete is busy
+/// too, and reads as in use, so the request waits for a later start, which
+/// finds it gone; 0.15's `OpenFile` waited on it for as long as another
+/// handle kept it, and std 0.17's open for about four seconds. A denying ACL
+/// (`AccessDenied`) reads as in use on purpose, as above (re-check item 34).
 fn installerImageInUse(path: []const u8) bool {
     const path_w = win32_prefixed_path.sliceToPrefixedFileW(path) catch |err| {
         return err == error.AccessDenied;
     };
-    const handle = win32_sys.openFile(path_w.span(), .{
+    const handle = win32_sys.openFileOnce(path_w.span(), .{
         .access_mask = win32_types.SYNCHRONIZE | win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         .creation = win32_types.FILE_OPEN,
     }) catch |err| {
-        return err == error.AccessDenied;
+        return err == error.AccessDenied or err == error.FileBusy;
     };
     std.os.windows.CloseHandle(handle);
     return false;
@@ -4400,6 +4402,33 @@ test "a start while Setup is still running leaves the request for a later start"
     const message = (try takeFailedInstallerApply(alloc, state_path, old_build)).?;
     defer alloc.free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "did not finish installing") != null);
+}
+
+test "held file: the installer probe answers at once for a held or pending-delete installer (re-check item 34)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+    const installer_path = try std.fs.path.join(alloc, &.{ root, "setup.exe" });
+    defer alloc.free(installer_path);
+
+    // A holder that refuses writes, as a running image does, and a file left
+    // pending delete both read as in use at once, so a start neither waits
+    // nor reports a Setup that may still run; a later start decides.
+    for ([_]win32_sys.HeldFile.Kind{ .deny_write, .delete_pending }) |kind| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "setup.exe", .data = "setup" });
+        const held = try win32_sys.HeldFile.hold(installer_path, kind);
+        defer held.release();
+        const start = win32_sys.HeldFile.now();
+        try std.testing.expect(installerImageInUse(installer_path));
+        const ms = win32_sys.HeldFile.msSince(start);
+        std.debug.print("held file: installer probe against {t}: in use after {d} ms\n", .{ kind, ms });
+        try std.testing.expect(ms < win32_sys.HeldFile.once_bound_ms);
+    }
+    // The pending delete finished with its last handle: nothing is there.
+    try std.testing.expect(!installerImageInUse(installer_path));
 }
 
 test "a staged installer reads as running only while a process runs from it" {
