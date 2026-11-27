@@ -57,8 +57,8 @@ pub const Inspector = struct {
 
         // Draw everything that requires the terminal state mutex.
         {
-            surface.renderer_state.mutex.lockUncancelable(global.io());
-            defer surface.renderer_state.mutex.unlock(global.io());
+            surface.renderer_state.mutex.lockUncancelable();
+            defer surface.renderer_state.mutex.unlock();
             const t = surface.renderer_state.terminal;
 
             // Terminal info window

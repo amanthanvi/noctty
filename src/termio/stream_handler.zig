@@ -178,7 +178,7 @@ pub const StreamHandler = struct {
             // we may have to do this.
             if (self.surface_mailbox.push(msg, .{ .instant = {} }) > 0) return;
             self.renderer_state.mutex.unlock();
-            defer self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.lockUncancelable();
             if (self.surface_mailbox.push(msg, .{ .forever_unless = self.stopping }) > 0) return;
         }
         var dropped = msg;
@@ -211,7 +211,7 @@ pub const StreamHandler = struct {
         // wake up the renderer to allow it to process the message,
         // and then try again.
         self.renderer_state.mutex.unlock();
-        defer self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.lockUncancelable();
         self.renderer_state.noteRenderWakeupNotify();
         self.renderer_state.noteWakeSource(.mailbox);
         renderer.Thread.sendMessage(
@@ -2603,7 +2603,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
             // thread's TestStream fixture (PLAN.md §2.7 RQ9, §19.5).
             const role = thread_role.enter(.reader);
             defer role.exit();
-            self.renderer_mutex.lock();
+            self.renderer_mutex.lockUncancelable();
             defer self.renderer_mutex.unlock();
             self.stream.nextSlice(self.input);
             self.done.set(std.testing.io);
@@ -2689,7 +2689,7 @@ test "a reader's answerback into a full termio mailbox lets the IO thread take t
     var io: Io = .{ .mailbox = &h.termio_mailbox, .state = &h.renderer_state };
 
     // The IO thread's hook waits for the mutex until send drops it.
-    h.renderer_mutex.lock();
+    h.renderer_mutex.lockUncancelable();
     const thread = std.Thread.spawn(.{}, Io.drainAsIoThread, .{&io}) catch |err| {
         h.renderer_mutex.unlock();
         return err;
@@ -3462,7 +3462,7 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     // `mutex`: the lock inventory would take the queues' `.mutex` locks in
     // this file for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
     var renderer_mutex: renderer.StateMutex = .{};
-    renderer_mutex.lock();
+    renderer_mutex.lockUncancelable();
     defer renderer_mutex.unlock();
 
     var renderer_state: renderer.State = .{

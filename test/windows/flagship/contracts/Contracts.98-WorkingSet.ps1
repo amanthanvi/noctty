@@ -6,6 +6,10 @@
 # required stages, the record verdict and the workload hash), its build admission (a repository with only a plain
 # zig-out build is refused), the shared state guard's paths, and its native layer's struct layout (compiled and
 # checked against the SDK's x64 sizes). No noctty is started.
+# What a sample's private bytes (PrivateUsage, the commit charge) hold on Zig 0.17.1: each live worker of the global
+# `Io`'s pool (`global.io_pool` in src/global.zig) commits its whole 16 MiB stack, and the pool runs at most four, so
+# up to 64 MiB of a sample can be idle worker stacks (measured in src/sync/io_tasks.zig; the 2026-11-26
+# STATE-MUTEX-017-01 entry in docs/agents/log/renderer.md, trap (4)). A surface thread commits 1 MiB of its 16 MiB.
 $workingSetScript = Join-Path $repoRoot 'test\windows\hidden-win11-working-set.ps1'
 # Ordinal string equality for every comparison of config, argv, path, receipt and hash text here (Sol and Opus,
 # round 5): -ceq and -cne are culture-aware and skip a soft hyphen.

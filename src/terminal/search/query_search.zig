@@ -41,8 +41,8 @@ pub const QuerySearch = struct {
         /// Must be held while the terminal is read or written. `step` and
         /// `deinit` take it themselves, so their caller must not hold it:
         /// with the thread-role layer on the build panics (PN1), and a build
-        /// without it hangs (Zig 0.17's `std.Io.Mutex` has no owner, so there
-        /// is no "Deadlock detected" in Debug either).
+        /// without it hangs (Zig 0.17's `std.Io.Mutex` has no owner, so it has
+        /// no re-entry check in any mode and no "Deadlock detected" in Debug).
         mutex: *StateMutex,
     };
 
@@ -146,7 +146,7 @@ pub const QuerySearch = struct {
             switch (cur.search.tick()) {
                 .complete, .progress => {},
                 .blocked => {
-                    self.term.mutex.lock();
+                    self.term.mutex.lockUncancelable();
                     defer self.term.mutex.unlock();
                     self.feedLocked(cur);
                 },
@@ -304,7 +304,7 @@ pub const QuerySearch = struct {
                 cur.search.viewport.reset();
                 cur.search.stale_viewport_matches = true;
 
-                self.term.mutex.lock();
+                self.term.mutex.lockUncancelable();
                 defer self.term.mutex.unlock();
                 self.feedLocked(cur);
                 return .replay;
@@ -334,7 +334,7 @@ pub const QuerySearch = struct {
         // No needle means stop the search, and an invalid one starts none.
         self.current = next;
         if (self.current) |*cur| {
-            self.term.mutex.lock();
+            self.term.mutex.lockUncancelable();
             defer self.term.mutex.unlock();
             self.feedLocked(cur);
         }
@@ -373,14 +373,14 @@ pub const QuerySearch = struct {
 
     fn refresh(self: *QuerySearch) void {
         const cur = if (self.current) |*cur| cur else return;
-        self.term.mutex.lock();
+        self.term.mutex.lockUncancelable();
         defer self.term.mutex.unlock();
         self.feedLocked(cur);
     }
 
     fn select(self: *QuerySearch, to: ScreenSearch.Select) void {
         const cur = if (self.current) |*cur| cur else return;
-        self.term.mutex.lock();
+        self.term.mutex.lockUncancelable();
         defer self.term.mutex.unlock();
 
         // A screen can be removed or replaced between refresh ticks (and the
@@ -409,7 +409,7 @@ pub const QuerySearch = struct {
     fn stop(self: *QuerySearch) void {
         const cur = if (self.current) |*cur| cur else return;
         {
-            self.term.mutex.lock();
+            self.term.mutex.lockUncancelable();
             defer self.term.mutex.unlock();
             cur.search.deinit(self.term.terminal);
         }

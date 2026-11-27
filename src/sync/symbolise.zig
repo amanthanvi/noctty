@@ -236,6 +236,28 @@ const Api = struct {
     SymGetModuleInfoW64: *const fn (process: windows.HANDLE, address: u64, info: *ImagehlpModuleW64) callconv(.winapi) win32_types.BOOL,
     SymFromAddrW: *const fn (process: windows.HANDLE, address: u64, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) win32_types.BOOL,
     SymGetLineFromAddrW64: *const fn (process: windows.HANDLE, address: u64, displacement: *u32, line: *ImagehlpLineW64) callconv(.winapi) win32_types.BOOL,
+    // The inline frames at an address (DbgHelp 6.2 and later, in every
+    // supported Windows's System32): how many, where their contexts start,
+    // and each frame's function and line (`Session.locateSite`).
+    SymAddrIncludeInlineTrace: *const fn (process: windows.HANDLE, address: u64) callconv(.winapi) u32,
+    SymQueryInlineTrace: *const fn (
+        process: windows.HANDLE,
+        start_address: u64,
+        start_context: u32,
+        start_return_address: u64,
+        current_address: u64,
+        current_context: *u32,
+        current_frame_index: *u32,
+    ) callconv(.winapi) win32_types.BOOL,
+    SymFromInlineContextW: *const fn (process: windows.HANDLE, address: u64, inline_context: u32, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) win32_types.BOOL,
+    SymGetLineFromInlineContextW: *const fn (
+        process: windows.HANDLE,
+        address: u64,
+        inline_context: u32,
+        module_base: u64,
+        displacement: *u32,
+        line: *ImagehlpLineW64,
+    ) callconv(.winapi) win32_types.BOOL,
 };
 
 const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x2;
@@ -274,6 +296,36 @@ fn loadApi() error{NoDbgHelp}!*const Api {
     api = fns;
     return &api.?;
 }
+
+/// The inline frames `Session.locateSite` passes over on its way to the
+/// acquiring function: the wrapper's own methods, by their file, and the
+/// renderer's demand forwarder, by its name (`State.lockDemand`, the one
+/// permanent inline site, RQ11; 0.17.1 names its frame plainly).
+pub const Skip = struct {
+    /// The file of a skipped frame, matched at the end of the path the PDB
+    /// holds, either separator, any case.
+    file: ?[]const u8 = null,
+    names: []const []const u8 = &.{},
+
+    fn takes(self: Skip, frame: Location) bool {
+        for (self.names) |n| {
+            if (std.mem.eql(u8, n, frame.name)) return true;
+        }
+        const tail = self.file orelse return false;
+        if (frame.file.len < tail.len) return false;
+        const at = frame.file.len - tail.len;
+        if (at > 0 and frame.file[at - 1] != '\\' and frame.file[at - 1] != '/') return false;
+        for (frame.file[at..], tail) |got, want| {
+            const g = if (got == '/') '\\' else std.ascii.toLower(got);
+            const w = if (want == '/') '\\' else std.ascii.toLower(want);
+            if (g != w) return false;
+        }
+        return true;
+    }
+};
+
+/// What a dump's sites skip: `StateMutex`'s methods and the forwarder.
+pub const wrapper_skip: Skip = .{ .file = "src\\sync\\state_mutex.zig", .names = &.{"lockDemand"} };
 
 /// A function and its file, as DbgHelp names them (WTF-8).
 pub const Location = struct {
@@ -390,6 +442,54 @@ pub const Session = struct {
         return .{ .name = name, .file = file };
     }
 
+    /// The acquiring function of a recorded site (PLAN.md §19.1's 0.17.1
+    /// frame rule, RQ10): with the inline frames at `address` resolved,
+    /// innermost first, the first that `skip` does not take, else the
+    /// function holding the address (`locate`). On Zig 0.17.1 the wrapper's
+    /// `inline fn` methods are inline frames of their own, and so is every
+    /// function LLVM inlined into its caller in a release build, which
+    /// `locate` alone names by the caller it went into (measured: acceptance
+    /// test 10's site shapes in a ReleaseSafe test build, 1B.6).
+    pub fn locateSite(self: *const Session, a: Allocator, address: u64, skip: Skip) Allocator.Error!?Location {
+        const count = self.api.SymAddrIncludeInlineTrace(sessionHandle(), address);
+        var context: u32 = 0;
+        var frame_index: u32 = 0;
+        if (count > 0 and self.api.SymQueryInlineTrace(sessionHandle(), address, 0, address, address, &context, &frame_index) != 0) {
+            var k: u32 = 0;
+            while (k < count) : (k += 1) {
+                const frame = (try self.inlineFrame(a, address, context + k)) orelse continue;
+                if (skip.takes(frame)) {
+                    frame.deinit(a);
+                    continue;
+                }
+                return frame;
+            }
+        }
+        return self.locate(a, address);
+    }
+
+    /// One inline frame's function and the file of its line at `address`.
+    fn inlineFrame(self: *const Session, a: Allocator, address: u64, context: u32) Allocator.Error!?Location {
+        const max_name = 2048;
+        var buf: [@sizeOf(SymbolInfoW) + 2 * max_name]u8 align(@alignOf(SymbolInfoW)) = undefined;
+        const symbol: *SymbolInfoW = @ptrCast(&buf);
+        symbol.* = std.mem.zeroes(SymbolInfoW);
+        symbol.SizeOfStruct = @sizeOf(SymbolInfoW);
+        symbol.MaxNameLen = max_name;
+        var displacement: u64 = 0;
+        if (self.api.SymFromInlineContextW(sessionHandle(), address, context, &displacement, symbol) == 0) return null;
+        var line = std.mem.zeroes(ImagehlpLineW64);
+        line.SizeOfStruct = @sizeOf(ImagehlpLineW64);
+        var line_displacement: u32 = 0;
+        if (self.api.SymGetLineFromInlineContextW(sessionHandle(), address, context, 0, &line_displacement, &line) == 0) return null;
+        const file_name = line.FileName orelse return null;
+        const name_units: [*]const u16 = @ptrCast(&symbol.Name);
+        const name = try std.unicode.wtf16LeToWtf8Alloc(a, name_units[0..@min(symbol.NameLen, max_name)]);
+        errdefer a.free(name);
+        const file = try std.unicode.wtf16LeToWtf8Alloc(a, std.mem.span(file_name));
+        return .{ .name = name, .file = file };
+    }
+
     /// The source root of this process's own build: the directory its
     /// PDB's path for this file sits under, with a trailing separator. The
     /// session must be `openSelf`'s.
@@ -472,10 +572,16 @@ pub const Result = struct {
 /// keys are relative to. A dump whose identity does not match keeps its
 /// header (with `problem=`) and writes every pair unqualified.
 pub fn symbolise(a: Allocator, raw: []const u8, session: *const Session, image_pdb: ?dump.Pdb, root: []const u8) Allocator.Error!Result {
+    return symboliseSkipping(a, raw, session, image_pdb, root, wrapper_skip);
+}
+
+/// `symbolise` with the inline frames `skip` passes over: this file's
+/// site-shape test records through a stand-in for the wrapper.
+fn symboliseSkipping(a: Allocator, raw: []const u8, session: *const Session, image_pdb: ?dump.Pdb, root: []const u8, skip: Skip) Allocator.Error!Result {
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     var result: Result = .{ .text = undefined };
-    write(a, &out.writer, raw, session, image_pdb, root, &result) catch |err| switch (err) {
+    write(a, &out.writer, raw, session, image_pdb, root, skip, &result) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
     };
     result.text = try out.toOwnedSlice();
@@ -489,6 +595,7 @@ fn write(
     session: *const Session,
     image_pdb: ?dump.Pdb,
     root: []const u8,
+    skip: Skip,
     result: *Result,
 ) (std.Io.Writer.Error || Allocator.Error)!void {
     var lines = std.mem.splitScalar(u8, raw, '\n');
@@ -546,7 +653,7 @@ fn write(
             continue;
         }
         const address = session.base + (pair.site - header.base) - 1;
-        const location = (try session.locate(a, address)) orelse {
+        const location = (try session.locateSite(a, address, skip)) orelse {
             result.unresolved += 1;
             try w.print("?no-symbol:0x{x:0>16} {s}\n", .{ pair.site, pair.role });
             continue;
@@ -844,7 +951,11 @@ test "symbolise names each site shape's acquiring function in this file" {
     var line: [dump.pair_line_max]u8 = undefined;
     try raw.writer.writeAll(dump.formatPair(&line, own.base + own.size + 16, .termio, .lock));
 
-    const result = try symbolise(a, raw.written(), &session, pdb, root);
+    // The shapes record through `record`, this test's stand-in for the
+    // wrapper's inline methods, whose frame the site rule passes over as it
+    // passes over `StateMutex`'s (`wrapper_skip`); so does the test block's
+    // own inline helper.
+    const result = try symboliseSkipping(a, raw.written(), &session, pdb, root, .{ .names = &.{ "record", "record_test_site" } });
     defer result.deinit(a);
     try testing.expectEqual(@as(?Problem, null), result.problem);
     try testing.expectEqual(@as(usize, 8), result.pairs);
@@ -870,9 +981,10 @@ test "symbolise names each site shape's acquiring function in this file" {
         try expectShapeLine(first, null);
         try expectShapeLine(second, null);
     }
-    // 0.15.2 attributes a site in an inline fn to its caller (§19.1), and
-    // 0.17.1 Debug does the same (this test, 1B.6).
-    try expectShapeLine(lines.next().?, if (builtin.mode == .debug) "symboliseInlineCaller" else null);
+    // On 0.17.1 an inline fn is an inline frame of its own, which the site
+    // rule names in Debug and ReleaseSafe alike (1B.6; the older compiler
+    // named its caller, §19.1).
+    try expectShapeLine(lines.next().?, "inlineSite");
     try expectShapeLine(lines.next().?, "test.symbolise names each site shape's acquiring function in this file");
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&line, "?outside-image:0x{x:0>16} termio", .{own.base + own.size + 16}),

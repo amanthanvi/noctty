@@ -86,7 +86,7 @@ pub const Mailbox = union(enum) {
                 // could acquire the lock. This is why we have to release our lock
                 // here.
                 if (mutex) |m| m.unlock();
-                defer if (mutex) |m| m.lock();
+                defer if (mutex) |m| m.lockUncancelable();
                 const timeout: Queue.Timeout = if (stop) |flag|
                     .{ .forever_unless = flag }
                 else

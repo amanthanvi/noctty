@@ -443,7 +443,7 @@ fn drainMailbox(
     // pop that makes a waiting sender's room.
     if (comptime builtin.is_test) {
         if (self.drain_hook) |hook| {
-            io.renderer_state.mutex.lock();
+            io.renderer_state.mutex.lockUncancelable();
             io.renderer_state.mutex.unlock();
             _ = hook.count.fetchAdd(1, .release);
         }
