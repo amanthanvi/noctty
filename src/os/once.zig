@@ -8,8 +8,9 @@
 //! itself (`Io.Threaded`'s `parking_futex`, through
 //! `NtWaitForAlertByThreadId` and `NtAlertThreadByThreadId`), not through
 //! WaitOnAddress. The callers are the portable-root
-//! cache, the pty resolver (a LoadLibrary), the search icon font and the hint
-//! scheme regex.
+//! cache, the pty resolver (a LoadLibrary), the search icon font, the hint
+//! scheme regex, and, in tests only, `global.zig`'s temp folder for a test
+//! that runs without the global state (`testTmpDirPath`).
 //!
 //! Memory orders: the done check is an acquire load (on the fast path and in
 //! the waiters' loop), and the store that marks `f` done is a release, so
