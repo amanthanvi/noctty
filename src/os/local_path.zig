@@ -1011,9 +1011,10 @@ test "local path open refuses links to a share before opening them, and tells a 
 
 test "local path open refuses a path past PATH_MAX_WIDE before converting it" {
     const alloc = std.testing.allocator;
-    // Zig 0.15.2 converts a path into a fixed buffer of PATH_MAX_WIDE units
-    // without checking that it fits, and a longer name overflows the walk's
-    // 16-bit name length: either panic ends the process.
+    // Zig (0.15.2, and 0.17.1's `std.Io.Threaded.sliceToPrefixedFileW`)
+    // converts a path into a fixed buffer of PATH_MAX_WIDE units without
+    // checking that it fits, and a longer name overflows the walk's 16-bit
+    // name length: either panic ends the process.
     for ([_]usize{ windows.PATH_MAX_WIDE + 1, 40000 }) |len| {
         const path = try alloc.alloc(u8, len);
         defer alloc.free(path);
