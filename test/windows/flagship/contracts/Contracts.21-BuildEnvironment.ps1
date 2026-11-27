@@ -198,7 +198,8 @@ function Get-BuildEnvironmentFiles([string] $Root) {
     foreach ($dir in 'src', 'pkg') {
         $path = Join-Path $Root $dir
         if (-not (Test-Path -LiteralPath $path -PathType Container)) { continue }
-        $srcBuild = [System.IO.Path]::Combine($Root, 'src', 'build') + [System.IO.Path]::DirectorySeparatorChar
+        # GetFullPath gives the separators FullName has, so a $Root given with forward slashes compares too (council AE2).
+        $srcBuild = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($Root, 'src', 'build')) + [System.IO.Path]::DirectorySeparatorChar
         foreach ($file in Get-ChildItem -LiteralPath $path -Recurse -File -Filter '*.zig') {
             $text = Get-Content -LiteralPath $file.FullName -Raw
             if ($file.Name -eq 'build.zig') { $roots.Add($file.FullName) }
@@ -386,6 +387,12 @@ try {
 }
 
 $buildEnvironmentTexts = Get-BuildEnvironmentTexts $repoRoot
+# Council AE2: the same tree named with forward slashes reads the same build files, so no reviewed site reads as stale.
+$slashTexts = Get-BuildEnvironmentTexts $repoRoot.Replace('\', '/')
+if ($slashTexts.Count -ne $buildEnvironmentTexts.Count -or @(Get-BuildEnvironmentProblems $slashTexts).Count -ne 0) {
+    throw "The build environment check read another set of build files with a forward-slash root ($($slashTexts.Count) against $($buildEnvironmentTexts.Count))."
+}
+$buildEnvironmentControls++
 # Council W1: a reviewed site that has gone away fails (the read in build_options.zig's `add`, removed).
 $optionsPath = 'src/terminal/build_options.zig'
 $staleTexts = [ordered]@{} + $buildEnvironmentTexts
