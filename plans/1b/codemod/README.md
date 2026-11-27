@@ -10,6 +10,11 @@ migration re-runs at every forward merge through 1B.9 (PLAN.md row 1B.5, U7).
   name the ref has only in another case leaves the file to a hand edit).
 - `test_codemod.py`: each rule over its fixture, what it leaves alone, idempotence, and the rules run together.
   `python -I plans/1b/codemod/test_codemod.py`.
+- `realpath_audit.py`: the tree's full codemod run (cb95cf320) predates G5's realpathAlloc bail-out, and this audit
+  is how its output was checked. It lists every `realPathFileAlloc` whose `[:0]u8` result is used other than as an
+  untyped const that is only freed or read in place, for review (`python -I plans/1b/codemod/realpath_audit.py .`).
+  At 1B.6: 557 calls, 494 freed or read only, 63 reviewed, 1 fixed (test #5889, 45f6e7a0e). Run it again after each
+  forward merge's codemod run.
 - `b1_sweep.py` (with `b1-moved-users.txt`, its map, and `test_b1_sweep.py`): re-points the callers of the
   declarations 1B.1 moved to `src/os/windows_ext.zig`. A `windows_ext` binding it adds beside a file's windows
   binding is derived from that binding's own initializer (`const w = os.windows;` gives `os.windows_ext`), never from
