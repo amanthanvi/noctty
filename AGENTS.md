@@ -872,7 +872,8 @@ that govern each symbol you change, or that none does.
   controls `ci/test_thread_role_points.py`, the
   thread-role dumps' symboliser and the in-process compare
   (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW` and inline frames,
-  `Session.locateSite` and `wrapper_skip`; `src/sync/compare.zig`;
+  `Session.locateSite` and `wrapper_skip`; `src/sync/compare.zig`, and the
+  run compare `ci/role_compare3.py` with its controls in `ci/controls.py`;
   the table they read, `ci/lock-inventory-threads.tsv`, what its static
   gate reads as a caller edge, and what its inventory reads as a
   renderer-state site, by a receiver's last name), the relock tests and

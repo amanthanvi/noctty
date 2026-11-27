@@ -455,7 +455,9 @@
         "ci/soak-thresholds.tsv",
         "scripts/package-windows.ps1",
         "scripts/ci-gui-selection.ps1",
-        "scripts/ci-script-closure.ps1"
+        "scripts/ci-script-closure.ps1",
+        "ci/role_compare3.py",
+        "ci/controls.py"
       ]
     },
     {

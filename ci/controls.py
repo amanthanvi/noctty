@@ -459,7 +459,7 @@ APPENDING = frozenset((1, 6, 7, 8, 9, 10, 11, 12, 14, 19, 20, 22, 34, 38, 85, 86
 #                                                   token-stream, evidence and
 #                                                   structure shapes, each appended
 OVERLAY_KINDS = {}
-QUICK_CONTROLS = frozenset((81, 82, 191, 192, 633, 634, 635, *range(880, 887), *range(889, 894)))
+QUICK_CONTROLS = frozenset((81, 82, 191, 192, 633, 634, 635, *range(880, 887), *range(889, 896)))
 
 
 def want(n):
@@ -4603,6 +4603,14 @@ if want(889): results.append(compare_control("889-G1-compare-keeps-each-containe
 if want(890): results.append(compare_control("890-G1-compare-refuses-an-ambiguous-bare-key",
     {"child.pairs": G1_CHILD + f"{TW}:g1Same ui\n"}, 1, {"AMBIGUOUS-KEY": 1}, isolated=True, table=G1_TABLE))
 if want(891): results.append(process_exit_control("891-T2-forwarded-launch-can-leave-a-cli-dump", 0, {}, forwarded=True))
+# 1B.6: DbgHelp names a container's function bare, so a bare key takes its one reviewed container's key, and keeps
+# that function's roles.
+G1_ONE_TABLE = f"{TW}:G1Only.g1One\trenderer\n"
+if want(894): results.append(compare_control("894-G1-a-bare-key-takes-its-one-reviewed-containers-key",
+    {"child.pairs": G1_CHILD + f"{TW}:g1One renderer\n"}, 0, {}, isolated=True, table=G1_ONE_TABLE))
+if want(895): results.append(compare_control("895-G1-a-bare-key-keeps-its-containers-roles",
+    {"child.pairs": G1_CHILD + f"{TW}:g1One ui\n"}, 1, {"PAIR-OUTSIDE-TABLE": 1}, isolated=True,
+    table=G1_ONE_TABLE))
 if want(892): results.append(jobs_control("892-a-workflow-change-selects-both-self-test-jobs",
     [".github/workflows/thread-gate-selftest.yml"], "full appending"))
 if want(893): results.append(jobs_control("893-a-nested-ci-input-selects-both-self-test-jobs",
