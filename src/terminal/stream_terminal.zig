@@ -8461,8 +8461,8 @@ test "paste: mode 5522 without entropy fails and records no grant" {
 }
 
 test "paste: mode 5522 DECRQM requires clipboard read effect" {
-    if (comptime build_options.artifact != .lib) return error.SkipZigTest;
-
+    // Runs in every build: mode 5522 is enabled outside libghostty-vt since
+    // upstream 297ff5292, which left this test's lib-only skip behind.
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
