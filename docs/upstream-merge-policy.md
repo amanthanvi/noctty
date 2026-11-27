@@ -451,15 +451,14 @@ equals the content before it, or the diff is reviewed.
   `nix/zigCacheHash.nix`, `nix/build-support/*`.
 
 **Track upstream.** The gate is that the directory's tree equals the merged
-revision's, with the allowances the table names and no others: fontconfig's
-listed adds, deletes and rename, and in `pkg/breakpad` one file,
+revision's, with one allowance and no others: in `pkg/breakpad` one file,
 `pkg/breakpad/build.zig`, whose diff against the merged revision must be
 exactly the fork changes its row names. Every other file in `pkg/breakpad`
-compares equal.
+compares equal, and `pkg/fontconfig` compares equal whole.
 
 | Directory                                                    | Stepping stone (`74d0c72fd`), as landed                                                                                                    | `v1.4.0`                                                                                                                                                                            |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pkg/fontconfig`                                             | 22 files, equal to the stone's                                                                                                             | 29 files: the gate allow-lists upstream's 11 adds, 4 deletes and 1 rename                                                                                                           |
+| `pkg/fontconfig`                                             | 22 files, equal to the stone's                                                                                                             | 29 files, equal to `v1.4.0`'s. From the stone, upstream adds 11, deletes 4 and renames 1                                                                                            |
 | `pkg/apple-sdk`                                              | 2 files, equal                                                                                                                             | 5 files                                                                                                                                                                             |
 | `pkg/libxml2`, `pkg/libintl`, `pkg/macos`, `pkg/android-ndk` | 5, 5, 59 and 2 files, equal                                                                                                                | The same counts, with upstream's content                                                                                                                                            |
 | `pkg/breakpad`                                               | Equal but for two fork changes in `build.zig`: no `linkLibCpp` under the MSVC ABI, and #718's `-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` | Keeps the first, rewritten for `v1.4.0`'s file, which sets `.link_libcpp = true` on the module where the stone's called `linkLibCpp()`; the toolchain cutover removes #718's define |
