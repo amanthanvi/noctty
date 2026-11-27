@@ -1120,12 +1120,14 @@ pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
 }
 
 /// Whether any process this user can query runs an image directly inside a
-/// version directory of `updates_dir` (`isStagedImage`). The directory is
-/// compared by the name its handle was opened by
-/// (`getFinalPathNameByHandle`, FILE_NAME_OPENED), the form in which Windows
-/// reports a process's image: a junction to it still matches, and so does a
-/// Setup started by an 8.3 spelling of the stage, against that spelling
-/// (council P1; a normalized name expands it and missed). It asks each
+/// version directory of `updates_dir` (`isStagedImage`). It compares two
+/// inputs: the stage's final path (`getFinalPathNameByHandle` with
+/// FILE_NAME_OPENED, on the stage's handle) and the image path each process
+/// reports (`QueryFullProcessImageNameW`). A Setup started by an 8.3 spelling
+/// of the stage matches against that spelling (council P1, measured: a
+/// normalized name expands the alias and missed). That a junction to the
+/// stage matches too, both inputs naming it in one form, is inferred, not
+/// measured (council Z5). It asks each
 /// process for `PROCESS_QUERY_LIMITED_INFORMATION` only, which an elevated
 /// process of the same user grants (not measured with an elevated Setup); a
 /// process that refuses even that is skipped.
