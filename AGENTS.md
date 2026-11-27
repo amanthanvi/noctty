@@ -723,7 +723,10 @@ that govern each symbol you change, or that none does.
   identity fallback over `FILE_ID_INFO`, `stagedImageByIdentity` with
   its root check `onStageRoot`, and `identityFrom`; the folders it makes
   before that check, `makeDirPath`; what a sharing violation reads as
-  (`FileBusy`, `installerImageInUse`); `pkg/wuffs/src/deflate.zig`,
+  (`FileBusy`, `installerImageInUse`) and which opens wait for it (re-check
+  item 34: the one-attempt opens `openFileOnce`, `dirOpenFileOnce` and
+  `dirCreateFileOnce` in `win32/sys.zig`, their callers, and the held-file
+  fixture `HeldFile`); `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
