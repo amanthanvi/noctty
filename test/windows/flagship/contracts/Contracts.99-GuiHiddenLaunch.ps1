@@ -952,11 +952,24 @@ foreach ($good in @(
     # Council R2 and S2 on #768: N7's positive row is the forward that returns at once, so its child's arguments up to
     # and including `-e` are exactly the run's known actionless GUI launch. The wrapper waits for its child on anything
     # its action detector reads as an action before `-e`: a `+name`, `--version`, `--help` or `-h` among them.
+    # Council U1 on #768: compared ordinally, argument by argument, as the wrapper compares bytes; PowerShell's -cne
+    # compares by culture and ignores a soft hyphen (U+00AD), so `-e` plus one, then `--version`, would pass it.
+    $guiActionlessHead = @('--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e')
+    $guiIsActionlessHead = {
+        param([string[]] $Arguments)
+        if (@($Arguments).Count -lt $guiActionlessHead.Count) { return $false }
+        for ($i = 0; $i -lt $guiActionlessHead.Count; $i++) {
+            if (-not [string]::Equals($Arguments[$i], $guiActionlessHead[$i], [StringComparison]::Ordinal)) { return $false }
+        }
+        return $true
+    }
+    if (-not (& $guiIsActionlessHead @($guiActionless | Select-Object -Skip 1)) -or
+        (& $guiIsActionlessHead @($guiActionlessHead[0], $guiActionlessHead[1], ('-e' + [char]0x00AD), '--version', 'cmd'))) {
+        throw 'The N7 actionless-launch check refused the known launch, or accepted a soft hyphen after -e.'
+    }
     if ($good.Actionless) {
         $guiForwardArgv = @(@(@($good.Rows | Where-Object { $_.Pid -eq $good.Actionless })[0].Argv) | Select-Object -Skip 1)
-        $guiActionlessHead = @('--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e')
-        $guiForwardHead = @($guiForwardArgv | Select-Object -First $guiActionlessHead.Count)
-        if (($guiForwardHead -join "`n") -cne ($guiActionlessHead -join "`n")) {
+        if (-not (& $guiIsActionlessHead $guiForwardArgv)) {
             throw "The N7 forward fixture ($($good.Name)) is not the known actionless launch up to -e, so its wrapper may not return at once."
         }
     }
