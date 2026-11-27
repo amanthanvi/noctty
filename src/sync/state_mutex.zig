@@ -1,7 +1,7 @@
 //! `StateMutex`, the renderer-state mutex with the runtime thread-role layer
 //! (PLAN.md §2.7). It has `std.Io.Mutex`'s `lockUncancelable`, `tryLock` and
 //! `unlock` without their `Io` (the wrapper supplies its own: `innerIo`), the
-//! fork's 0.15 `lock`, a demand acquire (`demand`, which the renderer reaches
+//! fork's older `lock`, a demand acquire (`demand`, which the renderer reaches
 //! through `State.lockDemand`) and `assertHeld`.
 //!
 //! The call sites' one spelling (1B.6, carry-over B6 and A7) is upstream's:
@@ -22,8 +22,7 @@
 //! The panics, wherever the layer is on:
 //! - PN1: `lock`, `lockUncancelable` or `demand` by the thread that holds it,
 //!   checked before the inner lock, which would wait for itself: 0.17.1's
-//!   `std.Io.Mutex` has no re-entry check (0.15.2's Debug mutex panicked
-//!   "Deadlock detected").
+//!   `std.Io.Mutex` has no re-entry check in any mode.
 //! - PN2: `assertHeld` or `unlock` on a thread that does not hold it.
 //! - PN3: a plain `lock` or `lockUncancelable` from `.renderer` (`demand`
 //!   and `tryLock` are allowed).
@@ -86,7 +85,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
         /// other threads' stores.
         owner: Owner = if (on) .init(no_owner) else {},
 
-        /// The fork's 0.15 name for `lockUncancelable`, for the wrapper's own
+        /// The fork's older name for `lockUncancelable`, for the wrapper's own
         /// tests only: call sites spell `lockUncancelable()` (B6).
         pub inline fn lock(self: *Self) void {
             if (comptime !builtin.is_test) @compileError("StateMutex: call sites spell lockUncancelable(), not lock() (1B.6, B6)");
@@ -161,7 +160,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
 /// branching only on `builtin.single_threaded` (0.17.1
 /// `lib/std/Io/Threaded.zig` `futexWaitUncancelable`, `futexWake`; the lead's
 /// QR-16). So the wrapper keeps its `Io`-free API, with no cancelation point,
-/// as on 0.15, and works on every thread that takes it: the UI, renderer,
+/// and works on every thread that takes it: the UI, renderer,
 /// termio, reader and search threads, which no `Io` started, and an `Io`
 /// task's thread, inline or a pool worker (decision 19). The owner and the
 /// role are the OS thread's, which holds for `Io.Threaded`, whose tasks never
