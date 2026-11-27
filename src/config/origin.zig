@@ -592,9 +592,12 @@ const compatibility = [_]Compatibility{
     .{ .name = "cursor-invert-fg-bg", .keys = &.{ .@"cursor-color", .@"cursor-text" }, .when = .truthy },
     .{ .name = "selection-invert-fg-bg", .keys = &.{ .@"selection-foreground", .@"selection-background" }, .when = .truthy },
     .{ .name = "bold-is-bright", .keys = &.{.@"bold-color"}, .when = .truthy },
-    // Ghostty 1.4's name. `scrollback-limit` is no field any more, so its
-    // handler takes every value.
+    // Ghostty 1.4's names. `scrollback-limit` is no field any more, so its
+    // handler takes every value. `copy-on-select` is still a field: its
+    // handler takes `true` and `false`, the field every other value, and
+    // either way the key it sets is `copy-on-select`.
     .{ .name = "scrollback-limit", .keys = &.{.@"scrollback-limit-bytes"}, .when = .always },
+    .{ .name = "copy-on-select", .keys = &.{.@"copy-on-select"}, .when = .always },
 };
 
 /// Whether an `-e` with a command set `key` (`Config.applyECommand`): the
@@ -767,7 +770,8 @@ test "origin: the last line that parsed, an included file, the command line, com
         "scrollback-limit = 5\n" ++
         "bold-is-bright = true\n" ++
         "cursor-invert-fg-bg = false\n" ++
-        "gtk-tabs-location = hidden\n" });
+        "gtk-tabs-location = hidden\n" ++
+        "copy-on-select = true\n" });
     const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
@@ -788,6 +792,10 @@ test "origin: the last line that parsed, an included file, the command line, com
     // since Ghostty 1.4.
     try std.testing.expectEqual(@as(usize, 5), cfg.@"scrollback-limit-bytes".value);
     try expectFile(of(&cfg, .@"scrollback-limit-bytes", null), path, 5, .config);
+    // `copy-on-select = true` is the field's own name with a value only its
+    // compatibility handler takes (Ghostty 1.4's values).
+    try std.testing.expect(cfg.@"copy-on-select" != .none);
+    try expectFile(of(&cfg, .@"copy-on-select", null), path, 9, .config);
     try expectFile(of(&cfg, .@"config-file", null), path, 4, .config);
     // Compatibility names set the keys their handlers set, and only those.
     try expectFile(of(&cfg, .@"bold-color", null), path, 6, .config);
