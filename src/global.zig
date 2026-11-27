@@ -343,9 +343,27 @@ pub fn args() std.process.Args {
 /// (saves allocation of the temporary directory where you can get at global
 /// state).
 ///
-/// Asserts that the global state is initialized.
+/// Asserts that the global state is initialized when not running as a test.
 pub fn tmpDirPath() []const u8 {
+    // Fork: a test runs without the global state, as the helpers above allow,
+    // and gets the process's own temporary directory, found once. Termio's
+    // changeConfig reads this (1.4's Kitty loading limits), and the fork's
+    // issue149 tests run changeConfig (1B.6, test #4824's null unwrap).
+    if (builtin.is_test) return testTmpDirPath();
     return state.?.tmp_dir_path.?;
+}
+
+var test_tmp_dir_path: ?[]const u8 = null;
+var test_tmp_dir_once = @import("os/once.zig").once(findTestTmpDirPath);
+
+fn findTestTmpDirPath() void {
+    // Kept for the test process's life, so not the testing allocator.
+    test_tmp_dir_path = allocTmpDir(std.heap.page_allocator, std.testing.environ) catch null;
+}
+
+fn testTmpDirPath() []const u8 {
+    test_tmp_dir_once.call();
+    return test_tmp_dir_path orelse ".";
 }
 
 /// Returns the global state resources_dir, or an empty one when testing.
