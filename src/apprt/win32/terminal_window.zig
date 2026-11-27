@@ -1774,12 +1774,106 @@ pub const Surface = struct {
         if (clipboard_type != .standard) return .unsupported;
         switch (state) {
             .paste, .osc_52_read => {},
-            // Upstream 1.4's Kitty clipboard protocol (OSC 5522): its reads,
-            // writes and paste-event listing are not served by the Win32
-            // runtime yet. OSC 52 writes never come here (setClipboard).
-            .kitty_read, .kitty_write, .list, .osc_52_write => return .unsupported,
+            // Upstream 1.4's Kitty clipboard protocol (OSC 5522): a user's
+            // paste into a program that turned paste events on (mode 5522),
+            // and the program's read that follows it.
+            .list => return self.sendPasteEvent(state),
+            .kitty_read => return try self.serveKittyClipboardRead(state),
+            // A program's OSC 5522 write is not served yet: core answers it
+            // ENOSYS. OSC 52 writes never come here (setClipboard).
+            .kitty_write, .osc_52_write => return .unsupported,
         }
         return if (try self.clipboardRequestStarted(state)) .started else .unavailable;
+    }
+
+    /// A user's paste into a program that turned on Kitty paste events
+    /// (mode 5522), which core asks for as `.list` instead of `.paste`: the
+    /// program gets a paste event naming the clipboard's types
+    /// (`ClipboardSource.mimes`) and a one-time password for the read that
+    /// follows (`serveKittyClipboardRead`). No clipboard data is read. As in
+    /// upstream's GTK and macOS runtimes, the event is sent even when the
+    /// clipboard holds nothing this can serve, and the paste counts as done.
+    fn sendPasteEvent(self: *Surface, state: apprt.ClipboardRequest) apprt.ClipboardReadResult {
+        // A user's paste, as `.paste` is.
+        self.noteProgramInput();
+        const source = self.app.test_clipboard_source orelse system_clipboard;
+        self.core_surface.completeClipboardRequest(state, .{
+            .available = source.mimes(),
+        }) catch |err| {
+            log.warn("mode 5522 paste event failed err={}", .{err});
+        };
+        return .started;
+    }
+
+    /// A program's Kitty clipboard protocol (OSC 5522) read, served before
+    /// this returns, as upstream's GTK and macOS runtimes serve it: the
+    /// clipboard's text for a text type it asks for
+    /// (`terminal.clipboard.isTextMime`), and the type listing
+    /// (`ClipboardSource.mimes`) when it asks for one. Nothing else is
+    /// served: no other format, and never copied files. The read that
+    /// follows a paste event carries that event's one-time password, so it
+    /// arrives granted and needs no prompt.
+    fn serveKittyClipboardRead(self: *Surface, state: apprt.ClipboardRequest) !apprt.ClipboardReadResult {
+        const kitty = state.kitty_read;
+        // A read that would ask first (`clipboard-read = ask`, no grant from
+        // a paste event or a remembered answer, a data type asked for; core's
+        // test in `completeClipboardRequest`): Win32 has no prompt for one
+        // yet, so it is not served and core answers ENOSYS. Decided before
+        // the clipboard is read, as for an OSC 52 read that would be
+        // declined.
+        if (self.core_surface.config.clipboard_read == .ask and
+            !kitty.granted and
+            !terminal.kitty.clipboard.readPromptExempt(kitty.mimes.len))
+        {
+            return .unsupported;
+        }
+
+        const wants_text = for (kitty.mimes) |mime| {
+            if (terminal.clipboard.isTextMime(mime)) break true;
+        } else false;
+        // Nothing asked for can be served and no listing either: core
+        // answers with no data, which is how the protocol says unavailable.
+        if (!wants_text and !kitty.list) return .unavailable;
+
+        const alloc = self.app.core_app.alloc;
+        // Text only: a program's read never takes copied files.
+        const contents: ClipboardContents = if (!wants_text)
+            .none
+        else if (self.app.test_clipboard_source) |source|
+            try selectClipboardContents(alloc, false, source)
+        else
+            try self.readClipboard(false);
+        const text: ?[:0]u8 = switch (contents) {
+            .none => null,
+            .text => |held| held,
+            .files => |paths| files: {
+                alloc.free(paths);
+                break :files null;
+            },
+        };
+        defer if (text) |held| alloc.free(held);
+
+        if (text == null and !kitty.list) return .unavailable;
+        const source = self.app.test_clipboard_source orelse system_clipboard;
+        const available: []const []const u8 = if (kitty.list) source.mimes() else &.{};
+        var served: [1]terminal.clipboard.Content = undefined;
+        const served_len: usize = if (text) |held| len: {
+            served[0] = .{ .mime = "text/plain", .data = held };
+            break :len 1;
+        } else 0;
+
+        self.core_surface.completeClipboardRequest(state, .{
+            .contents = served[0..served_len],
+            .available = available,
+        }) catch |err| switch (err) {
+            // Core would ask first after all, and kept the request: answered
+            // as above (ENOSYS).
+            error.UnauthorizedPaste => return .unsupported,
+            // Past its prompt test core owns the request and freed it, so it
+            // counts as served; returning the error would free it again.
+            else => log.warn("kitty clipboard read failed err={}", .{err}),
+        };
+        return .started;
     }
 
     /// The Win32 clipboard read behind `clipboardRequest`, true when the
@@ -1840,7 +1934,8 @@ pub const Surface = struct {
             .paste => return try self.core_surface.completeClipboardPasteWithoutText(),
             .osc_52_read => try self.app.core_app.alloc.dupeSentinel(u8, "", 0),
             .osc_52_write => unreachable,
-            // Never started (`clipboardRequest`).
+            // Served by `sendPasteEvent` and `serveKittyClipboardRead`, or
+            // never started (`clipboardRequest`).
             .kitty_read, .kitty_write, .list => return false,
         };
         defer self.app.core_app.alloc.free(str);
@@ -5093,11 +5188,17 @@ pub const Surface = struct {
         return try selectClipboardContents(self.app.core_app.alloc, include_files, system_clipboard);
     }
 
-    /// The open system clipboard, for `selectClipboardContents`.
+    /// The system clipboard, for `selectClipboardContents` (open) and
+    /// `ClipboardSource.mimes` (open or not).
     const system_clipboard: ClipboardSource = .{
         .text = &readOpenClipboardText,
         .hdrop = &readOpenClipboardHdrop,
+        .has_text = &clipboardHasText,
     };
+
+    fn clipboardHasText() bool {
+        return sys.IsClipboardFormatAvailable(c.CF_UNICODETEXT) != 0;
+    }
 
     fn readOpenClipboardHdrop() ?*anyopaque {
         if (sys.IsClipboardFormatAvailable(c.CF_HDROP) == 0) return null;

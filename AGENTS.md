@@ -613,7 +613,10 @@ that govern each symbol you change, or that none does.
   the empty bracketed paste and the paste of copied files
   (`Surface.completeClipboardPasteWithoutText`, `selectClipboardContents`,
   `win32_ole.extractHdrop`), OSC 52 prompts and
-  replies, paste protection (`win32_paste_protection.zig`), drag-and-drop
+  replies, Kitty paste events (mode 5522) and OSC 5522 reads
+  (`Surface.sendPasteEvent`, `serveKittyClipboardRead`,
+  `ClipboardSource.mimes`, `has_text`),
+  paste protection (`win32_paste_protection.zig`), drag-and-drop
   (`win32_surface_drop*.zig`), pending clipboard confirmations.
 - [settings.md](docs/agents/log/settings.md): the Settings window
   (`win32_settings.zig`, `win32_settings_fields.zig`): its controls and when
