@@ -140,7 +140,7 @@ function Get-AbiPinProblems {
     # Private declarations too (council T4): a file-local extern struct crosses the ABI as much as a public one.
     # And one with its type annotated, `const X: type = extern struct {` (council U3), or indented inside a
     # namespace (council V2).
-    foreach ($declaration in [regex]::Matches($Source, '(?m)^[ 	]*(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*type)?\s*=\s*extern (struct|union) \{')) {
+    foreach ($declaration in [regex]::Matches($Source, '(?m)^[ \t]*(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*type)?\s*=\s*extern (struct|union) \{')) {
         $pending.Enqueue(@{ Name = $declaration.Groups[1].Value; Path = $declaration.Groups[1].Value; Kind = $declaration.Groups[2].Value; Open = $declaration.Index + $declaration.Length })
     }
     $top = $pending.Count
