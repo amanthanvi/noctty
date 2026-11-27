@@ -29,6 +29,7 @@ See also:
 - The interactive composite job's step order (the command-finish leaf, its one real toast, last; the composite's `-DeferCommandFinish`), why the suite's own toasts no longer need Do Not Disturb, and why an optional run still asks for it: the 2026-11-18 EVIDENCE-TOAST-FOREGROUND entry in test-harnesses.md.
 - The test executable reads the updater's version fixture through a path relative to its build root (`windows_version_fixture.exe_path`, the fixture of the 2026-10-10 version-resource entry below), so it has to run from the checkout that built it: trap (1) of the 2026-11-18 RAN-LIST-01 entry in test-harnesses.md.
 - The hidden-desktop GUI workflow (`.github/workflows/gui-hidden.yml`: `changes`, the suite, and `gui-hidden-gate` through `scripts/ci-gate.ps1`) and its path selection (`scripts/ci-gui-selection.ps1`, which leaves `Get-CiPathNeeds` unchanged and adds the computed closure of the suite's scripts from `scripts/ci-script-closure.ps1`): the 2026-11-20 GUI-HIDDEN-DEFAULT-01 entry in test-harnesses.md.
+- A width pin in `src/build/uucode_config.zig` (`conpty_width_pins`) reaches noctty only through the checked-in tables regenerated from it, `src/build/uucode_tables.zig` and `src/unicode/generated_props.zig`, which this file's 2026-04-15 generated-tables entry keeps versioned: trap (1) of the 2026-11-26 CONPTY-WIDTH-18 entry in conpty.md.
 
 <!-- prettier-ignore-end -->
 

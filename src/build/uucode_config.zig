@@ -122,8 +122,54 @@ const WidthComponent = struct {
                 items[i] = @min(2, standalone[i]);
             }
         }
+
+        for (conpty_width_pins) |pin| {
+            for (pin.first..@as(usize, pin.last) + 1) |cp| items[cp] = pin.width;
+        }
     }
 };
+
+/// Code points whose width is pinned to the width the bundled ConPTY gives
+/// them, so that noctty's cursor stays where ConPTY's is (PLAN.md 7.7, the
+/// Unicode 18 width rule). Unicode 18 made these 990 newly assigned code
+/// points East Asian Wide (they were Neutral while unassigned in Unicode 17),
+/// and the bundled OpenConsole 1.24.260710001 (`dist/windows/conpty-redist.json`)
+/// does not know them yet: `test/windows/hidden-win11-conpty-width.ps1`
+/// measured each at 1 column in its screen buffer, with glyph width flags 0
+/// (noctty's default) and 0x10 (`grapheme-width-method = legacy`), VT
+/// processing on and off. Unpinned, the cursor drifts a column after each one.
+///
+/// Each range holds only code points the probe measured at `width`; the probe's
+/// table is `src/unicode/testdata/conpty_width.tsv`, and the test "unicode:
+/// widths match the bundled ConPTY's measured widths" (`src/unicode/main.zig`)
+/// asserts it against the table noctty compiles in. Remove a range only when
+/// a re-run against a newer bundled ConPTY measures the Unicode width there
+/// (`docs/agents/log/conpty.md`, the 2026-11-26 CONPTY-WIDTH-18 entry).
+const conpty_width_pins = [_]WidthPin{
+    // Khitan Small Script additions.
+    .{ .first = 0x18CD6, .last = 0x18CDA, .width = 1 },
+    // Tangut Supplement additions.
+    .{ .first = 0x18D1F, .last = 0x18D20, .width = 1 },
+    // Jurchen, and Jurchen Radicals.
+    .{ .first = 0x18E00, .last = 0x19191, .width = 1 },
+    .{ .first = 0x191A0, .last = 0x191D2, .width = 1 },
+    // Kana Extended-A and Small Kana Extension additions.
+    .{ .first = 0x1B123, .last = 0x1B128, .width = 1 },
+    .{ .first = 0x1B168, .last = 0x1B168, .width = 1 },
+    // The emoji blocks: U+1F1AE and U+1F7DA, and nine with
+    // Emoji_Presentation (U+1F6D9, U+1FA8B..U+1FA8D, U+1FACC, U+1FADD,
+    // U+1FAEB, U+1FAF9..U+1FAFA).
+    .{ .first = 0x1F1AE, .last = 0x1F1AE, .width = 1 },
+    .{ .first = 0x1F6D9, .last = 0x1F6D9, .width = 1 },
+    .{ .first = 0x1F7DA, .last = 0x1F7DA, .width = 1 },
+    .{ .first = 0x1FA8B, .last = 0x1FA8D, .width = 1 },
+    .{ .first = 0x1FACC, .last = 0x1FACC, .width = 1 },
+    .{ .first = 0x1FADD, .last = 0x1FADD, .width = 1 },
+    .{ .first = 0x1FAEB, .last = 0x1FAEB, .width = 1 },
+    .{ .first = 0x1FAF9, .last = 0x1FAFA, .width = 1 },
+};
+
+const WidthPin = struct { first: u21, last: u21, width: u2 };
 
 const IsSymbolComponent = struct {
     pub fn build(
