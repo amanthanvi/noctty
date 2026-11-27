@@ -2521,6 +2521,9 @@ test "storage: adding placement reclaims garbage placements" {
     try s.addPlacement(io, alloc, t.screens.active, 1, 0, .{
         .location = .{ .pin = old_pin },
     });
+    try s.addPlacement(io, alloc, t.screens.active, 1, 0, .{
+        .location = .{ .virtual = {} },
+    });
     old_pin.garbage = true;
 
     const new_pin = try trackPin(&t, .{ .x = 1, .y = 1 });
@@ -2528,7 +2531,12 @@ test "storage: adding placement reclaims garbage placements" {
         .location = .{ .pin = new_pin },
     });
 
-    try testing.expectEqual(@as(usize, 1), s.placements.count());
+    // The garbage placement is gone with its pin; the virtual one stays.
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+    try testing.expect(s.placements.get(.{
+        .image_id = 1,
+        .placement_id = .{ .tag = .internal, .id = 1 },
+    }).?.location == .virtual);
     try testing.expectEqual(
         tracked + 1,
         t.screens.active.pages.countTrackedPins(),
@@ -2537,7 +2545,7 @@ test "storage: adding placement reclaims garbage placements" {
         new_pin,
         s.placements.get(.{
             .image_id = 1,
-            .placement_id = .{ .tag = .internal, .id = 1 },
+            .placement_id = .{ .tag = .internal, .id = 2 },
         }).?.location.pin,
     );
 }
@@ -2628,6 +2636,7 @@ test "storage: delete all visible placements preserves scrollback" {
     defer t.deinit(alloc);
     t.width_px = 2;
     t.height_px = 2;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2655,6 +2664,7 @@ test "storage: delete all visible placements preserves scrollback" {
     try testing.expect(s.placements.contains(history_key));
     try testing.expectEqual(@as(usize, 1), s.images.count());
     try testing.expect(s.images.contains(1));
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete all includes placements spanning into active area" {
@@ -2669,6 +2679,7 @@ test "storage: delete all includes placements spanning into active area" {
     defer t.deinit(alloc);
     t.width_px = 2;
     t.height_px = 2;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2699,6 +2710,7 @@ test "storage: delete all includes placements spanning into active area" {
     s.delete(io, alloc, &t, .{ .all = true });
     try testing.expectEqual(@as(usize, 0), s.placements.count());
     try testing.expectEqual(@as(usize, 0), s.images.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete all placements" {
@@ -2916,6 +2928,7 @@ test "storage: delete intersecting cursor checks interior row column" {
     defer t.deinit(alloc);
     t.width_px = 100;
     t.height_px = 100;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2933,6 +2946,7 @@ test "storage: delete intersecting cursor checks interior row column" {
         .image_id = 1,
         .placement_id = .{ .tag = .external, .id = 1 },
     }) != null);
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete intersecting cell checks interior row column" {
@@ -2943,6 +2957,7 @@ test "storage: delete intersecting cell checks interior row column" {
     defer t.deinit(alloc);
     t.width_px = 100;
     t.height_px = 100;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
@@ -2961,6 +2976,7 @@ test "storage: delete intersecting cell checks interior row column" {
         .image_id = 1,
         .placement_id = .{ .tag = .external, .id = 1 },
     }) != null);
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: delete intersecting cursor plus unused" {
@@ -3354,6 +3370,7 @@ test "storage: erase display preserves scrollback and reclaims unplaced images" 
     defer t.deinit(alloc);
     t.width_px = 2;
     t.height_px = 2;
+    const tracked = t.screens.active.pages.countTrackedPins();
 
     const s = &t.screens.active.kitty_images;
     try s.addImage(io, alloc, t.screens.active, .{ .id = 1, .width = 1, .height = 1 });
@@ -3384,6 +3401,7 @@ test "storage: erase display preserves scrollback and reclaims unplaced images" 
     try testing.expect(s.images.contains(1));
     try testing.expect(!s.images.contains(2));
     try testing.expect(!s.images.contains(3));
+    try testing.expectEqual(tracked + 1, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: erase scrollback removes placements in history" {
@@ -4321,6 +4339,7 @@ test "storage: scroll margins placement inside region scrolls and clips at top" 
         .width = 10,
         .height = 20,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 2 }) },
     });
@@ -4352,9 +4371,10 @@ test "storage: scroll margins placement inside region scrolls and clips at top" 
         try testing.expectEqual(@as(u32, 10), p.source_height);
     }
 
-    // Fully clipped: deleted.
+    // Fully clipped: deleted, and its tracked pin released.
     try t.index();
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
     // The image itself is retained.
     try testing.expectEqual(@as(usize, 1), storage.images.count());
 }
@@ -4443,6 +4463,7 @@ test "storage: scroll margins reverse index clips at bottom" {
         .width = 10,
         .height = 20,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 3 }) },
     });
@@ -4465,6 +4486,7 @@ test "storage: scroll margins reverse index clips at bottom" {
     // Fully clipped: deleted.
     t.reverseIndex();
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: scroll margins scaled placement clips proportionally" {
@@ -4646,6 +4668,7 @@ test "storage: scroll margins large scroll deletes inside placement" {
         .width = 10,
         .height = 10,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 2 }) },
     });
@@ -4653,6 +4676,7 @@ test "storage: scroll margins large scroll deletes inside placement" {
 
     try t.scrollUp(10);
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: scroll margins straddling placement pin inside region restored" {
@@ -4708,6 +4732,7 @@ test "storage: scroll margins multi-line scroll up with scrollback" {
         .width = 10,
         .height = 10,
     });
+    const tracked = t.screens.active.pages.countTrackedPins();
     try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 2 }) },
     });
@@ -4726,6 +4751,7 @@ test "storage: scroll margins multi-line scroll up with scrollback" {
     // Another two rows scrolls it out of the region: deleted.
     try t.scrollUp(2);
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "storage: resolveChain accumulates offsets to the pin root" {
