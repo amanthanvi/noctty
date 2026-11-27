@@ -11,9 +11,11 @@
 # argument, the call's last, is read (council W3), and it must be one plain struct literal whose top level sets
 # `.allow_directory = false` or a write `.mode`, exactly (council Y2): a computed, conditional or unparsed form
 # fails, and a real site in one is reviewed below. Any other mention of either name outside test code and `sys.`
-# (a quoted identifier, the name as a string, a reference without a call) fails too (council Y5), and so does a
-# `\xNN` or `\u{...}` escape in a quoted identifier or an `@field` name outside test code (council AA5): refused,
-# not decoded. Not refused: a name built at comptime, as `"open" ++ "File"` in an `@field`, which is code
+# (a quoted identifier, the name as a string or a multi-line string line, a reference without a call) fails too
+# (council Y5, AC2), and so does, outside test code, any `\xNN` or `\u{...}` escape that decodes to an identifier
+# character (`[A-Za-z0-9_]`), in any literal, quoted identifier or multi-line string line (council AA5, AC2):
+# refused, not decoded, and read context free, in the file's own order of literals. A terminal escape such as
+# `\x1b` passes. Not refused: a name built at comptime, as `"open" ++ "File"` in an `@field`, which is code
 # review's. A new open, or one that loses the option, fails here.
 
 # Blanks comments, multi-line-string lines and string and character literals, keeping the length. With
@@ -48,28 +50,39 @@ function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
     $spans = @(Get-OpenFileTestSpans $code)
     $functions = [regex]::Matches($code, '\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
     $withStrings = $null
-    # Council AA5: a `\xNN` or `\u{...}` escape in a quoted identifier or an `@field` name, outside test code, could
-    # spell either name, and fails outright: refused, not decoded (Contracts.21's Y3 rule, for product code).
+    # Every literal in the file's own order (character, string, quoted identifier, multi-line string line), comments
+    # skipped, so no earlier text can hide one.
+    $literals = [regex]::Matches($ZigText, '''(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]+\}|.)|[^''\\\n])''|"(?:\\.|[^"\\\n])*"|(?<multi>\\\\[^\n]*)|//[^\n]*')
+    # Council AA5 and AC2, context free: outside test code, a `\xNN` or `\u{...}` escape that decodes to an
+    # identifier character (`[A-Za-z0-9_]`) fails in any literal, a quoted identifier or a multi-line string line
+    # included: it could spell either name, and it is refused, not decoded. A terminal escape such as `\x1b`
+    # decodes to a control character and passes.
     if ($mayEscape) {
-        $withStrings = Remove-OpenFileNonCode $ZigText -KeepStrings
-        foreach ($m in [regex]::Matches($withStrings, '@"(?:\\.|[^"\\\n])*"|@field\s*\((?:[^()]|\([^()]*\))*?,\s*(?<name>"(?:\\.|[^"\\\n])*")')) {
-            $literal = if ($m.Groups['name'].Success) { $m.Groups['name'] } else { $m }
-            if ($literal.Value -notmatch '(?<!\\)(?:\\\\)*\\(?:x[0-9A-Fa-f]{2}|u\{)') { continue }
+        foreach ($literal in $literals) {
+            if ($literal.Value.StartsWith('//')) { continue }
+            $spells = $false
+            foreach ($e in [regex]::Matches($literal.Value, '(?<!\\)(?:\\\\)*\\(?:x(?<x>[0-9A-Fa-f]{2})|u\{(?<u>[0-9A-Fa-f]{1,6})\})')) {
+                $cp = [Convert]::ToInt32($(if ($e.Groups['x'].Success) { $e.Groups['x'].Value } else { $e.Groups['u'].Value }), 16)
+                if ($cp -le 0x7f -and [string][char]$cp -cmatch '^[A-Za-z0-9_]$') { $spells = $true; break }
+            }
+            if (-not $spells) { continue }
             $inTest = $false
             foreach ($span in $spans) { if ($literal.Index -gt $span[0] -and $literal.Index -lt $span[1]) { $inTest = $true; break } }
             if ($inTest) { continue }
             $name = '(top level)'
             foreach ($function in $functions) { if ($function.Index -lt $literal.Index) { $name = $function.Groups[1].Value } else { break } }
-            "${Path}:${name} (an escaped name)"
+            "${Path}:${name} (an escaped identifier character)"
         }
     }
     if (-not $ZigText.Contains('openFile')) { return }
     # Council Y5: any other mention of either name outside test code and `sys.` (a quoted identifier, the name
-    # as a string, or a reference without a call) is an open the guard cannot read, and fails.
+    # as a string, a multi-line string line holding it (council AC2), or a reference without a call) is an open the
+    # guard cannot read, and fails.
     $mentions = @(
         foreach ($m in [regex]::Matches($code, '\b(openFile|openFileAbsolute)\b(?!\s*\()')) { $m.Index }
-        $withStrings = Remove-OpenFileNonCode $ZigText -KeepStrings
-        foreach ($m in [regex]::Matches($withStrings, '"(?:openFile|openFileAbsolute)"')) { $m.Index }
+        foreach ($literal in $literals) {
+            if ($literal.Value -cmatch '^"(?:openFile|openFileAbsolute)"$' -or $literal.Value -cmatch '^\\\\(?:openFile|openFileAbsolute)$') { $literal.Index }
+        }
     )
     foreach ($at in $mentions) {
         $lead = $code.Substring([Math]::Max(0, $at - 16), [Math]::Min(16, $at))
@@ -228,6 +241,10 @@ $script:OpenFileDirectoryReviewed = @(
     # (council AB1).
     @{ Site = 'src/terminal/kitty/graphics_image.zig:readFile'; Opens = 1; Why = 'the non-Windows branch; on Windows the open goes through local_path.open'
         Before = 'if (comptime builtin.target.os.tag == .windows) switch (try local_path.open(alloc, path, .{ .data = true })) { .found => |found| hit: { alloc.free(found.path); break :hit found.file; }, else => |opened| { log.warn("failed to open image file: {t}", .{opened}); return error.InvalidData; }, } else std.Io.Dir.cwd()' }
+    # An escaped identifier character in product code (council AC2), the tree's only one: test_wsl_cases' raw
+    # UTF-16LE bytes "\x41\x41\x0A", test data at the top level that only tests read. Its site names the function
+    # before it in the file, as the line heuristic does.
+    @{ Site = 'src/config/windows_shell.zig:testOneRegistered (an escaped identifier character)'; Opens = 1; Why = 'test_wsl_cases raw bytes, read only by tests' }
     # Test-only helpers outside a `test` block (they open with std.testing.io or only tests call them).
     @{ Site = 'src/apprt/win32/app.zig:read'; Opens = 1; Why = 'a test fixture struct''s reader (std.testing.io)' }
     @{ Site = 'src/apprt/win32/sys.zig:expectFinalPathAsOpened'; Opens = 1; Why = 'the final-path test''s helper' }
@@ -353,13 +370,20 @@ foreach ($sample in @(
         @{ Text = "const open = std.Io.Dir.openFileAbsolute;`n"; Hits = 1 }
         @{ Text = "const open = win32_sys.openFile;`n"; Hits = 0 }
         @{ Text = "test `"t`" {`n    const open = std.Io.Dir.openFile;`n}`n"; Hits = 0 }
-        # Council AA5: an escape in a quoted identifier or an @field name fails; one in another string, or in a
-        # test block, does not.
+        # Council AA5 and AC2: an escape that decodes to an identifier character fails in any literal outside test
+        # code; a terminal escape, or one in a test block, does not.
         @{ Text = "fn e1() !void {`n    const f = try dir.@`"open\x46ile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
         @{ Text = "fn e2() !void {`n    const f = try dir.@`"open\u{46}ile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
         @{ Text = "fn e3() !void {`n    const f = try @field(std.Io.Dir, `"open\x46ile`")(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
-        @{ Text = "fn e4() void {`n    log.info(`"\x41`", .{});`n}`n"; Hits = 0 }
+        @{ Text = "fn e4() void {`n    log.info(`"\x41`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn e5() void {`n    log.info(`"\x1b[0m`", .{});`n}`n"; Hits = 0 }
         @{ Text = "test `"t`" {`n    const f = try dir.@`"open\x46ile`"(io, `"x`", .{});`n}`n"; Hits = 0 }
+        # Council AC2: deeper nesting in @field's first argument, an earlier "@" string on the line, a multi-line
+        # string as @field's name, and a parenthesized name.
+        @{ Text = "fn n1() !void {`n    const f = try @field(@TypeOf(std.Io.Dir.cwd()), `"open\x46ile`")(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn n2() !void {`n    const marker = `"@`"; const f = try dir.@`"open\x46ile`"(io, `"x`", .{}); _ = marker;`n}`n"; Hits = 1 }
+        @{ Text = "fn n3() !void {`n    const f = try @field(std.Io.Dir,`n        \\openFile`n    )(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn n4() !void {`n    const f = try @field(std.Io.Dir, (`"openFile`"))(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
