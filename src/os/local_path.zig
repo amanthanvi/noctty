@@ -92,8 +92,9 @@ pub const Found = struct {
 
 /// Open what `path` names, on a local drive only. As given, `path` must be
 /// drive-absolute (`X:\` or `X:/`) with no `:` after the drive: Zig 0.15.2's
-/// `resolve` panics on some other shapes (a share whose second name is the
-/// other separator, `\\a\/`). It is then resolved, and refused past
+/// `resolve` panicked on some other shapes (a share whose second name is the
+/// other separator, `\\a\/`; 0.17.1's does not), and they are no local file
+/// anyway. It is then resolved, and refused past
 /// PATH_MAX_WIDE bytes. The drive must be fixed, removable, a CD-ROM or a RAM
 /// disk; each name is opened under OBJ_DONT_REPARSE relative to its checked
 /// parent, a symlink or junction is followed only to a local drive or a
@@ -285,20 +286,23 @@ fn resolveOpenPath(alloc: Allocator, dir: ?[]const u8, text: []const u8) Allocat
 /// `path` as an absolute path, if it exists. Relative to `dir` when that is
 /// set.
 fn existingPath(alloc: Allocator, dir: ?[]const u8, path: []const u8) Allocator.Error!?[]const u8 {
-    // Zig's `resolve` indexes an empty slice (a panic) when a drive-relative
-    // name such as `D:x` is joined onto a path (measured with `b:x`, `D:x`).
-    // No default pattern produces one, but a custom `link` regex can.
-    // Zig's parser takes any byte before the ':' as a drive (`1:x` panics too).
+    // Zig 0.15.2's `resolve` indexed an empty slice (a panic) when a
+    // drive-relative name such as `D:x` was joined onto a path (measured with
+    // `b:x`, `D:x`). No default pattern produces one, but a custom `link` regex
+    // can. Its parser takes any byte before the ':' as a drive (`1:x` panicked
+    // too). 0.17.1's rewrite took `b:x` and `1:x` as text and as a base
+    // without a panic (settings.md trap 14, 1B.6; this join was not tried);
+    // the refusal stays, since such text names no local file.
     if (path.len >= 2 and path[1] == ':' and !std.fs.path.isAbsolute(path)) return null;
 
-    // A share or device path is never resolved either: `resolve` unwraps a null
-    // on a server whose share is a lone separator (`\\a\/`), and it is the
-    // opener's to refuse anyway.
+    // A share or device path is never resolved either: 0.15.2's `resolve`
+    // unwrapped a null on a server whose share is a lone separator (`\\a\/`),
+    // and it is the opener's to refuse anyway.
     if (os_path.isNetworkOrDevicePath(path)) return null;
 
-    // The same two panics as a base: a drive with no root (`C:`, `b:x`) and
-    // `\\a\/`. A pane's directory should be neither, but a launch directory
-    // is not screened like a reported one.
+    // The same two shapes as a base, which 0.15.2's `resolve` panicked on: a
+    // drive with no root (`C:`, `b:x`) and `\\a\/`. A pane's directory should
+    // be neither, but a launch directory is not screened like a reported one.
     if (dir) |base| if (!std.fs.path.isAbsolute(base) or os_path.isNetworkOrDevicePath(base)) return null;
 
     // Always the output of `resolve`, which `windowsPathIsRepresentable`
@@ -1011,9 +1015,10 @@ test "local path open refuses links to a share before opening them, and tells a 
 
 test "local path open refuses a path past PATH_MAX_WIDE before converting it" {
     const alloc = std.testing.allocator;
-    // Zig 0.15.2 converts a path into a fixed buffer of PATH_MAX_WIDE units
-    // without checking that it fits, and a longer name overflows the walk's
-    // 16-bit name length: either panic ends the process.
+    // Zig (0.15.2, and 0.17.1's `std.Io.Threaded.sliceToPrefixedFileW`)
+    // converts a path into a fixed buffer of PATH_MAX_WIDE units without
+    // checking that it fits, and a longer name overflows the walk's 16-bit
+    // name length: either panic ends the process.
     for ([_]usize{ windows.PATH_MAX_WIDE + 1, 40000 }) |len| {
         const path = try alloc.alloc(u8, len);
         defer alloc.free(path);
@@ -1973,10 +1978,10 @@ test "link target: a relative link never resolves onto a network or device pwd" 
 }
 
 test "link target: a pwd that is no absolute local path gives null and never aborts" {
-    // `resolve` does not always return an absolute path (a pwd that opens
-    // with `\/` comes back as `server\share\file.txt`), and it panics on a
-    // base that is a drive with no root (`C:`, `b:x`) or a share whose second
-    // name is the other separator (`\\a\/`).
+    // `resolve` does not always return an absolute path, and Zig 0.15.2's
+    // panicked on a base that is a drive with no root (`C:`, `b:x`) or a share
+    // whose second name is the other separator (`\\a\/`); 0.17.1's does not
+    // (settings.md trap 14), and every such pwd still gives null.
     for ([_]bool{ false, true }) |wsl| for ([_][]const u8{
         "#x",
         "relative",

@@ -40,9 +40,9 @@ pub const QuerySearch = struct {
 
         /// Must be held while the terminal is read or written. `step` and
         /// `deinit` take it themselves, so their caller must not hold it:
-        /// with the thread-role layer on the build panics (PN1), a Debug
-        /// build without it panics with "Deadlock detected", and a release
-        /// build without it hangs.
+        /// with the thread-role layer on the build panics (PN1), and a build
+        /// without it hangs (Zig 0.17's `std.Io.Mutex` has no owner, so there
+        /// is no "Deadlock detected" in Debug either).
         mutex: *StateMutex,
     };
 

@@ -944,6 +944,33 @@ test "a timer reset in the pass it falls due loses the run its callback arms nex
     try std.testing.expectEqualStrings("RCR", probe.seen[0..probe.len]);
 }
 
+test "the Win32 runtime declares every hook this file probes by name" {
+    // `@hasDecl` is false for a declaration that is not `pub`, so a hook
+    // that loses `pub`, or its name, turns its call off without a compile
+    // error (tooling.md: 2026-11-06 FACADE-S8-HASDECL, 2026-11-26
+    // HASDECL-PRIVATE-017).
+    if (comptime @import("../build_config.zig").app_runtime != .win32) return error.SkipZigTest;
+    inline for (.{
+        "must_draw_from_app_thread",
+        "renderer_pacing_clock",
+    }) |name| {
+        errdefer std.debug.print("apprt.App does not declare the hook {s}\n", .{name});
+        try std.testing.expect(@hasDecl(apprt.App, name));
+    }
+    inline for (.{
+        "cancelRendererRepaintRequest",
+        "noteRendererDrawRequest",
+        "beginRendererRepaintRequest",
+        "beginRendererFrameUpdate",
+        "noteRendererUpdateFrame",
+        "noteRendererWakeupCallback",
+        "noteRendererFollowupCallback",
+    }) |name| {
+        errdefer std.debug.print("apprt.Surface does not declare the hook {s}\n", .{name});
+        try std.testing.expect(@hasDecl(apprt.Surface, name));
+    }
+}
+
 test "send wakes the renderer before waiting on a full mailbox" {
     const testing = std.testing;
     const alloc = testing.allocator;

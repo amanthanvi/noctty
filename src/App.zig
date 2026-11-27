@@ -1159,6 +1159,16 @@ fn receivesAppWideActions(surface: *apprt.Surface) bool {
     return true;
 }
 
+test "the Win32 runtime declares every hook this file probes by name" {
+    // `@hasDecl` is false for a declaration that is not `pub`, so a hook
+    // that loses `pub`, or its name, turns its call off without a compile
+    // error (tooling.md: 2026-11-06 FACADE-S8-HASDECL, 2026-11-26
+    // HASDECL-PRIVATE-017).
+    if (comptime @import("build_config.zig").app_runtime != .win32) return error.SkipZigTest;
+    try std.testing.expect(@hasDecl(apprt.App, "holdLastWindowQuit"));
+    try std.testing.expect(@hasDecl(apprt.Surface, "receivesAppWideActions"));
+}
+
 /// Calls `visitor.visit(item)` for each item of `list` as it stood at the
 /// call, in order, that `visitor.receives(item)`. A visit can remove items
 /// and add some: an item that is gone when its turn comes is skipped, and

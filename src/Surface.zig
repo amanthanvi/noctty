@@ -11773,3 +11773,26 @@ test "promptClickRelativeRow" {
         try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
     }
 }
+
+test "Surface: the Win32 runtime declares every hook this file probes by name" {
+    // `@hasDecl` is false for a declaration that is not `pub`, so a hook
+    // that loses `pub`, or its name, turns its call off without a compile
+    // error (tooling.md: 2026-11-06 FACADE-S8-HASDECL, 2026-11-26
+    // HASDECL-PRIVATE-017). `noteBenchmarkFocusChange` is probed too and
+    // has never been declared (FACADE-S8-HASDECL).
+    if (comptime build_config.app_runtime != .win32) return error.SkipZigTest;
+    inline for (.{
+        "setBenchmarkMemoryGeometry",
+        "noteBenchmarkIoReaderSpawned",
+        "noteBenchmarkIoThreadSpawned",
+        "noteBenchmarkMemoryStage",
+        "publishBenchmarkMemorySurfaceId",
+        "noteBenchmarkRendererThreadSpawned",
+        "requestWindowVisibility",
+        "noteRendererCoreWakeupNotify",
+        "receivesAppWideActions",
+    }) |name| {
+        errdefer std.debug.print("apprt.Surface does not declare the hook {s}\n", .{name});
+        try std.testing.expect(@hasDecl(apprt.Surface, name));
+    }
+}

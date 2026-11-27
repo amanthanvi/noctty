@@ -24,10 +24,11 @@ const max_dimension = 10000;
 /// Maximum size in bytes, taken from Kitty.
 const max_size = 400 * 1024 * 1024; // 400MB
 
-/// Maximum length in bytes of a file medium path. Zig 0.15.2 converts a
-/// Windows path into a fixed buffer of PATH_MAX_WIDE WTF-16 units without
-/// checking that it fits (`sliceToPrefixedFileW`), and a WTF-8 byte is at
-/// most one unit, so a path no longer than this always fits.
+/// Maximum length in bytes of a file medium path. Zig converts a Windows
+/// path into a fixed buffer of PATH_MAX_WIDE WTF-16 units without checking
+/// that it fits (`sliceToPrefixedFileW`, in `std.Io.Threaded` on 0.17.1),
+/// and a WTF-8 byte is at most one unit, so a path no longer than this
+/// always fits.
 const max_path_len = if (builtin.target.os.tag == .windows)
     std.os.windows.PATH_MAX_WIDE
 else

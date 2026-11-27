@@ -7,9 +7,10 @@ pub const Options = struct {
     corpus: []const []const u8,
 };
 
-/// Deterministic mutation campaign for toolchains whose continuous fuzzer can
-/// assert while shrinking a failing input to zero bytes. Inputs are always
-/// non-empty, iteration and allocation counts are fixed, and every even case
+/// Deterministic mutation campaign, first written for Zig 0.15.2, whose
+/// continuous fuzzer could assert while shrinking a failing input to zero
+/// bytes (0.17.1's skips an empty seed: docs/security-audit-paste-paths.md,
+/// Fuzzing). Inputs are always non-empty, iteration and allocation counts are fixed, and every even case
 /// mutates a valid or interesting corpus entry rather than starting from noise.
 pub fn run(
     context: anytype,

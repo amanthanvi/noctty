@@ -28,8 +28,9 @@ reading step under [Self-Correction Log](#self-correction-log).
     whose fully qualified name (file path, `.test.`, test name) contains the
     token, for quick iteration; it is not evidence on its own. Read the
     count: the `N/M tests passed` line counts the matching tests plus about
-    70 unnamed `test { ... }` blocks that no filter excludes, so a token that
-    matches nothing still reports about 70 passes, not zero. Use `ConPTY` to
+    90 unnamed `test { ... }` blocks that no filter excludes (87 at 1B.6),
+    so a token that matches nothing still reports about 90 passes, not
+    zero. Use `ConPTY` to
     reach the probe tests in `src/pty_transport_probe.zig`. A filtered build
     compiles the whole tree, about a minute.
     `Build Summary: 41/41 steps succeeded` counts build steps, not tests.
@@ -261,7 +262,8 @@ that govern each symbol you change, or that none does.
   uses, `stackUse` in `os/main.zig`, `win32_prefixed_path.convert`'s frame
   among it, including the reparse walk the kitty
   file open runs there: `os/local_path.zig` `walk`, `openRoot`,
-  `readLinkTarget`) and write pool in
+  `readLinkTarget`; and the stacks of the global `Io.Threaded` instance's
+  workers, `src/global.zig` `io_impl`) and write pool in
   `termio/Exec.zig`, `ResizePseudoConsole` and the renderer lock
   `Termio.resize` holds across it, in-box conhost
   versus the bundled `conpty.dll`/`OpenConsole.exe`
@@ -570,7 +572,8 @@ that govern each symbol you change, or that none does.
   `origin.Derivation` at `.automatic`,
   `useRecovery`, the queries `defaultProfile`, `nocttyCommand`,
   `commandLineNamesProfile`, `filesDefine` and `defaultProfileForKey`, and
-  `keepSources`), profile
+  `keepSources`; the process environment it reads: `src/global.zig`
+  `environ`, `environMap` and `syncEnviron`, `os/env.zig` `setenv`), profile
   discovery and user-defined profiles (`src/config/windows_shell.zig`: the
   `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
   `verbatimCommandLine`, `arrangeProfiles`, profile key equality
@@ -827,8 +830,10 @@ that govern each symbol you change, or that none does.
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
   `addTestRuns` in `build.zig`, and the names tests share across processes), the
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
-  `std.Progress.lockStdErr`, the search-thread tests in
-  `src/terminal/search/Thread.zig`), the test exe's isolated children and
+  `std.debug.lockStderr`, 0.15.2's `std.Progress.lockStdErr`, the
+  search-thread tests in `src/terminal/search/Thread.zig`), a test that
+  can hang and its watchdog (`TestMouseSurface.click` in `src/Surface.zig`;
+  a re-entered `std.Io.Mutex`), the test exe's isolated children and
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
   `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
   `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
