@@ -2,8 +2,9 @@
 # docs/agents/log/build-release-ci.md). On Zig 0.17 the first variable a Run step sets clones
 # `b.graph.environ_map` into the step, and the configure process writes every step, that copy
 # included, into the cached build configuration under `.zig-cache`. A later upstream merge must not
-# bring such a call back silently: any mention of these Run members, or any other mention of an
-# `environ_map` field, in the code of a build file fails here. The build files are `build.zig`, every
+# bring such a call back silently: any mention of these Run members, any other mention of an
+# `environ_map` field, or any `@field` whose name is not one string literal (read or written, council W1)
+# but the reviewed ones, in the code of a build file fails here. The build files are `build.zig`, every
 # `pkg/` build file, every file their local `@import` graph reaches (council F1: a helper the build
 # script imports, however it names std), and every other Zig file under `src/` or `pkg/` that names
 # `std.Build` (`src/build/`, `src/differential_oracle_build.zig`, `pkg/apple-sdk/native_link.zig`).
@@ -39,9 +40,8 @@ function Remove-BuildEnvironmentNonCode([string] $Text, [switch] $KeepStrings) {
 # clearEnvironment replaces it), named in any way (a call, a reference called later, `@call`, or a
 # string, as `@field(Run, "setEnvironmentVariable")` names one: council H3, so these read the
 # strings-kept text); any mention of an `environ_map` field but the allowed ones, however the receiver
-# is spelled (a write, a read, an address taken for a later write or a swap); the field named as a
-# string, but in `@hasField`; and a `@field` write whose field name is not a literal, which could be
-# `environ_map`.
+# is spelled (a write, a read, an address taken for a later write or a swap); and the field named as a
+# string, but in `@hasField`. A `@field` whose name is computed is checked apart, below.
 $script:BuildEnvironmentCopyForms = @(
     @{ Name = 'setEnvironmentVariable'; Pattern = '\bsetEnvironmentVariable\b'; KeepStrings = $true }
     @{ Name = 'removeEnvironmentVariable'; Pattern = '\bremoveEnvironmentVariable\b'; KeepStrings = $true }
@@ -51,18 +51,57 @@ $script:BuildEnvironmentCopyForms = @(
     # `setField(run, .environ_map, &env)` argument does not (council H3).
     @{ Name = 'environ_map mention'; Pattern = '(?<!\bgraph\s*)\.\s*environ_map\b(?!\s*:)'; HostInit = $true; OptionsField = $true }
     @{ Name = 'environ_map named'; Pattern = '(?<!@hasField\s*\([^()]*(?:\([^()]*\))?[^()]*,\s*)"environ_map"'; KeepStrings = $true }
-    # In every file the check reads (council G1: an imported `anytype` helper could write a step's field by
-    # a computed name), but the reviewed sites below.
-    @{ Name = 'computed @field write'; Pattern = '@field\s*\((?:[^()]|\([^()]*\))*,\s*[A-Za-z_][A-Za-z0-9_.]*\s*\)\s*=(?!=)'; Reviewed = $true }
 )
 
-# Computed-name `@field` writes read and kept, each by file, its code text and its count: anything else,
-# another site or another of these, fails.
-$script:BuildEnvironmentReviewedFieldWrites = @(
+# A `@field` whose second argument is anything but one plain string literal could name `environ_map`, read or
+# written (an address taken, a swap, an indexed, parenthesized, `@tagName`, `++` or `comptime` name: council
+# G1 and W1). Each one in every file the check reads fails, but the reviewed sites below: each by file, its
+# call's text (whitespace collapsed) and how many it holds. Another site, another of these, or a reviewed site
+# that holds fewer than its count (a stale entry) fails.
+$script:BuildEnvironmentReviewedFieldNames = @(
     # `Options.parse`'s feature list fills its own `Features` struct, by the names `@typeInfo(Features)` gives
-    # it (`inline for`), "all" and each named one: no step, no environment.
-    @{ Path = 'src/terminal/build_options.zig'; Text = '@field(result, field)'; Count = 2 }
+    # it (`inline for`), "all" and each named one; `add` reads it back the same way: no step, no environment.
+    @{ Path = 'src/terminal/build_options.zig'; Text = '@field(result, field)'; Uses = 2 }
+    @{ Path = 'src/terminal/build_options.zig'; Text = '@field(self.features, field)'; Uses = 1 }
+    # The man page step picks its generator's `ExeEntrypoint` tag by name, a read of a type's decl.
+    @{ Path = 'src/build/GhosttyDocs.zig'; Text = '@field(Config.ExeEntrypoint, "mdgen_" ++ manpage.name ++ "_" ++ manpage.section,)'; Uses = 1 }
+    # Host tools (they run in their own process) read help strings by the field names they iterate.
+    @{ Path = 'src/build/mdgen/mdgen.zig'; Text = '@field(help_strings.Config, field)'; Uses = 1 }
+    @{ Path = 'src/build/mdgen/mdgen.zig'; Text = '@field(help_strings.Action, field)'; Uses = 1 }
+    @{ Path = 'src/build/mdgen/mdgen.zig'; Text = '@field(help_strings.KeybindAction, field)'; Uses = 1 }
+    @{ Path = 'src/build/webgen/main_commands.zig'; Text = '@field(help_strings.Action, field)'; Uses = 1 }
+    @{ Path = 'src/build/webgen/main_config.zig'; Text = '@field(help_strings.Config, field)'; Uses = 1 }
 )
+
+# Each `@field(` in `$Code` (strings blanked, so a comma or parenthesis in a string is not read), with its
+# offset, its call's text from `$WithStrings` (whitespace collapsed) and whether its second top-level argument
+# is one plain string literal.
+function Get-BuildEnvironmentFieldCalls([string] $Code, [string] $WithStrings) {
+    $delimiters = [regex]::new('[()\[\]{},]')
+    foreach ($head in [regex]::Matches($Code, '@field\s*\(')) {
+        $start = $head.Index + $head.Length
+        $depth = 0
+        $commas = [System.Collections.Generic.List[int]]::new()
+        $end = -1
+        foreach ($d in $delimiters.Matches($Code, $start)) {
+            $c = $d.Value
+            if ($c -eq ',') { if ($depth -eq 0) { $commas.Add($d.Index) } }
+            elseif ($c -eq '(' -or $c -eq '[' -or $c -eq '{') { $depth++ }
+            elseif ($depth -eq 0) { $end = $d.Index; break }
+            else { $depth-- }
+        }
+        if ($end -lt 0) { $end = $Code.Length - 1 }
+        $literal = $false
+        if ($commas.Count -ge 1) {
+            $argEnd = if ($commas.Count -ge 2) { $commas[1] } else { $end }
+            $name = $WithStrings.Substring($commas[0] + 1, $argEnd - $commas[0] - 1).Trim()
+            $literal = $name -cmatch '^"(?:\\.|[^"\\\n])*"$'
+        }
+        $text = [regex]::Replace($WithStrings.Substring($head.Index, $end + 1 - $head.Index), '\s+', ' ')
+        $text = [regex]::Replace([regex]::Replace($text, '\(\s', '('), '\s([),])', '$1')
+        [pscustomobject]@{ Index = $head.Index; Text = $text; Literal = $literal }
+    }
+}
 
 # The body of `main` when it takes a `std.process.Init` (a host tool's entry point): its start and end
 # offsets in `$Code`, or $null.
@@ -78,7 +117,9 @@ function Get-BuildEnvironmentHostMain([string] $Code) {
     return $null
 }
 
-function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path) {
+# Each hit as `path:line: form`. A reviewed computed `@field` passes up to its count, and is counted into
+# `$Seen` (keyed `path|text`) for the staleness check.
+function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path, [hashtable] $Seen = @{}) {
     $code = Remove-BuildEnvironmentNonCode $ZigText
     $withStrings = Remove-BuildEnvironmentNonCode $ZigText -KeepStrings
     # A host tool's own process environment: `init.environ_map` inside the body of the `main` that takes
@@ -87,23 +128,37 @@ function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path) {
     $hostMain = Get-BuildEnvironmentHostMain $code
     foreach ($form in $script:BuildEnvironmentCopyForms) {
         $subject = if ($form['KeepStrings']) { $withStrings } else { $code }
-        $reviewed = @{}
         foreach ($hit in [regex]::Matches($subject, $form.Pattern)) {
             if ($form['HostInit'] -and $null -ne $hostMain -and $hit.Index -gt $hostMain[0] -and $hit.Index -lt $hostMain[1] -and
                 $subject.Substring(0, $hit.Index) -match '\binit\s*$') { continue }
             if ($form['OptionsField'] -and $subject.Substring([Math]::Max(0, $hit.Index - 64), [Math]::Min(64, $hit.Index)) -match '[{,]\s*$' -and
                 $subject.Substring($hit.Index + $hit.Length) -match '^\s*=(?!=)') { continue }
-            if ($form['Reviewed']) {
-                $text = [regex]::Replace($hit.Value, '\s*=$', '')
-                $site = @($script:BuildEnvironmentReviewedFieldWrites | Where-Object { $_.Path -ceq $Path -and $_.Text -ceq $text })
-                if ($site.Count -eq 1) {
-                    $reviewed[$text] = 1 + $(if ($reviewed.ContainsKey($text)) { $reviewed[$text] } else { 0 })
-                    if ($reviewed[$text] -le $site[0]['Count']) { continue }
-                }
-            }
             $line = ($subject.Substring(0, $hit.Index) -split "`n").Count
             "${Path}:${line}: $($form.Name)"
         }
+    }
+    if (-not $code.Contains('@field')) { return }
+    $held = @{}
+    foreach ($call in @(Get-BuildEnvironmentFieldCalls -Code $code -WithStrings $withStrings)) {
+        if ($call.Literal) { continue }
+        $site = @($script:BuildEnvironmentReviewedFieldNames | Where-Object { $_['Path'] -ceq $Path -and $_['Text'] -ceq $call.Text })
+        if ($site.Length -eq 1) {
+            $key = "$Path|$($call.Text)"
+            $held[$key] = 1 + $(if ($held.ContainsKey($key)) { $held[$key] } else { 0 })
+            $Seen[$key] = $held[$key]
+            if ($held[$key] -le $site[0]['Uses']) { continue }
+        }
+        $line = ($code.Substring(0, $call.Index) -split "`n").Count
+        "${Path}:${line}: computed @field name"
+    }
+}
+
+# A reviewed computed `@field` that holds fewer than its count in `$Seen` is stale: the list stays exact.
+function Get-BuildEnvironmentStaleReviews([hashtable] $Seen) {
+    foreach ($site in $script:BuildEnvironmentReviewedFieldNames) {
+        $key = "$($site['Path'])|$($site['Text'])"
+        $held = if ($Seen.ContainsKey($key)) { $Seen[$key] } else { 0 }
+        if ($held -lt $site['Uses']) { "$($site['Path']): reviewed $($site['Text']) for $($site['Uses']) and it holds $held" }
     }
 }
 
@@ -152,17 +207,32 @@ function Get-BuildEnvironmentFiles([string] $Root) {
     return , @($files)
 }
 
-function Assert-NoBuildEnvironmentCopies([string] $Root) {
+# Each build file's text, by its `/`-separated path relative to $Root.
+function Get-BuildEnvironmentTexts([string] $Root) {
+    $texts = [ordered]@{}
+    # Assigned first: the comma-wrapped array would reach a `foreach` over the call as one item.
     $files = Get-BuildEnvironmentFiles $Root
-    if ($files.Count -lt 3) { throw "The build environment check found only $($files.Count) build files under $Root." }
-    $hits = @(foreach ($file in $files) {
-            $relative = [System.IO.Path]::GetRelativePath($Root, $file).Replace('\', '/')
-            Get-BuildEnvironmentCopyHits -ZigText (Get-Content -LiteralPath $file -Raw) -Path $relative
-        })
-    if ($hits.Count -gt 0) {
-        throw "A build file copies the environment into a Run step (ZIG017-RUN-ENV-01; pass the value as an argument): $($hits -join '; ')"
+    foreach ($file in $files) {
+        $texts[[System.IO.Path]::GetRelativePath($Root, $file).Replace('\', '/')] = Get-Content -LiteralPath $file -Raw
     }
-    return $files.Count
+    return $texts
+}
+
+# Every hit in the texts, then every stale reviewed `@field`.
+function Get-BuildEnvironmentProblems([System.Collections.IDictionary] $Texts) {
+    $seen = @{}
+    foreach ($path in $Texts.Keys) { Get-BuildEnvironmentCopyHits -ZigText $Texts[$path] -Path $path -Seen $seen }
+    Get-BuildEnvironmentStaleReviews -Seen $seen
+}
+
+function Assert-NoBuildEnvironmentCopies([string] $Root, [System.Collections.IDictionary] $Texts = $null) {
+    if ($null -eq $Texts) { $Texts = Get-BuildEnvironmentTexts $Root }
+    if ($Texts.Count -lt 3) { throw "The build environment check found only $($Texts.Count) build files under $Root." }
+    $problems = @(Get-BuildEnvironmentProblems $Texts)
+    if ($problems.Count -gt 0) {
+        throw "A build file copies the environment into a Run step (ZIG017-RUN-ENV-01; pass the value as an argument): $($problems -join '; ')"
+    }
+    return $Texts.Count
 }
 
 # Controls: each form is caught in code, none in a comment or a string, and the allowed forms pass.
@@ -191,7 +261,17 @@ foreach ($sample in @(
         # Council H3: a member named as a string, and an environ_map argument that is no options field.
         '@field(Run, "setEnvironmentVariable")(run, "IS_STATIC", "1");',
         '_ = @call(.auto, @field(Run, "getEnvMap"), .{run});',
-        'setField(run, .environ_map, &env);'
+        'setField(run, .environ_map, &env);',
+        # Council W1: a computed name in any form, read or written.
+        '@field(run, names[0]) = &env;',
+        'const p = &@field(run, name); p.* = &env;',
+        '@field(run, @tagName(f)) = &env;',
+        '@field(run, (name)) = &env;',
+        'std.mem.swap(?*std.process.Environ.Map, &@field(run, name), &other);',
+        '@field(run, "environ" ++ "_map") = &env;',
+        '@field(run, @as([]const u8, name)) = &env;',
+        '@field(run, comptime name) = &env;',
+        'const m = @field(run, name);'
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $sample`n}`n" -Path 'control.zig').Count -ne 1) {
         throw "The build environment check missed a control: $sample"
@@ -210,7 +290,11 @@ foreach ($allowed in @(
         'const result = std.process.run(arena, io, .{ .argv = argv, .environ_map = &env });',
         'const modern = @hasField(@TypeOf(b.graph.*), "environ_map");',
         'const env = &b.graph.environ_map;',
-        '_ = env.swapRemove(name);'
+        '_ = env.swapRemove(name);',
+        # Council W1: a literal name, a comma or parenthesis inside it, and a call split over lines.
+        'const argv = @field(run, "argv");',
+        'const x = @field(options, "a,(b)");',
+        "const y = @field(`n        options,`n        `"cwd`",`n    );"
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $allowed`n}`n" -Path 'control.zig').Count -ne 0) {
         throw "The build environment check flagged an allowed form: $allowed"
@@ -265,5 +349,16 @@ try {
     if (Test-Path -LiteralPath $discoveryRoot) { [IO.Directory]::Delete($discoveryRoot, $true) }
 }
 
-$buildEnvironmentFiles = Assert-NoBuildEnvironmentCopies -Root $repoRoot
+$buildEnvironmentTexts = Get-BuildEnvironmentTexts $repoRoot
+# Council W1: a reviewed site that has gone away fails (the read in build_options.zig's `add`, removed).
+$optionsPath = 'src/terminal/build_options.zig'
+$staleTexts = [ordered]@{} + $buildEnvironmentTexts
+$staleTexts[$optionsPath] = $buildEnvironmentTexts[$optionsPath].Replace('var value = @field(self.features, field);', 'var value = self.features.all;')
+if ([string]::Equals($staleTexts[$optionsPath], $buildEnvironmentTexts[$optionsPath], [StringComparison]::Ordinal)) { throw 'The stale review control changed nothing in build_options.zig.' }
+if (@(Get-BuildEnvironmentProblems $staleTexts) -cnotcontains "${optionsPath}: reviewed @field(self.features, field) for 1 and it holds 0") {
+    throw 'The build environment check kept a reviewed @field site that has gone away.'
+}
+$buildEnvironmentControls++
+
+$buildEnvironmentFiles = Assert-NoBuildEnvironmentCopies -Root $repoRoot -Texts $buildEnvironmentTexts
 Write-Host "Build environment copies: none in $buildEnvironmentFiles build files; $buildEnvironmentControls controls"
