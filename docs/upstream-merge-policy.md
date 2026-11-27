@@ -564,10 +564,11 @@ with a successful Test run for that exact SHA.
 
 If that run fails, start one new Test run (the dispatch below): the tree has
 already passed, so a first failure is not yet a regression. The budget is
-counted in runs, since a new run runs every job again: each failed run whose
-failed jobs had passed every earlier run gets one new run. A job that fails in
-two runs has reproduced. A job that passed before and fails in a new run has
-failed once, so it gets the next new run, but its earlier pass does not count:
+counted in runs, since a new run runs every job again. A failed run gets one
+new run only when each job that failed in it has no earlier failure
+attributable to the tree (the two kinds below that are not the tree's do not
+count). A job's earlier passes do not count either: a job that failed, then
+passed, then failed again has reproduced, and takes the fix route below.
 `release.yml` takes only a run whose jobs all passed. A job that never reached a verdict
 (a hosted outage, a cancellation) has not failed the tree: start it again when
 the runner is back, as often as that takes, and the prerelease waits for it.
