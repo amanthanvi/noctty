@@ -2521,6 +2521,9 @@ test "storage: adding placement reclaims garbage placements" {
     try s.addPlacement(io, alloc, t.screens.active, 1, 0, .{
         .location = .{ .pin = old_pin },
     });
+    try s.addPlacement(io, alloc, t.screens.active, 1, 0, .{
+        .location = .{ .virtual = {} },
+    });
     old_pin.garbage = true;
 
     const new_pin = try trackPin(&t, .{ .x = 1, .y = 1 });
@@ -2528,7 +2531,12 @@ test "storage: adding placement reclaims garbage placements" {
         .location = .{ .pin = new_pin },
     });
 
-    try testing.expectEqual(@as(usize, 1), s.placements.count());
+    // The garbage placement is gone with its pin; the virtual one stays.
+    try testing.expectEqual(@as(usize, 2), s.placements.count());
+    try testing.expect(s.placements.get(.{
+        .image_id = 1,
+        .placement_id = .{ .tag = .internal, .id = 1 },
+    }).?.location == .virtual);
     try testing.expectEqual(
         tracked + 1,
         t.screens.active.pages.countTrackedPins(),
@@ -2537,7 +2545,7 @@ test "storage: adding placement reclaims garbage placements" {
         new_pin,
         s.placements.get(.{
             .image_id = 1,
-            .placement_id = .{ .tag = .internal, .id = 1 },
+            .placement_id = .{ .tag = .internal, .id = 2 },
         }).?.location.pin,
     );
 }
