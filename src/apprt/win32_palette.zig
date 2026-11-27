@@ -162,8 +162,39 @@ test "default actions populate universal catalog with unique stable IDs" {
     var payload_storage: [command.defaults.len]catalog.Payload = undefined;
     var universal_catalog = try catalog.Catalog.init(&item_storage, &payload_storage);
     try universal_catalog.appendActionSnapshot(Snapshot.fromDefaults());
-    try std.testing.expectEqual(command.defaults.len, universal_catalog.items().len);
+    // Every default but upstream's GTK-only `open_config:new_window`
+    // (`catalog.listsAction`), which the defaults still hold.
+    var left_out: usize = 0;
+    for (command.defaultsC) |cval| {
+        if (!catalog.listsAction(std.mem.span(cval.action))) left_out += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), left_out);
+    try std.testing.expectEqual(command.defaults.len - 1, universal_catalog.items().len);
     try std.testing.expect(universal_catalog.items().len > 0);
+}
+
+test "the Win32 palette lists Open Config once, the Settings row, not Open Config in New Terminal Window" {
+    const snap = Snapshot.fromDefaults();
+    var item_storage: [command.defaults.len]catalog.Item = undefined;
+    var payload_storage: [command.defaults.len]catalog.Payload = undefined;
+    var universal_catalog = try catalog.Catalog.init(&item_storage, &payload_storage);
+    try universal_catalog.appendActionSnapshot(snap);
+
+    var open_config_rows: usize = 0;
+    for (universal_catalog.items(), payload_storage[0..universal_catalog.items().len]) |item, payload| {
+        const snapshot_index = payload.action.snapshot_index.?;
+        try std.testing.expectEqualStrings(snap.commands[snapshot_index].title, item.title);
+        switch (snap.commands[snapshot_index].action) {
+            .open_config => |mode| {
+                try std.testing.expectEqual(.os_open, mode);
+                try std.testing.expectEqualStrings("open_config:os_open", payload.action.action);
+                open_config_rows += 1;
+            },
+            else => {},
+        }
+        try std.testing.expect(!std.mem.eql(u8, item.title, "Open Config in New Terminal Window"));
+    }
+    try std.testing.expectEqual(@as(usize, 1), open_config_rows);
 }
 
 test {

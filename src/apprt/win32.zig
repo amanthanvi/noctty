@@ -1459,9 +1459,12 @@ pub const RecoveryLedgerLock = struct {
     const lock_range_off: windows.LARGE_INTEGER = 0;
     const lock_range_len: windows.LARGE_INTEGER = 1;
 
-    /// `std.fs.File.tryLock` does not compile on Windows in Zig 0.15.2 (its
-    /// `.none` arm returns `void` from a `!bool` function), so the NT call is
-    /// made directly with the same one-byte range `std` uses.
+    /// `std.fs.File.tryLock` did not compile on Windows in Zig 0.15.2 (its
+    /// `.none` arm returned `void` from a `!bool` function), so the NT call is
+    /// made directly with the same one-byte range `std` uses. Zig 0.17.1's
+    /// `std.Io.File.tryLock` works on Windows, with that range (measured:
+    /// item (4) of the 2026-11-02 SETTINGS-POLISH-2 part B entry in
+    /// config.md), so this could become `file.tryLock(io, .exclusive)`.
     fn tryLockExclusive(file: std.Io.File) !bool {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
         sys.lockFile(

@@ -1157,7 +1157,7 @@ test "integration.ps1 writes OSC 133 B from the line reader" {
         u8,
         integration_script,
         readline,
-        "__ghostty_write_osc \"${Global:__ghostty_esc}[<99u${Global:__ghostty_esc}[>4;0m${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}\"",
+        "__ghostty_write_osc \"${Global:__ghostty_esc}[<99u${Global:__ghostty_esc}[>4;0m${Global:__ghostty_esc}[?5522l${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}\"",
     ).?;
     try std.testing.expect(gate < d_write);
     try std.testing.expect(d_write < p_write);
@@ -1799,8 +1799,8 @@ test "integration.ps1 changes only with its revision" {
     // to the revision and SHA-256 it now has, which puts the question of
     // whether to bump in front of the author and the reviewer; it cannot judge
     // whether the change needed one.
-    const pinned_revision: u32 = 2;
-    const pinned_sha256 = "0c93656fd80385c9f24d67091573ab613f3bdf7c779c7fb95309984dacfcd279";
+    const pinned_revision: u32 = 3;
+    const pinned_sha256 = "0f264adf485127e1dd6aade2a6d66719c5ac10ad2a8a34030fb0aee244edb3f4";
     const hex = std.fmt.bytesToHex(integration_script_sha256, .lower);
     try std.testing.expectEqual(@as(?u32, pinned_revision), scriptRevision(integration_script));
     try std.testing.expectEqualStrings(pinned_sha256, &hex);

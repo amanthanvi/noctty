@@ -292,8 +292,10 @@ that govern each symbol you change, or that none does.
   `windows_visual_studio.devShellPrelude`, `win32_powershell_install.zig`):
   the OSC 133 and OSC 7 marks a shell emits and the directory and host names
   in them, Nushell's `@complete external` floor, PSReadLine hooks, execution
-  policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty or
-  modifyOtherKeys flags set (`CSI <99u`, `CSI >4;0m`).
+  policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty
+  keyboard, modifyOtherKeys or Kitty paste-event modes set (`CSI <99u`,
+  `CSI >4;0m`, `CSI ?5522l`; cmd's PROMPT: `buildCmdPrompt`,
+  `cmd_prompt_prefix`).
 - [terminal-core.md](docs/agents/log/terminal-core.md): `src/terminal/` (VT
   parser limits, `PageList` and its page serials (`page_serial_epoch`,
   `nodeIsValid`, the source renewal in `PageList.split`), `PageList.Node`'s
@@ -453,7 +455,9 @@ that govern each symbol you change, or that none does.
   placement cache (`ChildPlacement`, `applyChromeChildRect` in
   `win32/child_window.zig`), tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
-  palette (`win32_palette.zig`, `win32/palette_controller.zig`, its live
+  palette (`win32_palette.zig`, `win32/palette_controller.zig`, the
+  commands it leaves out of upstream's defaults: `listsAction` in
+  `win32_palette_catalog.zig`, its live
   theme preview, one window's at a time (`Host.showOverlay`, which closes
   every other window's palette; `Surface.toggleTabOverview`, which closes
   what is open first like every overlay's open; the error

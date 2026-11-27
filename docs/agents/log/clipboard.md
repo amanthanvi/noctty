@@ -3,6 +3,7 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- 2026-11-26 KITTY-PASTE-EVENTS-01, trap (5): the shell integrations send `CSI ?5522l` beside `CSI <99u` and `CSI >4;0m` since the 2026-11-27 PASTE-EVENTS-RESET-01 entry (QR-61) in shell-integration.md.
 - The 2026-10-22 RDPCLIP-1 station trap's WinSta0 no-copy rule has one hosted-only exception: test-harnesses.md 2026-11-18 DIRECT-UPDATE-720-CONTROLS permits a fixed clipboard write on a disposable GitHub runner after noctty exits and its normal counter comparison passes, behind hosted/station/desktop gates. Developer-machine writes remain forbidden.
 - 2026-04-17 `win32_surface_drop_target.zig` (inline `IDropTarget` storage): superseded by the 2026-10-11 PKG-26 entry in input.md (`DropTarget` is allocated independently and refcounted).
 

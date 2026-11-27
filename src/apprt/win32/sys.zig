@@ -198,6 +198,141 @@ pub const CANDIDATEFORM = extern struct {
     rcArea: RECT,
 };
 
+// The x64 layouts of the Windows SDK's declarations (winuser.h, wingdi.h,
+// winnt.h, imm.h), none of them under a `pshpack*.h`, so naturally aligned.
+// Every size, and the offsets it lists, is what the 2026-11-26 ZIG017-PINS-01
+// entry in tooling.md measured with `zig cc`; the other offsets follow. The
+// fork's `MSG.lPrivate` is declared by the SDK only under `_MAC`: here it
+// takes what is the SDK's tail padding, so the size is the SDK's.
+test "win32 sys window, font, version and IME structs match the SDK layout" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(PIXELFORMATDESCRIPTOR));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(PIXELFORMATDESCRIPTOR, "nSize"));
+    try std.testing.expectEqual(@as(usize, 2), @offsetOf(PIXELFORMATDESCRIPTOR, "nVersion"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(PIXELFORMATDESCRIPTOR, "dwFlags"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(PIXELFORMATDESCRIPTOR, "iPixelType"));
+    try std.testing.expectEqual(@as(usize, 9), @offsetOf(PIXELFORMATDESCRIPTOR, "cColorBits"));
+    try std.testing.expectEqual(@as(usize, 10), @offsetOf(PIXELFORMATDESCRIPTOR, "cRedBits"));
+    try std.testing.expectEqual(@as(usize, 11), @offsetOf(PIXELFORMATDESCRIPTOR, "cRedShift"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(PIXELFORMATDESCRIPTOR, "cGreenBits"));
+    try std.testing.expectEqual(@as(usize, 13), @offsetOf(PIXELFORMATDESCRIPTOR, "cGreenShift"));
+    try std.testing.expectEqual(@as(usize, 14), @offsetOf(PIXELFORMATDESCRIPTOR, "cBlueBits"));
+    try std.testing.expectEqual(@as(usize, 15), @offsetOf(PIXELFORMATDESCRIPTOR, "cBlueShift"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PIXELFORMATDESCRIPTOR, "cAlphaBits"));
+    try std.testing.expectEqual(@as(usize, 17), @offsetOf(PIXELFORMATDESCRIPTOR, "cAlphaShift"));
+    try std.testing.expectEqual(@as(usize, 18), @offsetOf(PIXELFORMATDESCRIPTOR, "cAccumBits"));
+    try std.testing.expectEqual(@as(usize, 19), @offsetOf(PIXELFORMATDESCRIPTOR, "cAccumRedBits"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(PIXELFORMATDESCRIPTOR, "cAccumGreenBits"));
+    try std.testing.expectEqual(@as(usize, 21), @offsetOf(PIXELFORMATDESCRIPTOR, "cAccumBlueBits"));
+    try std.testing.expectEqual(@as(usize, 22), @offsetOf(PIXELFORMATDESCRIPTOR, "cAccumAlphaBits"));
+    try std.testing.expectEqual(@as(usize, 23), @offsetOf(PIXELFORMATDESCRIPTOR, "cDepthBits"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(PIXELFORMATDESCRIPTOR, "cStencilBits"));
+    try std.testing.expectEqual(@as(usize, 25), @offsetOf(PIXELFORMATDESCRIPTOR, "cAuxBuffers"));
+    try std.testing.expectEqual(@as(usize, 26), @offsetOf(PIXELFORMATDESCRIPTOR, "iLayerType"));
+    try std.testing.expectEqual(@as(usize, 27), @offsetOf(PIXELFORMATDESCRIPTOR, "bReserved"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(PIXELFORMATDESCRIPTOR, "dwLayerMask"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(PIXELFORMATDESCRIPTOR, "dwVisibleMask"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(PIXELFORMATDESCRIPTOR, "dwDamageMask"));
+
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(MSG));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(MSG, "hwnd"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(MSG, "message"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(MSG, "wParam"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(MSG, "lParam"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(MSG, "time"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(MSG, "pt"));
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(MSG, "lPrivate"));
+
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(DRAWITEMSTRUCT));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(DRAWITEMSTRUCT, "CtlType"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(DRAWITEMSTRUCT, "CtlID"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(DRAWITEMSTRUCT, "itemID"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(DRAWITEMSTRUCT, "itemAction"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(DRAWITEMSTRUCT, "itemState"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(DRAWITEMSTRUCT, "hwndItem"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(DRAWITEMSTRUCT, "hDC"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(DRAWITEMSTRUCT, "rcItem"));
+    try std.testing.expectEqual(@as(usize, 56), @offsetOf(DRAWITEMSTRUCT, "itemData"));
+
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(TRACKMOUSEEVENT));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(TRACKMOUSEEVENT, "cbSize"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(TRACKMOUSEEVENT, "dwFlags"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(TRACKMOUSEEVENT, "hwndTrack"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(TRACKMOUSEEVENT, "dwHoverTime"));
+
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(WINDOWPOS));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(WINDOWPOS, "hwnd"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(WINDOWPOS, "hwndInsertAfter"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(WINDOWPOS, "x"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(WINDOWPOS, "y"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(WINDOWPOS, "cx"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(WINDOWPOS, "cy"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(WINDOWPOS, "flags"));
+
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(NCCALCSIZE_PARAMS));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(NCCALCSIZE_PARAMS, "rgrc"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(NCCALCSIZE_PARAMS, "lppos"));
+
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(MINMAXINFO));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(MINMAXINFO, "ptReserved"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(MINMAXINFO, "ptMaxSize"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(MINMAXINFO, "ptMaxPosition"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(MINMAXINFO, "ptMinTrackSize"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(MINMAXINFO, "ptMaxTrackSize"));
+
+    try std.testing.expectEqual(@as(usize, 92), @sizeOf(LOGFONTW));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(LOGFONTW, "lfHeight"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(LOGFONTW, "lfWidth"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(LOGFONTW, "lfEscapement"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(LOGFONTW, "lfOrientation"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(LOGFONTW, "lfWeight"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(LOGFONTW, "lfItalic"));
+    try std.testing.expectEqual(@as(usize, 21), @offsetOf(LOGFONTW, "lfUnderline"));
+    try std.testing.expectEqual(@as(usize, 22), @offsetOf(LOGFONTW, "lfStrikeOut"));
+    try std.testing.expectEqual(@as(usize, 23), @offsetOf(LOGFONTW, "lfCharSet"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(LOGFONTW, "lfOutPrecision"));
+    try std.testing.expectEqual(@as(usize, 25), @offsetOf(LOGFONTW, "lfClipPrecision"));
+    try std.testing.expectEqual(@as(usize, 26), @offsetOf(LOGFONTW, "lfQuality"));
+    try std.testing.expectEqual(@as(usize, 27), @offsetOf(LOGFONTW, "lfPitchAndFamily"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(LOGFONTW, "lfFaceName"));
+
+    try std.testing.expectEqual(@as(usize, 504), @sizeOf(NONCLIENTMETRICSW));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(NONCLIENTMETRICSW, "cbSize"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(NONCLIENTMETRICSW, "iBorderWidth"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(NONCLIENTMETRICSW, "iScrollWidth"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(NONCLIENTMETRICSW, "iScrollHeight"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(NONCLIENTMETRICSW, "iCaptionWidth"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(NONCLIENTMETRICSW, "iCaptionHeight"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(NONCLIENTMETRICSW, "lfCaptionFont"));
+    try std.testing.expectEqual(@as(usize, 116), @offsetOf(NONCLIENTMETRICSW, "iSmCaptionWidth"));
+    try std.testing.expectEqual(@as(usize, 120), @offsetOf(NONCLIENTMETRICSW, "iSmCaptionHeight"));
+    try std.testing.expectEqual(@as(usize, 124), @offsetOf(NONCLIENTMETRICSW, "lfSmCaptionFont"));
+    try std.testing.expectEqual(@as(usize, 216), @offsetOf(NONCLIENTMETRICSW, "iMenuWidth"));
+    try std.testing.expectEqual(@as(usize, 220), @offsetOf(NONCLIENTMETRICSW, "iMenuHeight"));
+    try std.testing.expectEqual(@as(usize, 224), @offsetOf(NONCLIENTMETRICSW, "lfMenuFont"));
+    try std.testing.expectEqual(@as(usize, 316), @offsetOf(NONCLIENTMETRICSW, "lfStatusFont"));
+    try std.testing.expectEqual(@as(usize, 408), @offsetOf(NONCLIENTMETRICSW, "lfMessageFont"));
+    try std.testing.expectEqual(@as(usize, 500), @offsetOf(NONCLIENTMETRICSW, "iPaddedBorderWidth"));
+
+    try std.testing.expectEqual(@as(usize, 276), @sizeOf(RTL_OSVERSIONINFOW));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(RTL_OSVERSIONINFOW, "dwOSVersionInfoSize"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(RTL_OSVERSIONINFOW, "dwMajorVersion"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(RTL_OSVERSIONINFOW, "dwMinorVersion"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(RTL_OSVERSIONINFOW, "dwBuildNumber"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(RTL_OSVERSIONINFOW, "dwPlatformId"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(RTL_OSVERSIONINFOW, "szCSDVersion"));
+
+    try std.testing.expectEqual(@as(usize, 28), @sizeOf(COMPOSITIONFORM));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(COMPOSITIONFORM, "dwStyle"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(COMPOSITIONFORM, "ptCurrentPos"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(COMPOSITIONFORM, "rcArea"));
+
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(CANDIDATEFORM));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(CANDIDATEFORM, "dwIndex"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(CANDIDATEFORM, "dwStyle"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(CANDIDATEFORM, "ptCurrentPos"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(CANDIDATEFORM, "rcArea"));
+}
+
 pub const JOBOBJECTINFOCLASS = enum(i32) {
     basic_limit_information = 2,
     basic_process_id_list = 3,
@@ -556,6 +691,19 @@ pub const TOKEN_USER = extern struct {
 pub const TOKEN_MANDATORY_LABEL = extern struct {
     Label: SID_AND_ATTRIBUTES,
 };
+
+// winnt.h's x64 layouts, not under a `pshpack*.h` (ZIG017-PINS-01, tooling.md).
+test "win32 sys token structs match the SDK layout" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(SID_AND_ATTRIBUTES));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(SID_AND_ATTRIBUTES, "Sid"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(SID_AND_ATTRIBUTES, "Attributes"));
+
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(TOKEN_USER));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(TOKEN_USER, "User"));
+
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(TOKEN_MANDATORY_LABEL));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(TOKEN_MANDATORY_LABEL, "Label"));
+}
 
 pub extern "advapi32" fn OpenProcessToken(
     ProcessHandle: HANDLE,
@@ -1310,7 +1458,7 @@ pub fn openFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
         .RootDirectory = if (isAbsoluteWtf16(sub_path_w)) null else options.dir,
         // OBJ_CASE_INSENSITIVE is deliberately not set.
         .Attributes = if (options.sa) |ptr| blk: {
-            const inherit: u32 = if (@backingInt(ptr.bInheritHandle) == win32_types.TRUE) win32_types.OBJ_INHERIT else 0;
+            const inherit: u32 = if (@backingInt(ptr.bInheritHandle) != win32_types.FALSE) win32_types.OBJ_INHERIT else 0;
             break :blk inherit;
         } else 0,
         .ObjectName = &nt_name,
@@ -1768,6 +1916,38 @@ test "openFile keeps std's status mapping and flags" {
     // An absolute NT name ignores the directory: `\Device\Null` opens.
     const nul = try openFile(w("\\Device\\Null"), .{ .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE, .dir = tmp.dir.handle, .creation = win32_types.OPEN_EXISTING, .filter = .any });
     windows.CloseHandle(nul);
+}
+
+test "openFile makes the handle inheritable for any true bInheritHandle, not only TRUE" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    const kernel32 = struct {
+        extern "kernel32" fn GetHandleInformation(hObject: HANDLE, lpdwFlags: *DWORD) callconv(.winapi) BOOL;
+    };
+    const handle_flag_inherit: DWORD = 0x1;
+    // A BOOL is true when it is not 0; 1 is only the usual true.
+    const cases = [_]struct { value: c_int, inherits: bool }{
+        .{ .value = 0, .inherits = false },
+        .{ .value = 1, .inherits = true },
+        .{ .value = 2, .inherits = true },
+        .{ .value = -1, .inherits = true },
+    };
+    for (cases) |case| {
+        var sa: SECURITY_ATTRIBUTES = .{
+            .nLength = @sizeOf(SECURITY_ATTRIBUTES),
+            .bInheritHandle = @fromBackingInt(case.value),
+            .lpSecurityDescriptor = null,
+        };
+        const nul = try openFile(w("\\Device\\Null"), .{
+            .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
+            .sa = &sa,
+            .creation = win32_types.OPEN_EXISTING,
+            .filter = .any,
+        });
+        defer windows.CloseHandle(nul);
+        var flags: DWORD = 0;
+        try std.testing.expect(kernel32.GetHandleInformation(nul, &flags) != win32_types.FALSE);
+        try std.testing.expectEqual(case.inherits, flags & handle_flag_inherit != 0);
+    }
 }
 
 test "deviceIoControl maps a refused control code the way std did" {

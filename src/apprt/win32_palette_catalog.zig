@@ -143,19 +143,24 @@ pub const Catalog = struct {
         // Preflight the complete batch so errors never leave a partial catalog.
         for (snapshot.commands, snapshot.cvals, 0..) |command, cval, index| {
             const action = std.mem.span(cval.action);
+            if (!listsAction(action)) continue;
             const id = actionStableId(command.title, action);
             if (self.containsId(id)) return error.DuplicateStableId;
             var previous: usize = 0;
             while (previous < index) : (previous += 1) {
                 const previous_action = std.mem.span(snapshot.cvals[previous].action);
+                if (!listsAction(previous_action)) continue;
                 if (actionStableId(snapshot.commands[previous].title, previous_action).eql(id)) {
                     return error.DuplicateStableId;
                 }
             }
         }
 
+        // A command left out leaves no row, so a row's catalog index is not
+        // its snapshot index past it: the payload carries the snapshot's.
         for (snapshot.commands, snapshot.cvals, 0..) |command, cval, index| {
             const action = std.mem.span(cval.action);
+            if (!listsAction(action)) continue;
             const descriptor: Descriptor = .{
                 .item = .{
                     .id = actionStableId(command.title, action),
@@ -315,6 +320,18 @@ pub const Catalog = struct {
     }
 };
 
+/// Whether the Win32 palette lists a command whose action text is `action`
+/// (`Command.C.action`). Upstream 1.4 lists `open_config:new_window` ("Open
+/// Config in New Terminal Window", the config in $EDITOR or $VISUAL in a new
+/// terminal window), a GTK-only behaviour: Win32's `.open_config` handler
+/// ignores the parameter and opens Settings, so that row would only repeat
+/// the `open_config` row. The palette leaves it out, a recent action of it
+/// too; a keybind to `open_config:new_window` still parses and opens what
+/// `open_config` opens.
+pub fn listsAction(action: []const u8) bool {
+    return !std.mem.eql(u8, action, "open_config:new_window");
+}
+
 pub fn actionStableId(title: []const u8, action: []const u8) universal.StableId {
     const title_hash = std.hash.Wyhash.hash(0x7769_6e67_686f_7374, title);
     return .{
@@ -363,6 +380,7 @@ fn validateDescriptor(descriptor: Descriptor) Error!void {
 }
 
 fn findAction(snapshot: anytype, action: []const u8) ?usize {
+    if (!listsAction(action)) return null;
     for (snapshot.cvals, 0..) |cval, index| {
         if (std.mem.eql(u8, std.mem.span(cval.action), action)) return index;
     }
@@ -593,6 +611,67 @@ test "recent history accepts only exact current palette actions" {
     const payload = catalog.payloadFor(results[0]).?.recent_command;
     try std.testing.expectEqual(@as(usize, 0), payload.snapshot_index);
     try std.testing.expectEqualStrings("new_tab", payload.action);
+}
+
+test "the palette leaves out open_config:new_window, as a row and as a recent action" {
+    // The left-out command twice: listed, the copies would be a duplicate
+    // (`DuplicateStableId`); left out, neither takes part in that check.
+    const commands = [_]FakeCommand{
+        .{ .title = "Open Config in New Terminal Window" },
+        .{ .title = "Open Config in New Terminal Window" },
+        .{ .title = "Open Config Using OS editor" },
+        .{ .title = "New Tab" },
+    };
+    const cvals = [_]FakeCval{
+        .{ .action = "open_config:new_window" },
+        .{ .action = "open_config:new_window" },
+        .{ .action = "open_config:os_open" },
+        .{ .action = "new_tab" },
+    };
+    const snapshot = .{ .commands = &commands, .cvals = &cvals };
+    var item_storage: [8]Item = undefined;
+    var payload_storage: [8]Payload = undefined;
+    var catalog = try Catalog.init(&item_storage, &payload_storage);
+    try catalog.appendActionSnapshot(snapshot);
+    try catalog.appendRecentActionMru(snapshot, &.{ "open_config:new_window", "open_config:os_open" });
+
+    // Two command rows and one recent action, none of them the one left out.
+    try std.testing.expectEqual(@as(usize, 3), catalog.items().len);
+    for (catalog.items(), catalog.payload_storage[0..catalog.items().len]) |item, payload| {
+        try std.testing.expect(!std.mem.eql(u8, item.title, "Open Config in New Terminal Window"));
+        const action = switch (payload) {
+            .action, .recent_command => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(!std.mem.eql(u8, action.action, "open_config:new_window"));
+        // Each row still names its own command: the snapshot index is not
+        // the catalog index past a command left out.
+        const snapshot_index = action.snapshot_index.?;
+        try std.testing.expectEqualStrings(std.mem.span(cvals[snapshot_index].action), action.action);
+        try std.testing.expectEqualStrings(commands[snapshot_index].title, item.title);
+    }
+    try std.testing.expectEqual(@as(?usize, 2), catalog.payload_storage[0].action.snapshot_index);
+    try std.testing.expectEqual(@as(?usize, 3), catalog.payload_storage[1].action.snapshot_index);
+    try std.testing.expectEqual(@as(?usize, 2), catalog.payload_storage[2].recent_command.snapshot_index);
+
+    var ranked_storage: [8]Ranked = undefined;
+    try std.testing.expectEqual(@as(usize, 0), catalog.rank("new window", .{}, &ranked_storage).len);
+    const config_rows = catalog.rank("open config", .{}, &ranked_storage);
+    try std.testing.expect(config_rows.len > 0);
+    for (config_rows) |row| {
+        const payload = catalog.payloadFor(row).?;
+        const action = switch (payload) {
+            .action, .recent_command => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqualStrings("open_config:os_open", action.action);
+    }
+
+    // Every other action is listed.
+    try std.testing.expect(!listsAction("open_config:new_window"));
+    try std.testing.expect(listsAction("open_config:os_open"));
+    try std.testing.expect(listsAction("open_config"));
+    try std.testing.expect(listsAction("new_window"));
 }
 
 test "provider batches fail before mutation when capacity is exhausted" {
