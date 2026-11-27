@@ -1759,9 +1759,18 @@ vouches for no child, not even a noctty whose image was read (its own launcher
 record still counts),
 and a `cmd.exe` whose command line was not read fails whether or not it had
 exited. Such a joiner is no evidence either way: what was not read was not
-checked (its image, or a noctty's argument rule), so a short-lived stray
-process passes, counted. Any other failure, or an exit that does not signal
-within the wait, stays a live failure.
+checked (its image, or a noctty's argument rule). Any other failure, or an exit
+that does not signal within the wait, stays a live failure.
+
+An image outlives the exit where the Win32 read does not: when
+`QueryFullProcessImageNameW` fails on the pinned handle, the reader reads the
+image through `NtQueryInformationProcess` class 27 (`ProcessImageFileName`,
+`NtImagePathOf`), a device path that `SameImage` judges behind
+`\\?\GLOBALROOT` (council no-seat N6). A joiner read that way is read, exited
+or not, so every rule but its command line's applies: a short-lived stray
+noctty fails the accounting or copy rule, and a short-lived `cmd.exe` the
+shell rule. Only a joiner whose class-27 read failed too counts in
+`imageUnreadExited`.
 
 **The real-input module.** `scripts/interactive-win11-realinput.ps1`
 (`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib

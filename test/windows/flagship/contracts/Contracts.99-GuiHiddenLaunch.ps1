@@ -893,6 +893,10 @@ foreach ($bad in @(
         # CodeRabbit and Sourcery on #752: its image read and its command line not, an exited CLI is still in the read
         # set, and must not vouch for the noctty.exe it forwarded (700); its launcher record still accounts for it.
         @{ Name = 'a noctty forwarded by a launched CLI whose image was read and that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true)); Total = 11; Shells = 1 }
+        # Council no-seat N6: a stray noctty that exits fast, its image read through class 27 after the Win32 read
+        # failed, is a read noctty, and the accounting and copy rules fail it.
+        @{ Name = 'a stray noctty.exe read through class 27 after it exited'; Rows = (& $guiWith @((& $guiRow 930 'noctty.exe' 100 93 -Exited $true))); Total = 12; Shells = 1 }
+        @{ Name = 'a forwarded noctty.exe outside the copy, read through class 27 after it exited'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Exited $true -InCopy $false)); Total = 11; Shells = 1 }
         @{ Name = 'a cmd that had exited before its command line was read'; Rows = (& $guiReplace 400 (& $guiRow 400 'cmd.exe' 200 40 $true $false $false $false -Exited $true)); Total = 11; Shells = 1 }
         @{ Name = 'a launcher record matched only by an exited joiner of another creation time'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 61 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Shells = 1 }
     )) {
@@ -1079,6 +1083,8 @@ foreach ($site in @(
         @{ Name = 'the open'; Pattern = 'row\.Handle = OpenJoiner\(row\.Pid, out gone\);\s*long openedAt; GetSystemTimePreciseAsFileTime\(out openedAt\);\s*if \(row\.Handle == IntPtr\.Zero\) \{ row\.OpenFailed = true; row\.ExitedBeforeRead = GoneBeforeStop\(gone, openedAt, StopAt\); \}' }
         @{ Name = 'the pin'; Pattern = 'bool asked = IsProcessInJob\(h, job, out member\);\s*long checkedAt; GetSystemTimePreciseAsFileTime\(out checkedAt\);\s*bool exitedFirst;\s*if \(!Pinned\(timed, asked, member, c, row\.Taken, checkedAt, StopAt, out exitedFirst\)\) \{\s*row\.ExitedBeforeRead = exitedFirst;\s*row\.Unpinned = true;' }
         @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, ImageReadEnded\(readError\), \(\) => StopAt\); \}' }
+        # Council no-seat N6: a failed Win32 image read falls back to class 27 on the same pinned handle.
+        @{ Name = 'the image read''s class-27 fallback'; Pattern = 'int imageStatus;\s*if \(imagePath == null\) imagePath = NtImagePathOf\(h, out imageStatus\);\s*row\.Image = imagePath == null \? null : Path\.GetFileName\(imagePath\);' }
         @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, CommandLineReadEnded\(readError\), \(\) => StopAt\); \}' }
         @{ Name = 'the stop'; Pattern = 'public static int StopRunJob\(IntPtr job, JobWatch watch\) \{\s*if \(watch != null\) watch\.NoteStop\(\);\s*return StopRunJob\(job\);' }
     )) {
@@ -1150,6 +1156,17 @@ try {
     if ($null -ne [GuiHiddenRunnerNative]::CommandLineOf($exited.process, [ref]$readError) -or -not [GuiHiddenRunnerNative]::CommandLineReadEnded($readError)) {
         throw ("An exited process's command-line read did not fail with a termination kind (status 0x{0:x8})." -f $readError)
     }
+    # Council no-seat N6: class 27 (NtImagePathOf) still reads that exited process's image, as a device path behind
+    # \\?\GLOBALROOT that SameImage judges by path and identity: System32's cmd.exe, and not another file. No handle
+    # reads nothing.
+    $ntStatus = 0
+    $ntImage = [GuiHiddenRunnerNative]::NtImagePathOf($exited.process, [ref]$ntStatus)
+    if ($null -eq $ntImage -or $ntStatus -ne 0 -or [IO.Path]::GetFileName($ntImage) -ine 'cmd.exe') {
+        throw ("Class 27 did not read an exited process's image (status 0x{0:x8})." -f $ntStatus)
+    }
+    if (-not [GuiHiddenRunnerNative]::SameImage($ntImage, $guiJoinerCmd, [GuiHiddenRunnerNative]::FileId($guiJoinerCmd))) { throw 'SameImage refused an exited cmd''s class-27 image as System32''s cmd.exe.' }
+    if ([GuiHiddenRunnerNative]::SameImage($ntImage, $guiRunnerPath, [GuiHiddenRunnerNative]::FileId($guiRunnerPath))) { throw 'SameImage accepted an exited cmd''s class-27 image as another file.' }
+    if ($null -ne [GuiHiddenRunnerNative]::NtImagePathOf([IntPtr]::Zero, [ref]$ntStatus) -or $ntStatus -eq 0) { throw 'Class 27 read an image through no handle.' }
     foreach ($case in @(
             @{ Name = 'an exit before the failure'; Creation = $times[0]; FailedAt = [GuiHiddenContractJoiner]::Now(); Terminating = $true; Stop = $guiMax; Exited = $true }
             @{ Name = 'an exit at the failure sample plus the wait'; Creation = $times[0]; FailedAt = $times[1] - $guiWait; Terminating = $true; Stop = $guiMax; Exited = $true }

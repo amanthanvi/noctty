@@ -112,7 +112,7 @@ $script:GuiHiddenNativeLayout = 'FileInfo=52 attributes@0 createdLow@4 createdHi
     'BasicLimits=64 processTime@0 jobTime@8 flags@16 minWorking@24 maxWorking@32 activeProcesses@40 affinity@48 priority@56 scheduling@60; ' +
     'IoCounters=48 readOps@0 writeOps@8 otherOps@16 readBytes@24 writeBytes@32 otherBytes@40; ' +
     'JobLimits=144 basic@0 io@64 processMemory@112 jobMemory@120 peakProcessMemory@128 peakJobMemory@136; JobPort=16 key@0 port@8; ' +
-    'ProcessBasic=48 exitStatus@0 peb@8 affinity@16 basePriority@24 pid@32 parentPid@40'
+    'ProcessBasic=48 exitStatus@0 peb@8 affinity@16 basePriority@24 pid@32 parentPid@40; UnicodeString=16 length@0 maximumLength@2 buffer@8'
 
 if (-not ('GuiHiddenRunnerNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -144,6 +144,8 @@ public static class GuiHiddenRunnerNative {
     }
     [StructLayout(LayoutKind.Sequential)] struct JobPort { public IntPtr key, port; }
     [StructLayout(LayoutKind.Sequential)] struct ProcessBasic { public IntPtr exitStatus, peb, affinity, basePriority, pid, parentPid; }
+    // UNICODE_STRING (winternl.h): Length and MaximumLength in bytes, then the buffer pointer at its natural alignment.
+    [StructLayout(LayoutKind.Sequential)] struct UnicodeString { public ushort length, maximumLength; public IntPtr buffer; }
     public delegate bool EnumWindow(IntPtr window, IntPtr parameter);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -208,7 +210,8 @@ public static class GuiHiddenRunnerNative {
             LayoutOf(typeof(IoCounters), "readOps", "writeOps", "otherOps", "readBytes", "writeBytes", "otherBytes"),
             LayoutOf(typeof(JobLimits), "basic", "io", "processMemory", "jobMemory", "peakProcessMemory", "peakJobMemory"),
             LayoutOf(typeof(JobPort), "key", "port"),
-            LayoutOf(typeof(ProcessBasic), "exitStatus", "peb", "affinity", "basePriority", "pid", "parentPid") });
+            LayoutOf(typeof(ProcessBasic), "exitStatus", "peb", "affinity", "basePriority", "pid", "parentPid"),
+            LayoutOf(typeof(UnicodeString), "length", "maximumLength", "buffer") });
     }
 
     // A path's canonical spelling, read through an opened handle (GetFinalPathNameByHandleW, VOLUME_NAME_DOS): an 8.3
@@ -432,6 +435,31 @@ public static class GuiHiddenRunnerNative {
         return null;
     }
 
+    // The image path of `process` as ProcessImageFileName (NtQueryInformationProcess class 27) gives it: an NT device
+    // path (\Device\HarddiskVolumeN\...), returned behind \\?\GLOBALROOT so that FinalPath and FileId open it and
+    // SameImage judges it as it does a Win32 path. Null with the NTSTATUS in `status` (-1 for a length or text the
+    // reader refuses; 0 once read). The reader's fallback when ImagePathOf fails (council no-seat N6): measured on
+    // Windows 11 build 26300 with System32 `cmd /D /C exit 7` children and a handle of the reader's rights, after the
+    // exit QueryFullProcessImageNameW failed with 31 for 20 of 20 and this read gave the image for 20 of 20; inside the
+    // exit, polled until the first QueryFullProcessImageNameW failure (5 in 99, 31 in 1), this read at once gave the
+    // image for 100 of 100. The buffer the call fills holds the UNICODE_STRING and then its text.
+    public static string NtImagePathOf(IntPtr process, out int status) {
+        int length, head = Marshal.SizeOf(typeof(UnicodeString));
+        status = NtQueryInformationProcess(process, 27, IntPtr.Zero, 0, out length);
+        if (length <= head || length > (1 << 20)) { if (status == 0) status = -1; return null; }
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try {
+            status = NtQueryInformationProcess(process, 27, buffer, length, out length);
+            if (status != 0) return null;
+            var name = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
+            long at = name.buffer.ToInt64() - buffer.ToInt64();
+            if (name.length == 0 || (name.length & 1) != 0 || at < head || at + name.length > length) { status = -1; return null; }
+            string path = Marshal.PtrToStringUni(name.buffer, name.length / 2);
+            if (!path.StartsWith(@"\Device\", StringComparison.Ordinal) || path.IndexOf('\0') >= 0) { status = -1; return null; }
+            return @"\\?\GLOBALROOT" + path;
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
+
     // One joiner. Only facts leave the reader: an image's leaf name and booleans. A noctty's split command line
     // (`Argv`) stays in memory for the argument rule and is never written. `ExitedBeforeRead`: the read that left the
     // joiner unopened, unpinned, without its image or (a noctty) without its command line failed after the joiner
@@ -583,6 +611,11 @@ public static class GuiHiddenRunnerNative {
             long failedAt; int readError;
             string imagePath = ImagePathOf(h, out readError);
             if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, ImageReadEnded(readError), () => StopAt); }
+            // The image name outlives the exit where QueryFullProcessImageNameW does not (council no-seat N6): read it
+            // through class 27 on the same pinned handle, so the copy, accounting and argument rules apply to the
+            // joiner, as the shell rule does to a cmd. Only its command line may then go unread.
+            int imageStatus;
+            if (imagePath == null) imagePath = NtImagePathOf(h, out imageStatus);
             row.Image = imagePath == null ? null : Path.GetFileName(imagePath);
             if (row.Image != null && (string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) || string.Equals(row.Image, "noctty.com", StringComparison.OrdinalIgnoreCase))) {
                 row.IsNoctty = true;
@@ -855,14 +888,16 @@ function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPi
 # its PID, its PID already named a process outside the job, or its read failed with the termination kind and its
 # pinned handle signalled within ExitWaitMs with a matching exit time, each before the runner ended the job;
 # JobWatch's `GoneBeforeStop`, `Pinned` and `ExitedBy`) is counted apart and does not fail the leaf: on `main`, push run 45561987608 failed twice, and push run 44997457453 once, on unread joiners alone (TD
-# D112). A live joiner the reader could not read still fails it. An exited one vouches for no child (`parentOf`), not
+# D112). A live joiner the reader could not read still fails it. One whose image class 27 read after the Win32 read
+# failed (NtImagePathOf) is read, exited or not, so every rule but its command line's applies to it: a stray noctty
+# that exits fast fails the copy or accounting rule (council no-seat N6). An exited one vouches for no child (`parentOf`), not
 # even a noctty whose image was read and whose command line was not, though a launcher record still accounts for that
 # noctty itself (CodeRabbit and Sourcery on #752). A cmd whose command line was not read still fails the leaf whether
 # or not it had exited, since its /D is what the shell rule proves.
 function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalProcesses, [int] $ExpectedShells, [string] $Token, [int] $LeafPid) {
     # A joiner counts as read only with its image too: one whose image could not be read (opened and pinned, but
-    # QueryFullProcessImageName failed) could be a cmd or a noctty, so it is unreadable, and the verdict fails unless
-    # it had exited first.
+    # neither QueryFullProcessImageName nor class 27, NtImagePathOf, read it) could be a cmd or a noctty, so it is
+    # unreadable, and the verdict fails unless it had exited first. One that class 27 read is read, exited or not.
     $isRead = { param($Row) -not $Row.OpenFailed -and -not $Row.Unpinned -and -not [string]::IsNullOrEmpty($Row.Image) }
     $byPid = @{}
     foreach ($row in $Rows) { if (& $isRead $row) { $byPid[$row.Pid] = $row } }
