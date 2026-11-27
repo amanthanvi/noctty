@@ -5086,7 +5086,11 @@ test "portable recovery abandons stranded swapped transaction" {
     const marker_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, marker_path);
     defer alloc.free(marker_path_w);
     // dwShareMode=0 denies subsequent opens per the Microsoft CreateFileW
-    // contract, giving this test a deterministic transient access failure.
+    // contract, giving this test a deterministic transient access failure:
+    // a sharing violation, which Zig 0.17's open retries for about four
+    // seconds and then reports as `FileBusy` (0.15: `AccessDenied` at once;
+    // ZIG017-SHARING-BUSY-01). Either way it is not a missing backup, so the
+    // transaction is kept.
     const held = win32_sys.CreateFileW(
         marker_path_w.ptr,
         win32_types.GENERIC_READ,
@@ -5104,7 +5108,7 @@ test "portable recovery abandons stranded swapped transaction" {
     state.portable_apply_phase = .swapped;
     try saveState(state_path, &state);
     try std.testing.expectError(
-        error.AccessDenied,
+        error.FileBusy,
         abandonUnrecoverablePortableApply(alloc, state_path, install_root),
     );
     {
