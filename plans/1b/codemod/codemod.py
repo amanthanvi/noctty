@@ -424,6 +424,8 @@ def _receiver(toks, i, tmp_names):
 
 REUSED_NAME = ("the name `{}` is bound more than once in this test, so which open a close belongs to needs a "
                "reader: its 0.15 opens and its closes are hand edits")
+REUSED_RECEIVER = ("the name `{}` is bound more than once in this test, not always to a temporary directory: its "
+                   "calls are hand edits")
 UNREAD_OPEN = ("the pairing reads an open's binding only as `const f = [try] <open>`, and this open's value goes "
                "elsewhere (a typed binding, an assignment, a field, another expression), so its close would not be "
                "rewritten with it: the open, and the closes and opens of a name it binds, are hand edits")
@@ -483,8 +485,6 @@ def _open_target(toks, r):
                 and is_tok(at(toks, s + 1), "identifier") and is_tok(at(toks, s + 2), "op", ":")):
             return False, toks[s + 1].text
     return False, None
-REUSED_RECEIVER = ("the name `{}` is bound more than once in this test, not always to a temporary directory: its "
-                   "calls are hand edits")
 
 
 def _binding_counts(toks, lo, hi):
