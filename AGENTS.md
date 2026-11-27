@@ -353,9 +353,14 @@ that govern each symbol you change, or that none does.
   backend loads (the OpenGL32 static import), and the renderer-state mutex
   with its runtime thread-role layer (`src/sync/state_mutex.zig`:
   `StateMutex`, the types of its carriers, `assertHeld`, the demand acquire
-  `State.lockDemand` forwards to, the panics PN1 to PN7; the roles in
-  `src/sync/thread_role.zig`: `enter`, `fixture`, and `assertWindowProc`,
-  which every fork window and subclass procedure calls first; the
+  `State.lockDemand` forwards to, the panics PN1 to PN7, the call sites'
+  one spelling `lockUncancelable()` and `unlock()` and the test-only
+  `lock()`, and its inner `Io`, `innerIo`; the roles in
+  `src/sync/thread_role.zig`: `enter`, `fixture`, `enterIfNone`, which an
+  `Io` task opens with (`src/sync/io_tasks.zig`, acceptance test 19), and
+  `assertWindowProc`, which every fork window and subclass procedure calls
+  first; the global `Io`'s pool, `global.io_pool`; the other sync
+  primitive, `src/os/once.zig`; the
   pair recorder `src/sync/recorder.zig` and its dump `src/sync/dump.zig`;
   and a site it keys by build mode, `stream_handler.surfaceMessageWriter`'s
   calling convention).
@@ -826,11 +831,14 @@ that govern each symbol you change, or that none does.
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
   `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
   `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
-  acceptance tests there and in `src/sync/state_mutex.zig`, acceptance
-  test 9's checker `ci/thread_role_points.py` (its `Resolver`) with its
+  acceptance tests there and in `src/sync/state_mutex.zig` and
+  `src/sync/io_tasks.zig`, acceptance
+  test 9's checker `ci/thread_role_points.py` (its `Resolver`, and the
+  `Io` task entries `spawn_targets` binds, `task_target`) with its
   controls `ci/test_thread_role_points.py`, the
   thread-role dumps' symboliser and the in-process compare
-  (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
+  (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW` and inline frames,
+  `Session.locateSite` and `wrapper_skip`; `src/sync/compare.zig`;
   the table they read, `ci/lock-inventory-threads.tsv`, what its static
   gate reads as a caller edge, and what its inventory reads as a
   renderer-state site, by a receiver's last name), the relock tests and
