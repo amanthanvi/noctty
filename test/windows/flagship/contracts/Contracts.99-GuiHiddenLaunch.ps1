@@ -1228,25 +1228,36 @@ try {
     # the wait's own `between`, which runs only after a slice in which the live, suspended child did not signal: on its
     # first call it notes the stop and then ends the child, the order StopRunJob keeps (NoteStop, then
     # TerminateJobObject). So the stop is always noted after ExitedBeforeStop began and before the child exits; a stop
-    # time read on entry (long.MaxValue then) would excuse the child, and only one read after the wait refuses it. After
-    # the call, the same ExitedBy with no stop bound must hold: the child exited inside the wait's window.
-    $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
-    $guiJoinerOpen.Add($stopped)
-    $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
-    $stoppedFailedAt = [GuiHiddenContractJoiner]::Now()
-    $guiStoppedProcess = $stopped.process
-    $guiStopCalls = [int[]]@(0)
-    $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, $stoppedFailedAt, $true,
-        [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) },
-        [Action] {
-            $guiStopCalls[0]++
-            if ($guiStopCalls[0] -eq 1) { $guiStopCell[0] = [GuiHiddenContractJoiner]::Now(); [void][GuiHiddenContractJoiner]::TerminateProcess($guiStoppedProcess, 1) }
-        })
-    if ($guiStopCalls[0] -lt 1 -or $guiStopCell[0] -eq $guiMax) { throw 'The stop control''s pump never noted its stop inside the wait.' }
-    if ($stoppedExited) { throw 'ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop.' }
-    if (-not [GuiHiddenRunnerNative]::ExitedBy($stopped.process, $stoppedCreation, $stoppedFailedAt, $true, $guiMax)) {
-        throw 'The stop control''s child did not exit inside ExitedBy''s window, so its refusal proves nothing.'
+    # time read on entry (long.MaxValue then) would excuse the child, and only one read after the wait refuses it.
+    # Council T1 on #768: an attempt counts only when its precondition held, the child exiting inside ExitedBy's window
+    # (the same ExitedBy with no stop bound holds after the call). A host stall that pushes the exit past the window is
+    # not a verdict, so that attempt is skipped and run again, three attempts in all. The retry cannot hide the bug: a
+    # stall only skips an attempt, it never turns a verdict into a pass. Every counted attempt must refuse, so an
+    # early-read implementation fails on its first counted one, and with no attempt counted the control fails too.
+    $guiStopCounted = 0
+    for ($guiStopAttempt = 1; $guiStopAttempt -le 3 -and $guiStopCounted -eq 0; $guiStopAttempt++) {
+        $guiStopCell[0] = $guiMax
+        $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+        $guiJoinerOpen.Add($stopped)
+        $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
+        $stoppedFailedAt = [GuiHiddenContractJoiner]::Now()
+        $guiStoppedProcess = $stopped.process
+        $guiStopCalls = [int[]]@(0)
+        $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, $stoppedFailedAt, $true,
+            [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) },
+            [Action] {
+                $guiStopCalls[0]++
+                if ($guiStopCalls[0] -eq 1) { $guiStopCell[0] = [GuiHiddenContractJoiner]::Now(); [void][GuiHiddenContractJoiner]::TerminateProcess($guiStoppedProcess, 1) }
+            })
+        if ($guiStopCalls[0] -lt 1 -or $guiStopCell[0] -eq $guiMax) { throw 'The stop control''s pump never noted its stop inside the wait.' }
+        if (-not [GuiHiddenRunnerNative]::ExitedBy($stopped.process, $stoppedCreation, $stoppedFailedAt, $true, $guiMax)) {
+            Write-Host "Contracts.99-GuiHiddenLaunch stop control: attempt $guiStopAttempt stalled (the child exited after ExitedBy's window); not counted"
+            continue
+        }
+        $guiStopCounted++
+        if ($stoppedExited) { throw "ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop (attempt $guiStopAttempt, the first counted)." }
     }
+    if ($guiStopCounted -eq 0) { throw 'The stop control had 3 stalls, no attempt counted: the child never exited inside ExitedBy''s window.' }
     # Council no-seat N1: with a `between`, the wait (WaitExit) calls it between slices while the handle has not
     # signalled, as the reader opens queued joiners there; a handle that signals ends the wait at the next slice. A live,
     # suspended process: the wait runs its whole bound with `between` called inside it; then `between` ends the process
