@@ -117,6 +117,59 @@ const ScreenRows = struct {
     }
 };
 
+/// Format `top` through `bottom` (inclusive, `top` first) as
+/// `PageListFormatter` does with `.plain`, its pin map included, and give each
+/// byte the grid width of its cell (0 for a newline) in `widths`.
+///
+/// Each page is read through `pagePreservingState`, never `page()` or
+/// `pageIfResident()`. A history page that page reclaim compressed is decoded
+/// into memory this call frees and stays compressed, where `page()` would
+/// restore it and `pageIfResident()` would drop its rows from the document.
+/// `PageListFormatter` reads its chunks through `page()`, so this walks them
+/// itself, as upstream's search window formats a preserved page
+/// (`SlidingWindow.append`); `.plain` does not unwrap, so the formatter's
+/// spacer-head step does not apply. No pointer into a preserved page outlives
+/// its chunk, which is why the widths are read here.
+fn formatDocument(
+    alloc: std.mem.Allocator,
+    top: terminal.Pin,
+    bottom: terminal.Pin,
+    writer: *std.Io.Writer.Allocating,
+    pin_points: *terminal.formatter.PinMap.Map,
+    widths: *std.ArrayList(u8),
+) !void {
+    const PageFormatter = terminal.formatter.PageFormatter;
+    var state: ?PageFormatter.TrailingState = null;
+    var it = top.pageIterator(.right_down, bottom);
+    while (it.next()) |chunk| {
+        std.debug.assert(chunk.start < chunk.end);
+        var preserved = try chunk.node.pagePreservingState(alloc);
+        defer preserved.deinit();
+        const page = preserved.page();
+
+        var formatter: PageFormatter = .init(page, .plain);
+        formatter.start_y = chunk.start;
+        formatter.end_y = chunk.end - 1;
+        formatter.trailing_state = state;
+        if (chunk.node == top.node) formatter.start_x = top.x;
+        if (chunk.node == bottom.node) formatter.end_x = bottom.x;
+
+        // The bytes this chunk writes map to its page, as in the formatter.
+        const base = pin_points.count();
+        try pin_points.setNode(alloc, chunk.node);
+        formatter.point_map = .{ .alloc = alloc, .map = &pin_points.points, .base = base };
+        state = try formatter.formatWithState(&writer.writer);
+
+        const written = writer.written();
+        if (written.len != pin_points.count()) return error.PinMapLengthMismatch;
+        try widths.ensureUnusedCapacity(alloc, written.len - base);
+        for (pin_points.points.items[base..], written[base..]) |point, byte| {
+            const width = if (byte == '\n') 0 else page.getRowAndCell(point.x, point.y).cell.gridWidth();
+            widths.appendAssumeCapacity(@intCast(width));
+        }
+    }
+}
+
 /// Capture a recent, hard-capped document window plus exact viewport-relative
 /// grid positions. Terminal page pointers are converted while the caller owns
 /// the renderer lock and never escape this function.
@@ -187,15 +240,14 @@ fn snapshotDocumentWindow(
         .bottom = (pages.pointFromPin(.screen, document_bottom) orelse return error.UnknownPoint).screen.y,
     };
 
-    var formatter = terminal.formatter.PageListFormatter.init(pages, .plain);
-    formatter.top_left = document_top;
-    formatter.bottom_right = document_bottom;
-    formatter.pin_map = .{ .alloc = alloc, .map = &pin_points };
-    try formatter.format(&text_writer.writer);
+    var widths: std.ArrayList(u8) = .empty;
+    defer widths.deinit(alloc);
+    try formatDocument(alloc, document_top, document_bottom, &text_writer, &pin_points, &widths);
 
     const text = try text_writer.toOwnedSlice();
     errdefer alloc.free(text);
     if (pin_points.count() != text.len) return error.PinMapLengthMismatch;
+    if (widths.items.len != text.len) return error.PinMapLengthMismatch;
 
     // The formatter's map keeps a coordinate per byte and a page node per run
     // of bytes; the reads below take one pin per byte.
@@ -231,11 +283,10 @@ fn snapshotDocumentWindow(
     var visible_end: usize = 0;
     for (pin_map, 0..) |pin, index| {
         const screen_y = rows.of(pin) orelse return error.UnknownPoint;
-        const cell = pin.node.page().getRowAndCell(pin.x, pin.y).cell;
         cell_for_byte[index] = .{
             .row = @intCast(@as(i64, @intCast(screen_y)) - viewport_y),
             .column = pin.x,
-            .width = if (text[index] == '\n') 0 else @intCast(cell.gridWidth()),
+            .width = widths.items[index],
         };
         // Hash canonical scalar fields together, with no struct padding and
         // no second per-byte pass while the renderer lock is held.
@@ -1131,4 +1182,89 @@ test "rectangular selection finds its active row past the first page" {
     const number = try std.fmt.parseInt(usize, snapshot.text[line_start + 4 .. line_start + 9], 10);
     try std.testing.expectEqual(numbered_rows - 1 - 2, number);
     try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+}
+
+/// Feed numbered lines ("row-00000" ...) through the VT stream until the
+/// active area starts on the third page. The two pages before it are then
+/// complete history that `PageList.compress` compresses, which is how page
+/// reclaim leaves them (in a test build its decommit zeroes the raw mapping),
+/// and the newer of them holds the whole history window of an 80-column
+/// snapshot. Returns how many lines were fed.
+fn feedTwoColdPages(t: *terminal.Terminal) !usize {
+    var stream = t.vtStream();
+    defer stream.deinit();
+    const pages = &t.screens.active.pages;
+    var line: [32]u8 = undefined;
+    var count: usize = 0;
+    while (true) : (count += 1) {
+        const active = pages.getTopLeft(.active).node;
+        if (active.prev) |prev| if (prev.prev != null) break;
+        stream.nextSlice(try std.fmt.bufPrint(&line, "row-{d:0>5}\r\n", .{count}));
+    }
+    return count;
+}
+
+test "accessible snapshot reads reclaim-compressed history without restoring it" {
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = 10_000_000,
+    });
+    defer t.deinit(alloc);
+    _ = try feedTwoColdPages(&t);
+    const pages = &t.screens.active.pages;
+    const newest_history = pages.getTopLeft(.active).node.prev.?;
+
+    var resident = try snapshotTerminalAccessiblePlainText(alloc, &t);
+    defer resident.deinit();
+
+    // While every page is resident the walk writes what PageListFormatter
+    // writes over the same document.
+    {
+        var expected: std.Io.Writer.Allocating = .init(alloc);
+        defer expected.deinit();
+        var formatter = terminal.formatter.PageListFormatter.init(pages, .plain);
+        formatter.top_left = pages.pin(.{ .screen = .{ .y = resident.document_window.top } }).?;
+        formatter.bottom_right = pages.pin(.{ .screen = .{
+            .x = pages.cols - 1,
+            .y = resident.document_window.bottom,
+        } }).?;
+        try formatter.format(&expected.writer);
+        try std.testing.expectEqualStrings(expected.written(), resident.text);
+    }
+
+    // The document starts on the newer history page, which compression takes.
+    const top = pages.pin(.{ .screen = .{ .y = resident.document_window.top } }).?;
+    try std.testing.expectEqual(newest_history, top.node);
+    try std.testing.expect(std.mem.startsWith(u8, resident.text, "row-"));
+
+    _ = pages.compress(.full);
+    try std.testing.expectEqual(.compressed, newest_history.storage());
+    try std.testing.expectEqual(.compressed, newest_history.prev.?.storage());
+    const stats = pages.memoryStats();
+
+    // The same document, history included, from the compressed page; the page
+    // stays compressed and no page changes state.
+    var compressed = try snapshotTerminalAccessiblePlainText(alloc, &t);
+    defer compressed.deinit();
+    try std.testing.expectEqualStrings(resident.text, compressed.text);
+    try std.testing.expectEqualSlices(TerminalCellPosition, resident.cell_for_byte, compressed.cell_for_byte);
+    try std.testing.expectEqual(resident.visible_range, compressed.visible_range);
+    try std.testing.expectEqual(resident.caret_offset, compressed.caret_offset);
+    try std.testing.expectEqual(resident.scroll_token, compressed.scroll_token);
+    try std.testing.expectEqual(.compressed, newest_history.storage());
+    try std.testing.expectEqual(stats, pages.memoryStats());
+
+    // A frozen range revalidates through the same walk and leaves it so too.
+    try std.testing.expect(try scrollFrozenRange(
+        alloc,
+        &t,
+        compressed.scroll_token.?,
+        compressed.document_window,
+        compressed.document_window.bottom,
+        false,
+    ));
+    try std.testing.expectEqual(.compressed, newest_history.storage());
+    try std.testing.expectEqual(stats, pages.memoryStats());
 }

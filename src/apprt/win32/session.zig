@@ -1241,6 +1241,68 @@ fn sessionScrollbackLineAllowed(line: []const u8) bool {
     return true;
 }
 
+/// The session readers read each page through `pagePreservingState`, never
+/// `page()` or `pageIfResident()`: a history page that page reclaim compressed
+/// is decoded into memory the reader frees and stays compressed, where
+/// `page()` (and so the formatters, `Screen.selectAll` and a row's `cells`)
+/// would restore it and `pageIfResident()` would drop its rows.
+///
+/// The last cell with text other than blanks, the end `Screen.selectAll`
+/// finds, or null when the screen has none (when `selectAll` is null).
+fn lastTextPin(alloc: Allocator, screen: *const terminal.Screen) Allocator.Error!?terminal.Pin {
+    const whitespace = [_]u21{ 0, ' ', '\t' };
+    const bottom = screen.pages.getBottomRight(.screen) orelse return null;
+    var it = bottom.pageIterator(.left_up, null);
+    while (it.next()) |chunk| {
+        var preserved = try chunk.node.pagePreservingState(alloc);
+        defer preserved.deinit();
+        const page = preserved.page();
+        var y = chunk.end;
+        while (y > chunk.start) {
+            y -= 1;
+            const cells = page.getCells(page.getRow(y));
+            var x: usize = if (chunk.node == bottom.node and y == bottom.y) bottom.x + 1 else cells.len;
+            while (x > 0) {
+                x -= 1;
+                const cell = cells[x];
+                if (!cell.hasText()) continue;
+                if (std.mem.indexOfScalar(u21, &whitespace, cell.content.codepoint.data) != null) continue;
+                return .{ .node = chunk.node, .y = y, .x = @intCast(x) };
+            }
+        }
+    }
+    return null;
+}
+
+/// Write `start` through `end` (inclusive, `start` first) as
+/// `TerminalFormatter(.plain)` with `extra = .none` and that selection does:
+/// its `PageListFormatter`, whose `.plain` neither unwraps nor pads, so only
+/// its page walk is left. That walk reads each chunk through `page()`; this
+/// one formats a preserved page, as upstream's search window does
+/// (`SlidingWindow.append`).
+fn formatPlainPreserving(
+    alloc: Allocator,
+    start: terminal.Pin,
+    end: terminal.Pin,
+    writer: *std.Io.Writer,
+) (Allocator.Error || std.Io.Writer.Error)!void {
+    const PageFormatter = terminal.formatter.PageFormatter;
+    var state: ?PageFormatter.TrailingState = null;
+    var it = start.pageIterator(.right_down, end);
+    while (it.next()) |chunk| {
+        std.debug.assert(chunk.start < chunk.end);
+        var preserved = try chunk.node.pagePreservingState(alloc);
+        defer preserved.deinit();
+        var formatter: PageFormatter = .init(preserved.page(), .plain);
+        formatter.start_y = chunk.start;
+        formatter.end_y = chunk.end - 1;
+        formatter.trailing_state = state;
+        if (chunk.node == start.node) formatter.start_x = start.x;
+        if (chunk.node == end.node) formatter.end_x = end.x;
+        state = try formatter.formatWithState(writer);
+    }
+}
+
 fn captureTerminalScrollbackSnapshotAlloc(
     alloc: Allocator,
     scratch_alloc: Allocator,
@@ -1252,8 +1314,7 @@ fn captureTerminalScrollbackSnapshotAlloc(
     const requested_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
     if (requested_lines == 0 or remaining_budget.* == 0) return null;
 
-    const all = terminal_state.screens.active.selectAll() orelse return null;
-    var end = all.end();
+    var end = (try lastTextPin(scratch_alloc, terminal_state.screens.active)) orelse return null;
     end.x = end.node.cols() - 1;
 
     const plain_capacity = remaining_budget.* -| win32_session_state.scrollback_snapshot_storage_overhead;
@@ -1275,14 +1336,14 @@ fn captureTerminalScrollbackSnapshotAlloc(
         start.x = 0;
 
         var plain_writer: std.Io.Writer = .fixed(plain_buf);
-        var formatter = terminal.formatter.TerminalFormatter.init(terminal_state, .plain);
-        formatter.extra = .none;
-        formatter.content = .{ .selection = .init(start, end, false) };
-        formatter.format(&plain_writer) catch {
-            if (max_lines == 1 or formatter_retries == 4) return null;
-            max_lines = @max(max_lines / 2, 1);
-            formatter_retries += 1;
-            continue;
+        formatPlainPreserving(scratch_alloc, start, end, &plain_writer) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.WriteFailed => {
+                if (max_lines == 1 or formatter_retries == 4) return null;
+                max_lines = @max(max_lines / 2, 1);
+                formatter_retries += 1;
+                continue;
+            },
         };
         plain_len = plain_writer.end;
         break;
@@ -1385,8 +1446,10 @@ fn formatSessionSnapshotMarker(
 /// no text or background fill, and nothing has scrolled off into history.
 /// Used to decide whether a restored snapshot would land on top of a child's
 /// startup output. A shell can return the cursor to the origin after printing
-/// (`ESC[H`), so cursor position is not on its own a usable test.
-fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
+/// (`ESC[H`), so cursor position is not on its own a usable test. Pages are
+/// read as `lastTextPin` reads them: a compressed history page stays
+/// compressed, and its cells still count.
+fn terminalScreenIsUnpainted(screen: *terminal.Screen) Allocator.Error!bool {
     // A child that only moved the cursor (`ESC[2;2H`) has painted nothing, but
     // restoring would still `scrollClear()` the cursor out from under it while
     // it believes it is at (2,2). Require the origin as well as empty cells.
@@ -1401,10 +1464,15 @@ fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
 
     // `.screen` spans history plus the active area, so this also catches
     // output that has already scrolled off the top.
-    var row_it = screen.pages.rowIterator(.right_down, .{ .screen = .{} }, null);
-    while (row_it.next()) |row| {
-        for (row.cells(.all)) |cell| {
-            if (!cell.isEmpty()) return false;
+    var it = screen.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
+    while (it.next()) |chunk| {
+        var preserved = try chunk.node.pagePreservingState(screen.alloc);
+        defer preserved.deinit();
+        const page = preserved.page();
+        for (chunk.start..chunk.end) |y| {
+            for (page.getCells(page.getRow(y))) |cell| {
+                if (!cell.isEmpty()) return false;
+            }
         }
     }
     return true;
@@ -1433,7 +1501,7 @@ fn restoreTerminalScrollbackSnapshot(
     // The cursor position alone is not a sufficient test — `"PS> \x1b[H"`
     // leaves prompt cells behind while returning the cursor to the origin —
     // so require the whole active area to be unpainted.
-    if (!terminalScreenIsUnpainted(screen)) return error.PaneAlreadyPainted;
+    if (!try terminalScreenIsUnpainted(screen)) return error.PaneAlreadyPainted;
 
     // The checks above prove the pane is *empty*. They do not prove the
     // terminal is in its *initial state*, and restore prints through the
@@ -2259,7 +2327,7 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
         var stream = terminal_state.vtStream();
         defer stream.deinit();
         stream.nextSlice("\x1b[2;5r");
-        try std.testing.expect(terminalScreenIsUnpainted(terminal_state.screens.active));
+        try std.testing.expect(try terminalScreenIsUnpainted(terminal_state.screens.active));
 
         try std.testing.expectError(
             error.SnapshotNeedsFullScreen,
@@ -2303,7 +2371,7 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
             defer stream.deinit();
             if (case.bytes.len > 0) stream.nextSlice(case.bytes);
             if (case.status_line) terminal_state.status_display = .status_line;
-            try std.testing.expect(terminalScreenIsUnpainted(terminal_state.screens.active));
+            try std.testing.expect(try terminalScreenIsUnpainted(terminal_state.screens.active));
 
             try std.testing.expectError(
                 case.want,
@@ -2352,6 +2420,117 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
             @as(usize, lines.len),
             try restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
         );
+    }
+}
+
+/// Feed `first_line`, then numbered lines ("row-00001" ...) or blank ones,
+/// through the VT stream until the active area starts on the third page. The
+/// two pages before it are then complete history that `PageList.compress`
+/// compresses, which is how page reclaim leaves them (in a test build its
+/// decommit zeroes the raw mapping). Returns how many lines were fed.
+fn feedSessionColdPages(terminal_state: *terminal.Terminal, first_line: []const u8, numbered: bool) !usize {
+    var stream = terminal_state.vtStream();
+    defer stream.deinit();
+    const pages = &terminal_state.screens.active.pages;
+    stream.nextSlice(first_line);
+    stream.nextSlice("\r\n");
+    var line: [32]u8 = undefined;
+    var count: usize = 1;
+    while (true) : (count += 1) {
+        const active = pages.getTopLeft(.active).node;
+        if (active.prev) |prev| if (prev.prev != null) break;
+        if (numbered) stream.nextSlice(try std.fmt.bufPrint(&line, "row-{d:0>5}", .{count}));
+        stream.nextSlice("\r\n");
+    }
+    return count;
+}
+
+test "win32 session capture reads reclaim-compressed history without restoring it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // A session save runs on the UI thread, which takes the renderer lock
+    // to capture each pane's scrollback.
+    const role_scope = thread_role.fixture(.ui);
+    defer role_scope.exit();
+
+    var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = 10_000_000,
+    });
+    defer terminal_state.deinit(std.testing.allocator);
+    const fed = try feedSessionColdPages(&terminal_state, "row-00000", true);
+    const pages = &terminal_state.screens.active.pages;
+    const first = pages.pages.first.?;
+    const second = first.next.?;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var resident_budget = win32_session_state.max_total_scrollback_bytes;
+    const resident = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        win32_session_state.max_scrollback_lines,
+        &resident_budget,
+        1,
+    )).?;
+    // Every line fed, the first page's oldest included.
+    try std.testing.expectEqual(fed, resident.lines.len);
+    try std.testing.expectEqualStrings("row-00000", resident.lines[0]);
+
+    _ = pages.compress(.full);
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    const stats = pages.memoryStats();
+
+    // The same lines from the compressed pages, which stay compressed.
+    var compressed_budget = win32_session_state.max_total_scrollback_bytes;
+    const compressed = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        win32_session_state.max_scrollback_lines,
+        &compressed_budget,
+        1,
+    )).?;
+    try std.testing.expectEqual(resident.lines.len, compressed.lines.len);
+    for (resident.lines, compressed.lines) |want, got| try std.testing.expectEqualStrings(want, got);
+    try std.testing.expectEqual(resident_budget, compressed_budget);
+    try std.testing.expectEqual(.compressed, first.storage());
+    try std.testing.expectEqual(.compressed, second.storage());
+    try std.testing.expectEqual(stats, pages.memoryStats());
+}
+
+test "win32 session restore's unpainted check reads reclaim-compressed history without restoring it" {
+    // Text only on the first page, which compression takes, under blank rows
+    // and a cursor at the origin: painted, and the page stays compressed.
+    // Then blank history that compression takes: unpainted, and the same.
+    for ([_]struct { first_line: []const u8, unpainted: bool }{
+        .{ .first_line = "painted", .unpainted = false },
+        .{ .first_line = "", .unpainted = true },
+    }) |case| {
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback_bytes = 10_000_000,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+        _ = try feedSessionColdPages(&terminal_state, case.first_line, false);
+        var stream = terminal_state.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("\x1b[H");
+
+        const screen = terminal_state.screens.active;
+        const first = screen.pages.pages.first.?;
+        _ = screen.pages.compress(.full);
+        try std.testing.expectEqual(.compressed, first.storage());
+        try std.testing.expectEqual(.compressed, first.next.?.storage());
+        const stats = screen.pages.memoryStats();
+
+        try std.testing.expectEqual(case.unpainted, try terminalScreenIsUnpainted(screen));
+        try std.testing.expectEqual(.compressed, first.storage());
+        try std.testing.expectEqual(.compressed, first.next.?.storage());
+        try std.testing.expectEqual(stats, screen.pages.memoryStats());
     }
 }
 

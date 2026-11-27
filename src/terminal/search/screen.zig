@@ -1216,6 +1216,65 @@ test "simple search with history" {
     }
 }
 
+test "history search reads reclaim-compressed pages without restoring them" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback_bytes = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // A match at the top of each of the first two pages, and one in the
+    // active area once it starts on the third page, so the first two are
+    // complete history that compression takes (as page reclaim leaves them;
+    // in a test build its decommit zeroes the raw mapping).
+    s.nextSlice("Fizz\r\n");
+    const first = list.pages.first.?;
+    while (list.pages.last.? == first) s.nextSlice("\r\n");
+    s.nextSlice("Fizz\r\n");
+    const second = list.pages.last.?;
+    while (list.getTopLeft(.active).node.prev != second) s.nextSlice("\r\n");
+    s.nextSlice("Fizz");
+
+    _ = list.compress(.full);
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, first.storage());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, second.storage());
+    const stats = list.memoryStats();
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Fizz");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(1, search.active_results.items.len);
+
+    // Newest first: the active area's, then each compressed page's.
+    const matches = try search.matches(alloc);
+    defer alloc.free(matches);
+    try testing.expectEqual(3, matches.len);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = @intCast(list.total_rows - 1),
+    } }, list.pointFromPin(.screen, matches[0].untracked().start).?);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = first.rows(),
+    } }, list.pointFromPin(.screen, matches[1].untracked().start).?);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = 0,
+    } }, list.pointFromPin(.screen, matches[2].untracked().start).?);
+
+    // The search read both pages through decoded copies: they stay compressed.
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, first.storage());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, second.storage());
+    try testing.expectEqual(stats, list.memoryStats());
+}
+
 test "reload active with history change" {
     const alloc = testing.allocator;
     const io = testing.io;
