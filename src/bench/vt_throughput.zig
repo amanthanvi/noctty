@@ -60,21 +60,21 @@ const JsonResult = struct {
     noctty_commit: ?[]const u8,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const args_raw = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args_raw);
-    const args = try parseArgs(args_raw);
+    const args_raw = try init.minimal.args.toSlice(alloc);
+    const args = try parseArgs(io, args_raw);
 
     const payload = try alloc.alloc(u8, args.bytes);
     try generatePayload(payload, args.workload, args.seed, args.cols);
 
     const samples = try alloc.alloc(f64, args.runs);
     for (samples, 0..) |*sample, i| {
-        var terminal: Terminal = try .init(std.heap.page_allocator, .{
+        var terminal: Terminal = try .init(io, std.heap.page_allocator, .{
             .rows = args.rows,
             .cols = args.cols,
         });
@@ -82,18 +82,18 @@ pub fn main() !void {
         var stream = terminal.vtStream();
         defer stream.deinit();
 
-        var timer = try std.time.Timer.start();
+        const started: std.Io.Timestamp = .now(io, .awake);
         var offset: usize = 0;
         while (offset < payload.len) {
             const end = @min(offset + 4096, payload.len);
             stream.nextSlice(payload[offset..end]);
             offset = end;
         }
-        const elapsed_ns = @max(timer.read(), 1);
+        const elapsed_ns: u64 = @max(@as(u64, @intCast(@max(0, started.untilNow(io, .awake).toNanoseconds()))), 1);
         sample.* = mbPerSecond(payload.len, elapsed_ns);
 
         if (args.json == null or !std.mem.eql(u8, args.json.?, "-")) {
-            try printRun(i, sample.*);
+            try printRun(io, i, sample.*);
         }
     }
 
@@ -119,14 +119,14 @@ pub fn main() !void {
         .noctty_commit = null,
     };
 
-    if (args.json) |path| try emitJsonPath(path, result);
+    if (args.json) |path| try emitJsonPath(io, path, result);
     if (args.json == null or !std.mem.eql(u8, args.json.?, "-")) {
-        try printSummary(args, median_mb_s, p95_mb_s, fastest_mb_s, gate_ok);
+        try printSummary(io, args, median_mb_s, p95_mb_s, fastest_mb_s, gate_ok);
     }
 
     if (!gate_ok) {
         var stderr_buf: [512]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+        var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
         const stderr = &stderr_writer.interface;
         try stderr.print(
             "bench:vt-throughput: fastest of {d} runs {d:.2} MB/s below threshold {d:.2} MB/s (median {d:.2} MB/s)\n",
@@ -207,22 +207,22 @@ fn mbPerSecond(bytes: usize, elapsed_ns: u64) f64 {
     return megabytes / seconds;
 }
 
-fn emitJsonPath(path: []const u8, result: JsonResult) !void {
+fn emitJsonPath(io: std.Io, path: []const u8, result: JsonResult) !void {
     if (std.mem.eql(u8, path, "-")) {
         var stdout_buf: [4096]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+        var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
         try writeJson(&stdout_writer.interface, result);
         try stdout_writer.interface.flush();
         return;
     }
 
     const file = if (std.fs.path.isAbsolute(path))
-        try std.fs.createFileAbsolute(path, .{})
+        try std.Io.Dir.createFileAbsolute(io, path, .{})
     else
-        try std.fs.cwd().createFile(path, .{});
-    defer file.close();
+        try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
     var file_buf: [4096]u8 = undefined;
-    var file_writer = file.writer(&file_buf);
+    var file_writer = file.writer(io, &file_buf);
     try writeJson(&file_writer.interface, result);
     try file_writer.interface.flush();
 }
@@ -231,15 +231,16 @@ fn writeJson(writer: *std.Io.Writer, result: JsonResult) !void {
     try writer.print("{f}\n", .{std.json.fmt(result, .{})});
 }
 
-fn printRun(index: usize, mb_s: f64) !void {
+fn printRun(io: std.Io, index: usize, mb_s: f64) !void {
     var stdout_buf: [256]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     try stdout.print("  run {d}: {d:.2} MB/s\n", .{ index + 1, mb_s });
     try stdout.flush();
 }
 
 fn printSummary(
+    io: std.Io,
     args: Args,
     median_mb_s: f64,
     p95_mb_s: f64,
@@ -247,7 +248,7 @@ fn printSummary(
     gate_ok: bool,
 ) !void {
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     try stdout.print(
         \\bench:vt-throughput
@@ -276,7 +277,7 @@ fn printSummary(
     try stdout.flush();
 }
 
-fn parseArgs(raw: []const []const u8) !Args {
+fn parseArgs(io: std.Io, raw: []const []const u8) !Args {
     var out: Args = .{};
     for (raw[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--workload=")) {
@@ -299,7 +300,7 @@ fn parseArgs(raw: []const []const u8) !Args {
         } else if (std.mem.startsWith(u8, arg, "--json=")) {
             out.json = arg["--json=".len..];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printHelp();
+            try printHelp(io);
             std.process.exit(0);
         } else {
             std.log.warn("bench:vt-throughput: unknown arg '{s}' - ignoring", .{arg});
@@ -315,9 +316,9 @@ fn parseArgs(raw: []const []const u8) !Args {
     return out;
 }
 
-fn printHelp() !void {
+fn printHelp(io: std.Io) !void {
     var stdout_buf: [2048]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     try stdout.writeAll(
         \\bench:vt-throughput - deterministic headless VT throughput
