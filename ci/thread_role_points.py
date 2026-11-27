@@ -39,7 +39,12 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   the build's own artifact selector, `terminal_options`' `artifact` through its real import and aliases, whose
   value the build sets (`Resolver.build_artifact`: `src/terminal/build_options.zig` and `src/build/SharedDeps.zig`'s
   `terminalOptions(.X)`; `.ghostty` for `search.Thread`), or a constant the checker evaluates; any other subject,
-  and any `if`, is ambiguous (stone round 4).
+  and any `if`, is ambiguous (stone round 4). An `Io` task entry (api `X.async` or `X.concurrent`, as the gate
+  records `io.async(`, `group.async(`, `select.async(`, `io.concurrent(`) is bound the same way to its task call,
+  whose task argument is the one thread_gate15.py reads (`task_target`); its target's eager first statement is
+  `enterIfNone` for an `async` task, which std may run inline on its caller in decision 19's eight arms, so it keeps
+  the caller's role there and enters its own on a pool worker (PLAN.md §2.7 RQ7, 1B.6), and `enter` for a
+  `concurrent` one, which always runs on a worker; an `async` task that opens with `enter` fails ENTRY-TASK-ENTER.
 - Each registry entry, per artifact: REPORTED when its file is not in the artifact, its spawn is never built for
   Windows (NOT_BUILT below, or a `why` that says "not built for Windows"), or, for the app exe, every spawn is in a
   function only a test build compiles (`spawned_only_by_tests`: test code, a test-only span, or a function whose
@@ -71,6 +76,8 @@ ROOT = "src/main.zig"
 POINT_OPS = ("enter", "fixture", "enterIfNone")
 # The calls that make a thread's own scope (an entry's, main's): enterIfNone keeps a role the thread already has.
 SCOPE_OPS = ("enter", "fixture")
+# An `Io` task's own scope (`is_inline_task`, RQ7): enterIfNone, so a task std runs inline keeps its caller's role.
+ASYNC_SCOPE_OPS = ("enterIfNone",)
 ROLES = ("none", "ui", "renderer", "termio", "reader", "search", "test_support")
 # §2.7 test 9: entries whose spawn no Windows build compiles (P:1013-1016), keyed (file, function, target).
 NOT_BUILT = {
@@ -685,21 +692,64 @@ def sets_role(pt):
     return pt["form"] in ("module", "on") and pt["role"] != "none"
 
 
-def spawn_targets(f, function, target):
+TASK_OPS = ("async", "concurrent")
+# thread_gate15.py's `thread_entries`: an argument spelled as an Io (`io`, `self.io`, `global.io()`).
+IO_ARG = re.compile(r"(?<![\w.])(?:\w+\.)*io(?:\(\))?$|^io$")
+
+
+def is_io_task(api):
+    """Whether a registry entry is an `Io` task (`io.async`, `group.async`, `select.async`, `io.concurrent`, ...), as
+    thread_gate15.py records `X.async(` and `X.concurrent(`, rather than a thread spawn."""
+    return api.rsplit(".", 1)[-1] in TASK_OPS
+
+
+def is_inline_task(api):
+    """Whether an entry's task may run inline on its caller: `async` and the group path's `async` (decision 19's
+    eight inline arms, PLAN.md §2.7 RQ7), never `concurrent`, which runs on a worker or fails."""
+    return api.rsplit(".", 1)[-1] == "async"
+
+
+def task_target(recv, runs):
+    """The argument of a `recv.async(`/`recv.concurrent(` call that names its task, as thread_gate15.py reads it:
+    the first after an argument spelled as an Io, else the second; the first for an Io receiver (`io.async(f, ...)`)
+    other than a group's."""
+    av = [zigtok.spaced(run_, blank=True) for run_ in runs]
+    if (recv.lower().endswith("io") and recv != "group") and av:
+        return 0
+    io_pos = next((k for k, y in enumerate(av) if IO_ARG.search(y)), None)
+    k1 = (io_pos + 1) if io_pos is not None else 1
+    return k1 if len(av) > k1 else None
+
+
+def spawn_targets(f, function, target, api="Thread.spawn"):
     """Each `Thread.spawn(` call (or a `.spawn(` decl literal with no operand) in a function named `function` of f,
     in that function's own body, whose second argument is spelled `target`: [(token index, the argument's
-    tokens)]. The registry keys an entry by that spelling (thread_gate15.py's `entries`)."""
+    tokens)]. The registry keys an entry by that spelling (thread_gate15.py's `entries`). For an `Io` task entry
+    (`is_io_task`), each `X.async(` or `X.concurrent(` call whose receiver spells the entry's api as the gate
+    records it (`self_io.async` as `io.async`) and whose task argument (`task_target`) is spelled `target`."""
     toks, want, out = f.toks, target.replace(" ", ""), []
+    task = is_io_task(api)
     for k, d in enumerate(f.fns):
         if d["kind"] != "fn" or d["name"] != function or d["body"] is None:
             continue
         b0, b1 = d["body"]
         for q in range(b0 + 1, min(b1, len(toks) - 1)):
             t = toks[q]
-            if f.owner[q] != k or t.kind != "identifier" or t.text != "spawn" or not zigtok.is_op(toks[q - 1], ".") \
+            if f.owner[q] != k or t.kind != "identifier" or not zigtok.is_op(toks[q - 1], ".") \
                     or not zigtok.is_op(toks[q + 1], "("):
                 continue
             r = toks[q - 2] if q >= 2 else None
+            if task:
+                if t.text not in TASK_OPS or r is None or r.kind != "identifier" \
+                        or re.sub(r"^\w*io\.", "io.", r.text + "." + t.text) != api:
+                    continue
+                runs, _ = zigtok.split_args(toks, q + 1)
+                i = task_target(r.text, runs)
+                if i is not None and zigtok.spaced(runs[i], blank=True).replace(" ", "") == want:
+                    out.append((q, runs[i], k))
+                continue
+            if t.text != "spawn":
+                continue
             if not ((r is not None and r.kind == "identifier" and r.text == "Thread")
                     or r is None or not (r.kind in ("identifier", "number", "string", "char")
                                          or zigtok.is_op(r, ")", "]", "?", ".*"))):
@@ -824,9 +874,10 @@ def main(argv):
         f = files.get(e["file"])
         if f is None:
             return ("no-spawn", f"{e['file']} is not in the tree")
-        spawns = spawn_targets(f, e["function"], e["target"])
+        spawns = spawn_targets(f, e["function"], e["target"], e["api"])
         if not spawns:
-            return ("no-spawn", f"{e['function']} in {e['file']} makes no Thread.spawn of {e['target']}")
+            what = e["api"] if is_io_task(e["api"]) else "Thread.spawn"
+            return ("no-spawn", f"{e['function']} in {e['file']} makes no {what} of {e['target']}")
         found = []
         for q, arg, _ in spawns:
             names = [t.text for t in arg[0::2]]
@@ -851,7 +902,7 @@ def main(argv):
         f = files.get(e["file"])
         if f is None:
             return False
-        spawns = spawn_targets(f, e["function"], e["target"])
+        spawns = spawn_targets(f, e["function"], e["target"], e["api"])
         if not spawns:
             return False
         for q, _, k in spawns:
@@ -923,11 +974,22 @@ def main(argv):
                                 f"set inside a nested block ({with_role[0]['file']}:{with_role[0]['line']}), so the "
                                 f"thread can run without it")
                 continue
-            eager = [pt for pt in top if pt["op"] in SCOPE_OPS and tf.scope_statement(pt["k"], pt["q"])]
+            # RQ7 (decision 19): a task that may run inline on its caller opens with enterIfNone, which keeps the
+            # caller's role there and enters its own on a pool worker; a thread, or a concurrent task, which always
+            # has a worker of its own, opens with enter.
+            ops = ASYNC_SCOPE_OPS if is_inline_task(e["api"]) else SCOPE_OPS
+            eager = [pt for pt in top if pt["op"] in ops and tf.scope_statement(pt["k"], pt["q"])]
             if not eager:
+                wrong = [pt for pt in top if pt["op"] in SCOPE_OPS and tf.scope_statement(pt["k"], pt["q"])]
+                if ops is ASYNC_SCOPE_OPS and wrong:
+                    failures.append(f"ENTRY-TASK-ENTER {head}: its target ({wrong[0]['file']}:{wrong[0]['line']}) "
+                                    f"opens with {wrong[0]['op']}, and an Io task std runs inline on its caller "
+                                    f"(decision 19's arms) would take its role over the caller's while it runs "
+                                    f"(RQ7); it opens with `const s = thread_role.enterIfNone(...);`")
+                    continue
                 failures.append(f"ENTRY-NOT-FIRST {head}: its role call ({top[0]['file']}:{top[0]['line']}) is not "
                                 f"the eager first statement of its target (`const s = thread_role."
-                                f"{'/'.join(SCOPE_OPS)}(...);`, with no defer, if or other wrapper and nothing "
+                                f"{'/'.join(ops)}(...);`, with no defer, if or other wrapper and nothing "
                                 f"before it), so the thread can run without the role")
                 continue
             setting = [pt for pt in eager if sets_role(pt)]
