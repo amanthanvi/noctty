@@ -3028,6 +3028,13 @@ fn openLockedStageDirectory(path: []const u8) !std.Io.File {
 /// compared with Windows' own case-insensitive rules, non-ASCII letters
 /// included (`RtlEqualUnicodeString`; council T2: an ASCII-only compare read a
 /// state folder made as "\u{c9}tat" and given as "\u{e9}tat" as another).
+///
+/// The limit (council U1): a final path that differs from `path` only by case
+/// passes. In a directory with per-directory case sensitivity turned on, a
+/// junction "\u{c9}tat" pointing at a distinct sibling "\u{e9}tat" would pass as
+/// the same folder, as an ASCII case variant ("State" to "state") already did
+/// before T2. Planting one takes write access to the state folder's parent,
+/// the user's own folder, which already allows replacing the files.
 fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
     var final_buf: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
     const final_w = try win32_sys.getFinalPathNameByHandle(handle, &final_buf);
