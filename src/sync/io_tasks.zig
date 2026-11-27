@@ -355,6 +355,109 @@ test "decision 19: the global Io's pool runs async inline beyond two busy worker
     for (held) |h| try expectPooled(h, me);
 }
 
+// A worker's stack as Windows holds it (winnt.h MEMORY_BASIC_INFORMATION,
+// 48 bytes on x64 and ARM64, pinned below; processthreadsapi.h
+// GetCurrentThreadStackLimits; memoryapi.h VirtualQuery).
+const MemoryBasicInformation = extern struct {
+    base_address: ?*anyopaque,
+    allocation_base: ?*anyopaque,
+    allocation_protect: u32,
+    partition_id: u16,
+    region_size: usize,
+    state: u32,
+    protect: u32,
+    region_type: u32,
+};
+const mem_commit: u32 = 0x1000;
+extern "kernel32" fn GetCurrentThreadStackLimits(low: *usize, high: *usize) callconv(.winapi) void;
+extern "kernel32" fn VirtualQuery(address: ?*const anyopaque, buffer: *MemoryBasicInformation, length: usize) callconv(.winapi) usize;
+
+/// The calling thread's stack: its reserve, and how much of it is
+/// committed, guard pages included.
+const StackUse = struct {
+    reserved: usize = 0,
+    committed: usize = 0,
+    thread: std.Thread.Id = 0,
+
+    fn own() StackUse {
+        var low: usize = 0;
+        var high: usize = 0;
+        GetCurrentThreadStackLimits(&low, &high);
+        var use: StackUse = .{ .reserved = high - low, .thread = std.Thread.getCurrentId() };
+        var at = low;
+        while (at < high) {
+            var info: MemoryBasicInformation = undefined;
+            if (VirtualQuery(@ptrFromInt(at), &info, @sizeOf(MemoryBasicInformation)) == 0) break;
+            const end = @min(high, @intFromPtr(info.base_address) + info.region_size);
+            if (info.state == mem_commit) use.committed += end - at;
+            at = end;
+        }
+        return use;
+    }
+};
+
+/// A task that reads its worker's stack, held until the gate opens so each
+/// of the pool's workers runs one.
+fn stackTask(use: *StackUse, gate: *Gate) void {
+    const seen: StackUse = .own();
+    use.reserved = seen.reserved;
+    use.committed = seen.committed;
+    // Last, so the test reads the sizes once it sees the thread.
+    @atomicStore(std.Thread.Id, &use.thread, seen.thread, .release);
+    while (!gate.open.load(.acquire)) std.Thread.yield() catch {};
+}
+
+test "decision 19: each of the global Io pool's workers commits its whole stack, std's 16 MiB, so four commit 64 MiB" {
+    // The layout is x64's and ARM64's alike (both LLP64 with 8-byte pointers).
+    try testing.expectEqual(48, @sizeOf(MemoryBasicInformation));
+    try testing.expectEqual(24, @offsetOf(MemoryBasicInformation, "region_size"));
+    try testing.expectEqual(32, @offsetOf(MemoryBasicInformation, "state"));
+
+    // 0.17.1's std.Thread.spawn passes the size to NtCreateThreadEx as the
+    // stack's commit, with the image's reserve (lib/std/Thread.zig:560,
+    // :592-604), and Io.Threaded spawns every worker with its stack_size.
+    const pool = @import("../global.zig").io_pool;
+    var threaded: Io.Threaded = .init(testing.allocator, .{
+        .async_limit = pool.async_limit,
+        .concurrent_limit = pool.concurrent_limit,
+        .stack_size = pool.stack_size,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var gate: Gate = .{ .caller = std.Thread.getCurrentId() };
+    var uses: [4]StackUse = @splat(.{});
+    var futures: [4]Io.Future(void) = undefined;
+    var started: usize = 0;
+    defer {
+        gate.open.store(true, .release);
+        for (futures[0..started]) |*f| f.await(io);
+    }
+    while (started < uses.len) : (started += 1) {
+        futures[started] = try io.concurrent(stackTask, .{ &uses[started], &gate });
+    }
+    // Each task has its own worker while the gate is shut.
+    while (true) {
+        var measured: usize = 0;
+        for (&uses) |*u| {
+            if (@atomicLoad(std.Thread.Id, &u.thread, .acquire) != 0) measured += 1;
+        }
+        if (measured == uses.len) break;
+        std.Thread.yield() catch {};
+    }
+    gate.open.store(true, .release);
+    for (&futures) |*f| f.await(io);
+
+    var total: usize = 0;
+    for (uses, 0..) |u, i| {
+        for (uses[0..i]) |v| try testing.expect(u.thread != v.thread);
+        try testing.expectEqual(pool.stack_size, u.reserved);
+        try testing.expectEqual(pool.stack_size, u.committed);
+        total += u.committed;
+    }
+    try testing.expectEqual(64 << 20, total);
+}
+
 /// One pinned line of `lib/std/Io/Threaded.zig`: its 1-based number and its
 /// text, leading and trailing spaces trimmed.
 const Pin = struct { line: usize, text: []const u8 };
@@ -399,6 +502,13 @@ const group_pins = [_]Pin{
     .{ .line = 2278, .text = "fn groupConcurrent(" },
 };
 
+fn expectFunctionName(bare: []const u8, name: []const u8) !void {
+    if (std.mem.eql(u8, bare, name)) return;
+    if (name.len > bare.len and std.mem.endsWith(u8, name, bare) and name[name.len - bare.len - 1] == '.') return;
+    std.debug.print("the vtable's {s} is named \"{s}\"\n", .{ bare, name });
+    return error.TestUnexpectedFunction;
+}
+
 fn trimmed(line: []const u8) []const u8 {
     return std.mem.trim(u8, line, " \t\r");
 }
@@ -424,8 +534,10 @@ test "acceptance test 19: the std this binary was built from runs a task on its 
     defer async_at.deinit(a);
     const group_at = (try session.locate(a, @intFromPtr(vtable.groupAsync))) orelse return error.TestGroupAsyncNotLocated;
     defer group_at.deinit(a);
-    try testing.expect(std.mem.endsWith(u8, async_at.name, ".async"));
-    try testing.expect(std.mem.endsWith(u8, group_at.name, ".groupAsync"));
+    // DbgHelp names a function by its bare name on 0.17.1 (`symbolise`'s
+    // keys), a qualified one if a later compiler writes it.
+    try expectFunctionName("async", async_at.name);
+    try expectFunctionName("groupAsync", group_at.name);
     try testing.expectEqualStrings(async_at.file, group_at.file);
     const tail = "lib\\std\\Io\\Threaded.zig";
     try testing.expect(async_at.file.len > tail.len);
