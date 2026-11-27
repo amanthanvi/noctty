@@ -89,3 +89,5 @@ test-dir-io (also):
   is `StreamTooLong`, and a helper outside the test may consume the old name.
 - every statFile in a file that names `IsDir` anywhere: 0.17's statFile reports a directory as
   `kind = .directory`, where 0.15's refused one with `IsDir` (council H2).
+- every statFile whose result `try` does not consume (council Y4): code that picks a path by its success or error
+  (an `if` over the result, a `catch`, an `expectError`) can take the other branch on 0.17 and still pass.

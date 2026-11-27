@@ -223,6 +223,24 @@ class RuleTests(unittest.TestCase):
                 self.assertIn('tmp.dir.statFile("a")', got)
                 self.assertIn(("test-dir-io", 3, "hand edit: " + codemod.IS_DIR), rows)
 
+    def test_stat_file_is_rewritten_only_under_try(self):
+        # council Y4: 0.17's statFile reports a directory where 0.15's refused one, so a test that picks its path by
+        # statFile's success or error can take the other branch and still pass. Only a `try` keeps the rewrite.
+        head = 'test "st" {\n    var tmp = std.testing.tmpDir(.{});\n'
+        for call in ('    const path = if (tmp.dir.statFile("a")) |_| "a" else |_| "b";\n',
+                     '    const found = if (std.fs.cwd().statFile("a")) |_| true else |_| false;\n',
+                     '    _ = tmp.dir.statFile("a") catch null;\n',
+                     '    try testing.expectError(error.FileNotFound, tmp.dir.statFile("a"));\n'):
+            with self.subTest(call=call):
+                rows = []
+                got, _ = codemod.rewrite(head + call + '}\n', None, None, rows)
+                self.assertIn('statFile("a")', got)
+                self.assertIn(("test-dir-io", 3, "hand edit: " + codemod.STAT_USE), rows)
+        for call in ('    const st = try tmp.dir.statFile("a");\n', '    _ = (try std.fs.cwd().statFile("a")).kind;\n'):
+            with self.subTest(call=call):
+                got, _ = codemod.rewrite(head + call + '}\n')
+                self.assertIn('statFile(std.testing.io, "a", .{})', got)
+
     def test_read_file_alloc_keeps_the_inclusive_bound(self):
         # council F2 (QR-30): 0.15 read a file of exactly n bytes, which 0.17's `.limited(n)` refuses; `n + 1` keeps
         # the bound where n is an integer literal (council G6: no longer a name, which may be the maximum).

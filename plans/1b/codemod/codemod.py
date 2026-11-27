@@ -337,6 +337,9 @@ def _freed_or_read(toks, lo, hi, decl):
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
 IS_DIR = ("the file names IsDir: 0.17's statFile reports a directory as kind = .directory, where 0.15's refused one "
           "with IsDir (council H2)")
+STAT_USE = ("statFile's result is not consumed by `try`: 0.17 reports a directory as kind = .directory where 0.15 "
+            "refused one, so code that branches on its success or error can take the other branch and still pass "
+            "(council Y4)")
 LIMIT_SHAPE = ("readFileAlloc's limit is no integer literal, so `+ 1` (0.15's inclusive bound) could change it "
                "(`1 << 20 + 1` is `1 << 21`) or overflow (a name bound to `maxInt(usize)`)")
 INT_LITERAL = re.compile(r"0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*")
@@ -621,6 +624,8 @@ def rule_test_dir_io(text, toks):
                     raise HandEdit(FILE_TOO_BIG)
                 if t.text == "statFile" and names_is_dir:
                     raise HandEdit(IS_DIR)
+                if t.text == "statFile" and not is_tok(at(toks, i - (5 if recv == "tmp" else 9)), "keyword", "try"):
+                    raise HandEdit(STAT_USE)
                 if t.text == "realpathAlloc":
                     s = i - (4 if recv == "tmp" else 8)
                     if not _untyped_const_init(toks, s, close):
