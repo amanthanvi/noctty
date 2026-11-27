@@ -102,9 +102,12 @@ not an adaptation to record.
   history. At the stone `mem.canReclaim` is false on Windows, so
   `PageList.compress` returns `.unsupported` and a release build never
   compresses; the test suite does (`builtin.is_test`). Windows reclaim
-  (upstream `60b43068c`) comes after the stone, and the fork's UIA and
-  session readers move to `pagePreservingState()` with it; the search
-  window's reads move at the merge itself (the last item below).
+  (upstream `60b43068c`, in v1.4.0) comes after the stone, so from the
+  1B merge a release build compresses on Windows too, and the fork's UIA
+  and session readers read through `pagePreservingState()` (the
+  2026-11-27 READ-PRESERVED-01 entry in
+  docs/agents/log/terminal-core.md); the search window's reads moved at
+  the stone merge itself (the last item below).
 - The page owner is `node.owned`, never the page's size: upstream's
   `compact` puts a page at or below `std_size` on the heap, and returning
   such a page to the pool corrupts it. The merge takes upstream's `compact`

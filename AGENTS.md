@@ -304,10 +304,11 @@ that govern each symbol you change, or that none does.
   `pagePreservingState()`, `pageAssumeResident()`, `storage()` and
   `Node.owned`), the page owner in `destroyNodeExt` and `compact`, the
   Node section of `docs/upstream-merge-policy.md`, and their callers in
-  `src/inspector/widgets/pagelist.zig`, `snapshotDocumentWindow` in
-  `src/apprt/win32_uia/text.zig` and the session readers in
-  `src/apprt/win32/session.zig` (`captureTerminalScrollbackSnapshotAlloc`,
-  `terminalScreenIsUnpainted`), OSC parsers,
+  `src/inspector/widgets/pagelist.zig`, `snapshotDocumentWindow` and its
+  `formatDocument` in `src/apprt/win32_uia/text.zig` and the session
+  readers in `src/apprt/win32/session.zig`
+  (`captureTerminalScrollbackSnapshotAlloc` with `lastTextPin` and
+  `formatPlainPreserving`, `terminalScreenIsUnpainted`), OSC parsers,
   OSC 133 exit codes, prompt typeahead
   in `semantic_command.zig` and what drops its last command when rows or
   cells move (`invalidateRange`, `invalidateMarginShift`, from
