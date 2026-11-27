@@ -13,18 +13,19 @@ const windows_ext = @import("os/windows_ext.zig");
 
 pub const panic = std.debug.no_panic;
 
-/// This launcher has no global state: its file and process calls run on the
-/// calling thread.
-inline fn launcherIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
+// No `std.Io` here: a `std.Io` from `std.Io.Threaded` links every
+// implementation its vtable names, which took this binary from under
+// 128 KiB to 576,000 bytes on Zig 0.17 (cli-forwarder.yml's gate). Its two
+// uses are Win32 calls instead: the error line (`WriteFile`) and the
+// launcher's own path (`selfPathAlloc`).
 
 pub fn main(init: std.process.Init.Minimal) void {
     const code = forward(init.args) catch |err| {
         var buffer: [256]u8 = undefined;
-        var writer = std.Io.File.stderr().writer(launcherIo(), &buffer);
-        writer.interface.print("noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch {};
-        writer.interface.flush() catch {};
+        const line = std.fmt.bufPrint(&buffer, "noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch "noctty command launcher could not start or wait for noctty.exe\n";
+        if (win32_sys.GetStdHandle(win32_types.STD_ERROR_HANDLE)) |stderr| {
+            if (stderr != w.INVALID_HANDLE_VALUE) _ = win32_sys.WriteFile(stderr, line.ptr, @intCast(line.len), null, null);
+        }
         win32_sys.ExitProcess(1);
     };
     win32_sys.ExitProcess(code);
@@ -34,8 +35,8 @@ fn forward(args: std.process.Args) !u32 {
     const alloc = std.heap.page_allocator;
     // Detection errors are actions too: noctty.exe owns their diagnostics.
     const wait = if (cli_action.detectArgs(Action, alloc, args)) |action| action != null else |_| true;
-    // executablePath resolves symlinks, preserving the old launcher's sibling rule.
-    const self_path = try std.process.executablePathAlloc(launcherIo(), alloc);
+    // The path after any link, preserving the old launcher's sibling rule.
+    const self_path = try selfPathAlloc(alloc);
     defer alloc.free(self_path);
     const image_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(self_path) orelse return error.ExecutablePathUnavailable, "noctty.exe" });
     defer alloc.free(image_path);
@@ -104,6 +105,21 @@ fn forward(args: std.process.Args) !u32 {
     var code: u32 = undefined;
     if (win32_sys.GetExitCodeProcess(process.hProcess, &code) == 0) return error.ExitCodeUnavailable;
     return code;
+}
+
+/// The launcher's own path after any link, as std's `executablePathAlloc`
+/// gives it on Windows (`processExecutablePath` in `lib/std/Io/Threaded.zig`):
+/// the PEB's image path, opened, and its final path in DOS form, as WTF-8.
+fn selfPathAlloc(alloc: std.mem.Allocator) ![]u8 {
+    var path = try std.Io.Threaded.wToPrefixedFileW(null, w.peb().ProcessParameters.ImagePathName.sliceZ(), .{});
+    const handle = try win32_sys.openFile(path.span(), .{
+        .access_mask = win32_types.SYNCHRONIZE | win32_types.GENERIC_READ,
+        .creation = win32_types.FILE_OPEN,
+        .filter = .any,
+    });
+    defer w.CloseHandle(handle);
+    const final = try win32_sys.getFinalPathNameByHandle(handle, &path.data);
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, final);
 }
 
 fn inheritableStdHandle(id: w.DWORD) !?w.HANDLE {
