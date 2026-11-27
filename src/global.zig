@@ -40,10 +40,12 @@ pub const xev = @import("xev").Dynamic;
 /// The global `Io`'s pool (the fork's decision 19 for Zig 0.17): beyond two
 /// busy workers an `async` task runs inline on its caller, and `concurrent`
 /// gets at most four, so one shared pool of at most max(2, 4) = 4 workers
-/// (`std.Progress`, if started, takes one of them). Each worker gets std's
-/// default stack (`std.Thread.SpawnConfig.default_stack_size`, 16 MiB),
-/// stated here so the soak's reserve and commit measurements can set it; a
-/// cut below it needs a stack-use measurement, as the surface thread's had.
+/// (`std.Progress`, if started, takes one of them). Each worker's stack is
+/// a 1 MiB commit in the image's 16 MiB reserve: 0.17.1's `std.Thread.spawn`
+/// hands `stack_size` to `NtCreateThreadEx` as the commit and keeps the
+/// image's reserve, so a task can still grow its stack to 16 MiB, and the
+/// pool commits 4 MiB, not std's default 64 MiB (both measured on a worker
+/// in `sync/io_tasks.zig`).
 /// An `Io` task enters its thread role with `thread_role.enterIfNone`
 /// (`sync/io_tasks.zig`).
 pub const io_pool: struct {
@@ -53,7 +55,7 @@ pub const io_pool: struct {
 } = .{
     .async_limit = .limited(2),
     .concurrent_limit = .limited(4),
-    .stack_size = std.Thread.SpawnConfig.default_stack_size,
+    .stack_size = 1 << 20,
 };
 
 /// Global process state. This is initialized in main() for exe artifacts and

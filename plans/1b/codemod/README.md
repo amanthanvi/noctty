@@ -25,6 +25,9 @@ migration re-runs at every forward merge through 1B.9 (PLAN.md row 1B.5, U7).
   counted. `python -I plans/1b/codemod/test_b1_sweep.py`.
 - `census.py`: the distinct compile errors of a `zig build` log, by file and by kind, for the waves that follow.
 - `residue.tsv`: the hand edits, each with its file and why no rule makes it.
+  No rule rewrites a `StateMutex` call a forward merge brings in, from either side: outside a test build its `lock()`
+  is a compile error and its `lockUncancelable()` and `unlock()` take no `Io`, so the compile catches a `lock()`, a
+  `lockUncancelable(io)` or an `unlock(io)` (1B.6, B6/A7).
 
 A run: the codemod over the files in scope (Phase 0b files that are not yet on the branch are left out), then
 `zig fmt` (0.17's own rewrite of `@intFromEnum` and the other renamed builtins), then the build, whose census decides

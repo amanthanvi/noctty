@@ -306,7 +306,7 @@ test "decision 19: the global Io's pool runs async inline beyond two busy worker
     const pool = @import("../global.zig").io_pool;
     try testing.expectEqual(Io.Limit.limited(2), pool.async_limit);
     try testing.expectEqual(Io.Limit.limited(4), pool.concurrent_limit);
-    try testing.expectEqual(std.Thread.SpawnConfig.default_stack_size, pool.stack_size);
+    try testing.expectEqual(1 << 20, pool.stack_size);
 
     const scope = On.fixture(.ui);
     defer scope.exit();
@@ -369,14 +369,16 @@ const MemoryBasicInformation = extern struct {
     region_type: u32,
 };
 const mem_commit: u32 = 0x1000;
+const page_guard: u32 = 0x100;
 extern "kernel32" fn GetCurrentThreadStackLimits(low: *usize, high: *usize) callconv(.winapi) void;
 extern "kernel32" fn VirtualQuery(address: ?*const anyopaque, buffer: *MemoryBasicInformation, length: usize) callconv(.winapi) usize;
 
-/// The calling thread's stack: its reserve, and how much of it is
-/// committed, guard pages included.
+/// The calling thread's stack: its reserve, how much of it is committed,
+/// guard pages included, and how much of that is guard pages.
 const StackUse = struct {
     reserved: usize = 0,
     committed: usize = 0,
+    guard: usize = 0,
     thread: std.Thread.Id = 0,
 
     fn own() StackUse {
@@ -390,6 +392,7 @@ const StackUse = struct {
             if (VirtualQuery(@ptrFromInt(at), &info, @sizeOf(MemoryBasicInformation)) == 0) break;
             const end = @min(high, @intFromPtr(info.base_address) + info.region_size);
             if (info.state == mem_commit) use.committed += end - at;
+            if (info.state == mem_commit and info.protect & page_guard != 0) use.guard += end - at;
             at = end;
         }
         return use;
@@ -402,12 +405,23 @@ fn stackTask(use: *StackUse, gate: *Gate) void {
     const seen: StackUse = .own();
     use.reserved = seen.reserved;
     use.committed = seen.committed;
+    use.guard = seen.guard;
     // Last, so the test reads the sizes once it sees the thread.
     @atomicStore(std.Thread.Id, &use.thread, seen.thread, .release);
     while (!gate.open.load(.acquire)) std.Thread.yield() catch {};
 }
 
-test "decision 19: each of the global Io pool's workers commits its whole stack, std's 16 MiB, so four commit 64 MiB" {
+/// The image's stack reserve, Zig's default for an executable (the link's
+/// `-STACK:16777216`), which a pool worker keeps whatever its commit.
+const image_stack_reserve = 16 << 20;
+/// The most a stack's guard region may add to its commit: committed
+/// PAGE_GUARD pages below the committed stack, absent when the whole reserve
+/// is committed. Measured on x64 Windows 11 26300 in Debug and ReleaseSafe:
+/// 12,288 bytes (three pages) on every worker; the bound leaves room for
+/// another architecture's guard.
+const max_stack_guard = 64 << 10;
+
+test "decision 19: each of the global Io pool's workers commits 1 MiB and its guard pages in the image's 16 MiB reserve" {
     // The layout is x64's and ARM64's alike (both LLP64 with 8-byte pointers).
     try testing.expectEqual(48, @sizeOf(MemoryBasicInformation));
     try testing.expectEqual(24, @offsetOf(MemoryBasicInformation, "region_size"));
@@ -451,11 +465,56 @@ test "decision 19: each of the global Io pool's workers commits its whole stack,
     var total: usize = 0;
     for (uses, 0..) |u, i| {
         for (uses[0..i]) |v| try testing.expect(u.thread != v.thread);
-        try testing.expectEqual(pool.stack_size, u.reserved);
-        try testing.expectEqual(pool.stack_size, u.committed);
-        total += u.committed;
+        try testing.expectEqual(image_stack_reserve, u.reserved);
+        // The commit is the stack_size plus the guard region, nothing more.
+        try testing.expect(u.guard > 0 and u.guard <= max_stack_guard);
+        try testing.expect(u.committed <= pool.stack_size + u.guard);
+        total += u.committed - u.guard;
     }
-    try testing.expectEqual(64 << 20, total);
+    try testing.expect(total <= 4 << 20);
+}
+
+/// 256 frames of 16 KiB: 4 MiB of stack, four times a worker's commit.
+const deep_frames = 256;
+const deep_frame_bytes = 16 << 10;
+
+/// Writes every byte of its frame, so each page of it is touched, and reads
+/// the worker's stack at the deepest frame. The sum keeps every frame live.
+noinline fn deepFrames(depth: usize, bottom: *StackUse) u64 {
+    var frame: [deep_frame_bytes]u8 = undefined;
+    @memset(&frame, @truncate(depth));
+    std.mem.doNotOptimizeAway(&frame);
+    if (depth == 0) {
+        bottom.* = .own();
+        return frame[0];
+    }
+    return deepFrames(depth - 1, bottom) +% frame[frame.len - 1];
+}
+
+fn deepTask(bottom: *StackUse) u64 {
+    return deepFrames(deep_frames - 1, bottom);
+}
+
+test "decision 19: a task on a pool worker grows its stack past the 1 MiB commit to 4 MiB and returns" {
+    const pool = @import("../global.zig").io_pool;
+    var threaded: Io.Threaded = .init(testing.allocator, .{
+        .async_limit = pool.async_limit,
+        .concurrent_limit = pool.concurrent_limit,
+        .stack_size = pool.stack_size,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var bottom: StackUse = .{};
+    // concurrent, not async: the task must run on a worker, never inline.
+    var future = try io.concurrent(deepTask, .{&bottom});
+    const sum = future.await(io);
+
+    // Frame d is filled with d, and the sum is each frame's byte: 0 + 1 + ... + 255.
+    try testing.expectEqual(@as(u64, deep_frames * (deep_frames - 1) / 2), sum);
+    try testing.expect(bottom.thread != std.Thread.getCurrentId());
+    try testing.expectEqual(image_stack_reserve, bottom.reserved);
+    try testing.expect(bottom.committed - bottom.guard >= deep_frames * deep_frame_bytes);
 }
 
 /// One pinned line of `lib/std/Io/Threaded.zig`: its 1-based number and its
