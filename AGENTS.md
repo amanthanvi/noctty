@@ -635,7 +635,8 @@ that govern each symbol you change, or that none does.
   where each shown value comes from (`config.origin`,
   `win32_settings_reference.savedOrigin`), the opacity trackbar and the number
   up-downs, the Profiles page (`ReferenceList`, `ListKind.profiles`,
-  `win32_settings_profiles.zig`) and the identity patcher that saves it
+  `win32_settings_profiles.zig`, and the `Lists` its model's moves and
+  hides give) and the identity patcher that saves it
   (`win32/settings_patch.zig`, `FileEnd`), the config line reader it shares
   with the loader (`cli/args.zig` `LineIterator.takes`, `read_failed`,
   `Config.loadReader`), the keyboard pin in Settings dialog tests

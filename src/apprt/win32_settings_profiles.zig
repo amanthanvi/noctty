@@ -761,7 +761,10 @@ pub const Model = struct {
 };
 
 /// What a move or a hide makes the draft's two lists (`Model.moved`,
-/// `Model.toggledHidden`).
+/// `Model.toggledHidden`, `Model.writtenLists`). The slices are the
+/// caller's (`a`), but a key in them may be the model's own
+/// (`Profile.key`), which the next build frees: copy one that must outlive
+/// it (`setLists` does; `profileMove` dupes the key it looks up after).
 pub const Lists = struct {
     order: []const []const u8,
     hidden: []const []const u8,
@@ -2231,6 +2234,12 @@ test "settings profiles: a profile the draft adds that a saved name hides is hid
         try expectSameText("user:dev\ncmd.exe\n", hidden);
     }
     try setLists(&draft, lists.order, lists.hidden);
+    // `lists` holds the page's own keys, which the rebuild below frees: the
+    // picker reads the draft's copies, the lists a save writes.
+    const saved_order = try a.alloc([]const u8, draft.@"profile-order".list.items.len);
+    for (draft.@"profile-order".list.items, saved_order) |value, *slot| slot.* = value;
+    const saved_hidden = try a.alloc([]const u8, draft.@"profile-hidden".list.items.len);
+    for (draft.@"profile-hidden".list.items, saved_hidden) |value, *slot| slot.* = value;
     try model.buildReferenced(alloc, &draft, &original, &listed, refs, true);
     // The page, the saved lists and the app's picker after the reload agree
     // on every profile.
@@ -2240,7 +2249,7 @@ test "settings profiles: a profile the draft adds that a saved name hides is hid
         .{ .kind = .user, .key = "user:dev", .label = "dev", .command = .{ .direct = &.{} } },
         .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
     };
-    windows_shell.arrangeProfiles(&profiles, lists.order, lists.hidden);
+    windows_shell.arrangeProfiles(&profiles, saved_order, saved_hidden);
     for (profiles) |profile| {
         const page = model.profiles[model.profileByKey(profile.key) orelse return error.TestExpectedProfile];
         try testing.expectEqual(profile.hidden, page.hidden);
