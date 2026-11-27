@@ -159,8 +159,10 @@ mixed hunks, P1 and Q1, each failed open on twin scopes). Two limits follow:
   make git align an unchanged call as added, and that call is reported: two
   identical calls whose comments are swapped, beside one added call, report
   both the added call and the misaligned one (`[7, 11]` in
-  `test_comment_only_file_is_never_flagged_whatever_git_aligns`). Split the
-  comment edit into its own hunk or commit.
+  `test_comment_only_file_is_never_flagged_whatever_git_aligns`). Put the
+  comment edit in its own hunk, or land it in a separate PR first: the lint
+  diffs the merge base against the head, so separate commits in the same PR
+  still make one mixed hunk.
 - **An edit elsewhere that changes scope is missed.** When the uses of an alias
   whose own line is untouched bind somewhere else (a removed `else` boundary,
   merged blocks), no touched definition rechecks them. This limit of the

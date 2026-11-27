@@ -866,8 +866,8 @@ class GitControls(unittest.TestCase):
         self.assertEqual([("probe.zig", 5, "error", "removed std.os.windows.kernel32.Sleep")],
                          win.check(self.repo, base, head, upstream, removed))
         # Documented over-report (council R1 on #768): the same comment beside a changed next line is one hunk whose
-        # code changed, so the alias counts as changed and its unchanged use is rechecked. It fails closed; split the
-        # comment edit into its own hunk or commit.
+        # code changed, so the alias counts as changed and its unchanged use is rechecked. It fails closed; put the
+        # comment edit in its own hunk, or land it in a separate PR first (the lint diffs merge base against head).
         self.write("probe.zig", commented.replace("const unrelated = 1;", "const unrelated = 2;"))
         head = self.commit()
         self.assertEqual([4], [row[1] for row in win.check(self.repo, base, head, upstream, removed)])
@@ -1251,7 +1251,7 @@ class HistoryControls(unittest.TestCase):
                          self.check(self.base, self.fixture(path, added)))
         # Documented over-report (council R1 on #768): the same comment beside a change to the next line is one hunk
         # whose code changed, so the alias counts as changed and its 40 unchanged uses are rechecked. It fails closed:
-        # a developer splits the comment edit into its own hunk or commit.
+        # a developer puts the comment edit in its own hunk, or lands it in a separate PR first.
         following = "const log = std.log.scoped(.win32);\n"
         self.assertEqual(1, commented.count(following))
         mixed = self.fixture(path, commented.replace(following, "const log = std.log.scoped(.win32_ipc);\n"))
