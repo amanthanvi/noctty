@@ -1165,7 +1165,7 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
         if (len == 0 or len > image.len) continue;
         if (isStagedImage(final, image[0..len])) return true;
         if (stage_identity) |identity| {
-            if (stagedImageByIdentity(alloc, image[0..len], identity)) return true;
+            if (stagedImageByIdentity(alloc, final, image[0..len], identity)) return true;
         }
     }
     return false;
@@ -1201,8 +1201,13 @@ fn directoryIdentity(handle: std.os.windows.HANDLE) ?DirectoryIdentity {
 /// the reverse. `image` has `isStagedImage`'s shape, `<dir>\<version>\<name>.exe`,
 /// and its `<dir>` is the stage itself by identity. Only an image whose
 /// `<dir>` is named `updates`, as every stage is (`stagedInstallerRunning`),
-/// is opened, for its attributes only.
-fn stagedImageByIdentity(alloc: Allocator, image: []const u16, stage: DirectoryIdentity) bool {
+/// and that lies on the stage's own root (`onStageRoot`), is opened, for its
+/// attributes only.
+fn stagedImageByIdentity(alloc: Allocator, stage_final: []const u16, image: []const u16, stage: DirectoryIdentity) bool {
+    // Nothing off the stage's root is opened (council U2): the open is
+    // synchronous, and this runs while noctty answers WM_QUERYENDSESSION, so
+    // an image on a slow or gone share would hold the reply.
+    if (!onStageRoot(stage_final, image)) return false;
     const sep: u16 = '\\';
     const name_start = (std.mem.lastIndexOfScalar(u16, image, sep) orelse return false) + 1;
     const name = image[name_start..];
@@ -1230,6 +1235,53 @@ fn stagedImageByIdentity(alloc: Allocator, image: []const u16, stage: DirectoryI
     defer std.os.windows.CloseHandle(handle);
     const found = directoryIdentity(handle) orelse return false;
     return found.volume == stage.volume and std.mem.eql(u8, &found.file_id, &stage.file_id);
+}
+
+/// Whether `image` lies on the same root as the stage's final path `stage`:
+/// the same drive (`X:\`), or for a UNC stage the same `\\server\share\`,
+/// compared without case. Anything else, a device path included, is not.
+fn onStageRoot(stage: []const u16, image: []const u16) bool {
+    const sep: u16 = '\\';
+    const len = rootLen(stage) orelse return false;
+    if (image.len <= len) return false;
+    return (rootLen(image) orelse return false) == len and win32_sys.eqlIgnoreCaseWtf16(stage[0..len], image[0..len]);
+}
+
+/// The length of a final path's root with its separator: 3 for `X:\`, and
+/// up to the separator after the share for `\\server\share\`; null for
+/// any other form.
+fn rootLen(path: []const u16) ?usize {
+    const sep: u16 = '\\';
+    if (path.len >= 3 and path[1] == ':' and path[2] == sep and std.ascii.isAlphabetic(std.math.cast(u8, path[0]) orelse return null))
+        return 3;
+    if (path.len < 2 or path[0] != sep or path[1] != sep) return null;
+    const server_end = std.mem.indexOfScalarPos(u16, path, 2, sep) orelse return null;
+    if (server_end == 2) return null;
+    // `\\?\` and `\\.\` are device forms, not a server.
+    if (server_end == 3 and (path[2] == '?' or path[2] == '.')) return null;
+    const share_end = std.mem.indexOfScalarPos(u16, path, server_end + 1, sep) orelse return null;
+    if (share_end == server_end + 1) return null;
+    return share_end + 1;
+}
+
+test "the identity fallback looks only on the stage's own root (council U2)" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    // The same drive, any case.
+    try std.testing.expect(onStageRoot(w("C:\\Users\\a\\updates"), w("c:\\Users\\A\\UPDATES\\1.2.3\\s.exe")));
+    // Another drive.
+    try std.testing.expect(!onStageRoot(w("C:\\Users\\a\\updates"), w("D:\\Users\\a\\updates\\1.2.3\\s.exe")));
+    // A UNC image with a local stage is refused before any open.
+    try std.testing.expect(!onStageRoot(w("C:\\Users\\a\\updates"), w("\\\\server\\share\\updates\\1.2.3\\tool.exe")));
+    // A local image with a UNC stage.
+    try std.testing.expect(!onStageRoot(w("\\\\server\\share\\a\\updates"), w("C:\\a\\updates\\1.2.3\\tool.exe")));
+    // The same share, any case; another share or server.
+    try std.testing.expect(onStageRoot(w("\\\\server\\share\\a\\updates"), w("\\\\SERVER\\Share\\a\\updates\\1\\t.exe")));
+    try std.testing.expect(!onStageRoot(w("\\\\server\\share\\a\\updates"), w("\\\\server\\other\\a\\updates\\1\\t.exe")));
+    try std.testing.expect(!onStageRoot(w("\\\\server\\share\\a\\updates"), w("\\\\elsewhere\\share\\a\\updates\\1\\t.exe")));
+    // Device forms and a bare root are no root.
+    try std.testing.expect(!onStageRoot(w("C:\\a\\updates"), w("\\\\?\\C:\\a\\updates\\1\\t.exe")));
+    try std.testing.expect(!onStageRoot(w("\\\\.\\pipe\\x"), w("\\\\.\\pipe\\x\\1\\t.exe")));
+    try std.testing.expect(!onStageRoot(w("C:\\a\\updates"), w("C:\\")));
 }
 
 test "FILE_ID_INFO layout" {
