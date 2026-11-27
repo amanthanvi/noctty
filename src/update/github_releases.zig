@@ -4451,12 +4451,31 @@ const StagedSetupFixture = struct {
 
 /// For tests: whether a Setup started from `image` reads as running through
 /// the state path in `state_dir`'s spelling, and not before it starts.
-fn expectStagedSetupFound(alloc: Allocator, state_dir: []const u8, image: []const u8) !void {
+/// `string_match`: whether the fast string compare (`isStagedImage`) alone
+/// finds it, read from the stage's final path and the started process's own
+/// image name (council U4): in a mixed spelling it must miss, so the find is
+/// the identity fallback's.
+fn expectStagedSetupFound(alloc: Allocator, state_dir: []const u8, image: []const u8, string_match: bool) !void {
+    const io = std.testing.io;
     const state_path = try std.fs.path.join(alloc, &.{ state_dir, "update-state.json" });
     defer alloc.free(state_path);
     try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
     const process = try StagedSetupFixture.startSetup(alloc, image);
     defer StagedSetupFixture.endSetup(process);
+    {
+        const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
+        defer alloc.free(updates_dir);
+        var dir = try std.Io.Dir.openDirAbsolute(io, updates_dir, .{});
+        defer dir.close(io);
+        const final_buf = try alloc.alloc(u16, std.os.windows.PATH_MAX_WIDE);
+        defer alloc.free(final_buf);
+        const final = try win32_sys.getFinalPathNameByHandle(dir.handle, final_buf);
+        const image_buf = try alloc.alloc(u16, std.os.windows.PATH_MAX_WIDE);
+        defer alloc.free(image_buf);
+        var image_len: u32 = @intCast(image_buf.len);
+        if (QueryFullProcessImageNameW(process.hProcess, 0, image_buf.ptr, &image_len) == 0) return error.Unexpected;
+        try std.testing.expectEqual(string_match, isStagedImage(final, image_buf[0..image_len]));
+    }
     try std.testing.expect(stagedInstallerRunning(alloc, state_path));
 }
 
@@ -4467,7 +4486,7 @@ test "a staged Setup started by the stage's 8.3 spelling reads as running (counc
     defer fixture.deinit(alloc);
     // Setup started by the stage's short spelling, as a short-spelled state
     // path launches it.
-    try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_short);
+    try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_short, true);
 }
 
 test "a staged Setup and its stage spelled differently are matched by the folder's identity (council T3)" {
@@ -4476,11 +4495,11 @@ test "a staged Setup and its stage spelled differently are matched by the folder
     var fixture = (try StagedSetupFixture.init(alloc)) orelse return error.SkipZigTest;
     defer fixture.deinit(alloc);
     // The stage queried by its 8.3 alias, Setup started by the long spelling.
-    try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_long);
+    try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_long, false);
     // The stage queried by its long spelling, Setup started by the alias.
-    try expectStagedSetupFound(alloc, fixture.state_long, fixture.image_short);
+    try expectStagedSetupFound(alloc, fixture.state_long, fixture.image_short, false);
     // The long spelling both ways.
-    try expectStagedSetupFound(alloc, fixture.state_long, fixture.image_long);
+    try expectStagedSetupFound(alloc, fixture.state_long, fixture.image_long, true);
 }
 
 /// For tests: `long` as GetShortPathNameW spells it, every component that has
