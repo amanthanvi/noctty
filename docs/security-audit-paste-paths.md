@@ -140,7 +140,7 @@ The Win32 OLE classifier is an additional defense, not a replacement for the cor
 
 ### Medium: session parser returns dangling string slices
 
-**Status: fixed in this change.** The full `SessionState` parse uses `.allocate = .alloc_always`; a regression test frees and overwrites the source allocation before reading restored strings.
+**Status: fixed in this change.** The full `SessionState` parse uses `.allocate = .alloc_always`; a regression test frees and overwrites the source allocation before reading restored strings. Re-checked on Zig 0.17.1 (1B.6): `std.json` still parses a slice with `.alloc_if_needed` unless told otherwise (`lib/std/json/static.zig:142-147`), so the option stays load-bearing. Both document parses pass `.alloc_always` (`src/apprt/win32_session_state.zig`, the layout and the full state), the two custom `jsonParse` hooks read only a key or an enum name through `.alloc_if_needed` and keep neither, and the regression test ("security regression win32 session state parse owns restored pane strings") passes on 0.17.1 with the file's other 32 tests.
 
 - **Attacker control:** the on-disk session JSON controls unescaped cwd, profile, and title strings.
 - **Concrete failure:** Zig 0.15.2 `parseFromSlice` defaults to `alloc_if_needed`, so an unescaped JSON string may remain a slice into the raw input. `loadAlloc` defers freeing that input before returning the parsed state (`src/apprt/win32_session_persistence.zig:24-36`), and restore later dereferences the fields (`src/apprt/win32/session.zig`, `restoreSessionPane`). This establishes a use-after-free and possible crash/corrupted restore; reliable code execution was not established.
