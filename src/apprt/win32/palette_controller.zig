@@ -744,8 +744,11 @@ fn writePaletteMruLine(writer: *std.Io.Writer, mru_key: []const u8) std.Io.Write
 /// The key a palette-mru.txt line holds: the line's escapes decoded when
 /// escaping the result gives the line back, otherwise the line as it is.
 fn paletteMruKeyFromLine(alloc: std.mem.Allocator, line: []const u8) std.mem.Allocator.Error![:0]u8 {
-    // An odd run of trailing backslashes escapes the closing quote, and Zig
-    // 0.15.2's parseWrite then reads past the end of the literal.
+    // An odd run of trailing backslashes escapes the closing quote, and std's
+    // parseWrite then reads past the end of the literal: in Zig 0.15.2 and
+    // still in 0.17.1, where `parseAlloc` of `"abc\"` panics out of bounds
+    // in Debug and ReleaseSafe (the 2026-10-30 palette-mru.txt entry in
+    // chrome-overlays.md).
     if ((line.len - std.mem.trimEnd(u8, line, "\\").len) % 2 == 1) return alloc.dupeSentinel(u8, line, 0);
     const quoted = try std.mem.concat(alloc, u8, &.{ "\"", line, "\"" });
     defer alloc.free(quoted);

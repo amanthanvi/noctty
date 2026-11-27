@@ -1458,7 +1458,7 @@ pub fn openFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
         .RootDirectory = if (isAbsoluteWtf16(sub_path_w)) null else options.dir,
         // OBJ_CASE_INSENSITIVE is deliberately not set.
         .Attributes = if (options.sa) |ptr| blk: {
-            const inherit: u32 = if (@backingInt(ptr.bInheritHandle) == win32_types.TRUE) win32_types.OBJ_INHERIT else 0;
+            const inherit: u32 = if (@backingInt(ptr.bInheritHandle) != win32_types.FALSE) win32_types.OBJ_INHERIT else 0;
             break :blk inherit;
         } else 0,
         .ObjectName = &nt_name,
@@ -1916,6 +1916,38 @@ test "openFile keeps std's status mapping and flags" {
     // An absolute NT name ignores the directory: `\Device\Null` opens.
     const nul = try openFile(w("\\Device\\Null"), .{ .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE, .dir = tmp.dir.handle, .creation = win32_types.OPEN_EXISTING, .filter = .any });
     windows.CloseHandle(nul);
+}
+
+test "openFile makes the handle inheritable for any true bInheritHandle, not only TRUE" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    const kernel32 = struct {
+        extern "kernel32" fn GetHandleInformation(hObject: HANDLE, lpdwFlags: *DWORD) callconv(.winapi) BOOL;
+    };
+    const handle_flag_inherit: DWORD = 0x1;
+    // A BOOL is true when it is not 0; 1 is only the usual true.
+    const cases = [_]struct { value: c_int, inherits: bool }{
+        .{ .value = 0, .inherits = false },
+        .{ .value = 1, .inherits = true },
+        .{ .value = 2, .inherits = true },
+        .{ .value = -1, .inherits = true },
+    };
+    for (cases) |case| {
+        var sa: SECURITY_ATTRIBUTES = .{
+            .nLength = @sizeOf(SECURITY_ATTRIBUTES),
+            .bInheritHandle = @fromBackingInt(case.value),
+            .lpSecurityDescriptor = null,
+        };
+        const nul = try openFile(w("\\Device\\Null"), .{
+            .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
+            .sa = &sa,
+            .creation = win32_types.OPEN_EXISTING,
+            .filter = .any,
+        });
+        defer windows.CloseHandle(nul);
+        var flags: DWORD = 0;
+        try std.testing.expect(kernel32.GetHandleInformation(nul, &flags) != win32_types.FALSE);
+        try std.testing.expectEqual(case.inherits, flags & handle_flag_inherit != 0);
+    }
 }
 
 test "deviceIoControl maps a refused control code the way std did" {
