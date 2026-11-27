@@ -716,8 +716,8 @@ that govern each symbol you change, or that none does.
   staged-Setup check's path compares, `lockedHandleMatchesPath` and
   `processRunsFromStage`, over `win32/sys.zig`'s
   `getFinalPathNameByHandle` and `eqlIgnoreCaseWtf16`, and its folder
-  identity fallback over `FILE_ID_INFO`, `stagedImageByIdentity`, with
-  its root check `onStageRoot` and `identityFrom`;
+  identity fallback over `FILE_ID_INFO`, `stagedImageByIdentity` with
+  its root check `onStageRoot`, and `identityFrom`;
   `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
