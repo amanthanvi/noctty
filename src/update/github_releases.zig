@@ -6741,8 +6741,11 @@ test "locked staged installer rejects replacement until launch handoff" {
 
     const renamed_stage_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}.renamed", .{stage_dir});
     defer std.testing.allocator.free(renamed_stage_dir);
+    // The held folder shares no delete, so its rename is a sharing violation,
+    // which Zig 0.17 retries for about four seconds and reports as `FileBusy`
+    // (0.15's `MoveFileExW` gave `Unexpected`; ZIG017-SHARING-BUSY-01).
     try std.testing.expectError(
-        error.Unexpected,
+        error.FileBusy,
         std.Io.Dir.renameAbsolute(stage_dir, renamed_stage_dir, std.testing.io),
     );
 
