@@ -255,6 +255,24 @@ class RuleTests(unittest.TestCase):
         got, _ = codemod.rewrite(src.replace('fn present() !void {', 'fn present() error{Gone}!void {'), None, None, rows)
         self.assertIn(("test-dir-io", 5, "hand edit: " + codemod.STAT_NESTED), rows)
 
+    def test_any_fn_in_the_test_leaves_every_stat_file(self):
+        # council AC1: fail closed. A return type such as `!struct { ok: bool }` or `!union(enum) { a: u8 }` was read
+        # as the helper's body; now any `fn` in the block leaves every statFile in it, the test body's own included.
+        for ret, value, branch in (('!struct { ok: bool }', '.{ .ok = true }', 'if (H.present()) |r| r.ok else |_| false'),
+                                   ('!union(enum) { a: u8 }', '.{ .a = 1 }', 'if (H.present()) |_| true else |_| false')):
+            src = ('test "st" {\n    var tmp = std.testing.tmpDir(.{});\n    const H = struct {\n'
+                   '        fn present() ' + ret + ' {\n            _ = try std.fs.cwd().statFile("a");\n'
+                   '            return ' + value + ';\n        }\n    };\n'
+                   '    const found = ' + branch + ';\n    _ = found;\n'
+                   '    _ = try tmp.dir.statFile("b");\n}\n')
+            with self.subTest(ret=ret):
+                rows = []
+                got, _ = codemod.rewrite(src, None, None, rows)
+                self.assertIn('std.fs.cwd().statFile("a")', got)
+                self.assertIn('tmp.dir.statFile("b")', got)
+                self.assertIn(("test-dir-io", 5, "hand edit: " + codemod.STAT_NESTED), rows)
+                self.assertIn(("test-dir-io", 11, "hand edit: " + codemod.STAT_NESTED), rows)
+
     def test_read_file_alloc_keeps_the_inclusive_bound(self):
         # council F2 (QR-30): 0.15 read a file of exactly n bytes, which 0.17's `.limited(n)` refuses; `n + 1` keeps
         # the bound where n is an integer literal (council G6: no longer a name, which may be the maximum).

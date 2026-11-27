@@ -95,6 +95,7 @@ test-dir-io (also):
 - every statFile in a file that names `IsDir` anywhere: 0.17's statFile reports a directory as
   `kind = .directory`, where 0.15's refused one with `IsDir` (council H2).
 - every statFile whose result `try` does not consume (council Y4): code that picks a path by its success or error
-  (an `if` over the result, a `catch`, an `expectError`) can take the other branch on 0.17 and still pass. A `try`
-  counts only in the test block's own body: a statFile in a function nested in the test (a helper, a struct's
-  method) is a hand edit, as its `try` hands the error to a caller that may branch on it (council AA2).
+  (an `if` over the result, a `catch`, an `expectError`) can take the other branch on 0.17 and still pass.
+- every statFile in a test block that holds any `fn` token (council AA2, AC1): a function nested in the test can
+  hand a `try`'s error to a caller that branches on it, and finding the nested body misread return types such as
+  `!struct { ok: bool }`, so the rule fails closed on the whole block.

@@ -337,8 +337,9 @@ def _freed_or_read(toks, lo, hi, decl):
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
 IS_DIR = ("the file names IsDir: 0.17's statFile reports a directory as kind = .directory, where 0.15's refused one "
           "with IsDir (council H2)")
-STAT_NESTED = ("statFile in a function nested in the test: its `try` hands the error to a caller that may branch "
-               "on it, so 0.17's directory report could take the other branch and still pass (council AA2)")
+STAT_NESTED = ("the test block declares a function (any `fn` token), so a statFile's `try` may hand its error to a "
+               "caller that branches on it, and 0.17's directory report could take the other branch and still pass: "
+               "every statFile in the block is left (council AA2, AC1)")
 STAT_USE = ("statFile's result is not consumed by `try`: 0.17 reports a directory as kind = .directory where 0.15 "
             "refused one, so code that branches on its success or error can take the other branch and still pass "
             "(council Y4)")
@@ -414,32 +415,6 @@ def _dir_call_edits(text, toks, i, args):
     if new_name != t.text:
         edits.append(rename(t, new_name))
     return edits
-
-
-def _nested_fn_bodies(toks, lo, hi):
-    """(open, close) of the body of every `fn` declared inside the block toks[lo..hi] (a helper, a struct's
-    method). A body is the first `{` after the parameter list that does not open an `error{...}` set."""
-    bodies = []
-    for k in range(lo + 1, hi):
-        if not is_tok(toks[k], "keyword", "fn"):
-            continue
-        j = k + 1
-        while j < hi and not is_tok(toks[j], "op", "("):
-            j += 1
-        params = close_of(toks, j) if j < hi else None
-        if params is None:
-            continue
-        j = params + 1
-        while j < hi and not is_tok(toks[j], "op", ";"):
-            if is_tok(toks[j], "op", "{") and not is_tok(at(toks, j - 1), None, "error"):
-                end = close_of(toks, j)
-                if end is not None:
-                    bodies.append((j, end))
-                break
-            if is_tok(toks[j], "op", "{"):
-                j = close_of(toks, j) or j
-            j += 1
-    return bodies
 
 
 def _receiver(toks, i, tmp_names):
@@ -630,7 +605,8 @@ def rule_test_dir_io(text, toks):
         # A name bound to a temporary directory and also to something else (sibling scopes) is no known receiver.
         tmp_names = {n for n, c in tmp_counts.items() if c == bound.get(n, 0)}
         tmp_any = set(tmp_counts)
-        nested_bodies = _nested_fn_bodies(toks, lo, hi)
+        # Fail closed (council AC1): finding a nested body misread return types such as `!struct { ... }`.
+        block_has_fn = any(is_tok(toks[k], "keyword", "fn") for k in range(lo + 1, hi))
         call_hits = {}   # method-name token index -> Hit
         call_at = {}   # method-name token index -> (the index its receiver starts at, the lines the call spans)
         for i in range(lo, hi):
@@ -653,7 +629,7 @@ def rule_test_dir_io(text, toks):
                     raise HandEdit(FILE_TOO_BIG)
                 if t.text == "statFile" and names_is_dir:
                     raise HandEdit(IS_DIR)
-                if t.text == "statFile" and any(a < i < b for a, b in nested_bodies):
+                if t.text == "statFile" and block_has_fn:
                     raise HandEdit(STAT_NESTED)
                 if t.text == "statFile" and not is_tok(at(toks, i - (5 if recv == "tmp" else 9)), "keyword", "try"):
                     raise HandEdit(STAT_USE)
