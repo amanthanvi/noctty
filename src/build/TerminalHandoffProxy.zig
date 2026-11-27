@@ -20,6 +20,17 @@ pub fn init(b: *std.Build, cfg: *const Config) !Proxy {
     const module = b.createModule(.{
         .target = cfg.target,
         .optimize = cfg.optimize,
+        // Debug's C default, the full UBSan, makes Zig 0.17.1 build its
+        // runtime for this DLL as a library of its own, and for aarch64 that
+        // does not compile: lib/std/debug/SelfInfo/Windows.zig:668 @ptrCasts an
+        // `*anyopaque` to a function pointer without @alignCast (a function
+        // is aligned 4 on aarch64, 1 on x86_64). Trap mode keeps the checks
+        // and needs no runtime. Remove once Zig fixes that line
+        // (ZIG017-AARCH64-SELFINFO-01 in docs/agents/log/build-release-ci.md).
+        .sanitize_c = if (cfg.target.result.cpu.arch == .aarch64 and cfg.optimize == .debug)
+            .trap
+        else
+            null,
     });
     module.addIncludePath(generated_root);
     module.addCMacro("REGISTER_PROXY_DLL", "1");
