@@ -25087,7 +25087,10 @@ test "settings the Profiles page moves and hides nothing while the command line,
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order = cmd.exe\n" });
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light-theme", .data = "# light\n" });
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark-theme", .data = "profile-hidden = pwsh.exe\n" });
-            var names: [3][]u8 = undefined;
+            // Sentinel-terminated, as 0.17's realPathFileAlloc allocates them, so
+            // each is freed at the length it was allocated (the 1B.5 codemod's
+            // full run coerced them to []u8, before its G5 bail-out).
+            var names: [3][:0]u8 = undefined;
             for ([_][]const u8{ "later.conf", "light-theme", "dark-theme" }, &names) |name, *full| full.* = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
             defer for (names) |full| alloc.free(full);
             const later_line = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{names[0]});
