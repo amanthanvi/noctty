@@ -2111,9 +2111,14 @@ test "the final path name keeps an 8.3 alias as opened, and matches a case varia
     // through `GetTempPathW`, as `os/TempDir.zig` finds it, but without it or
     // `os/file.zig`: both reach the global state, lib-vt's tests reach this
     // file (through `os/local_path.zig`), and lib-vt refuses `global.zig`.
-    // `os/windows.zig` is already in lib-vt (`terminal/page.zig`).
+    // Declared here, not imported from `os/windows.zig`: CI's raw
+    // `zig test src/apprt/win32_compositor_native.zig` compiles this file
+    // with `src/apprt` as its module root (test-harnesses.md, 2026-10-30).
+    const GetTempPathW = struct {
+        extern "kernel32" fn GetTempPathW(n: DWORD, buffer: [*:0]u16) callconv(.winapi) DWORD;
+    }.GetTempPathW;
     var tmp_w: [windows.MAX_PATH + 1:0]u16 = undefined;
-    const tmp_len = @import("../../os/windows.zig").exp.kernel32.GetTempPathW(tmp_w.len, &tmp_w);
+    const tmp_len = GetTempPathW(tmp_w.len, &tmp_w);
     if (tmp_len == 0 or tmp_len > tmp_w.len) return error.SkipZigTest;
     const tmp_path = try std.unicode.wtf16LeToWtf8Alloc(alloc, tmp_w[0..tmp_len]);
     defer alloc.free(tmp_path);
