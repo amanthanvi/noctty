@@ -137,7 +137,9 @@ the cross-file recheck is bounded to resolved literal exports of
 by this lint.
 
 **Comments and whitespace are no change:** a file whose only changes are to
-comments and whitespace is never flagged: before reading its hunks, the Win32
+comments and whitespace is never flagged by its own edits; it is checked as an
+unchanged file is (a re-export change in `src/os/windows.zig` still rechecks
+it). Before reading its hunks, the Win32
 lint skips a file whose whole Zig code-token stream is the same at base and
 head, whatever lines git aligns (council S1 on #768; a swap of comments on two
 identical calls once made git read one call as added). In a file with a real
