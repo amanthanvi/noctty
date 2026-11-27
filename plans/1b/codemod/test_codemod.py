@@ -241,6 +241,20 @@ class RuleTests(unittest.TestCase):
                 got, _ = codemod.rewrite(head + call + '}\n')
                 self.assertIn('statFile(std.testing.io, "a", .{})', got)
 
+    def test_stat_file_in_a_nested_function_is_a_hand_edit(self):
+        # council AA2: a `try` in a helper nested in the test hands the error to a caller that may branch on it.
+        src = ('test "st" {\n    var tmp = std.testing.tmpDir(.{});\n    const H = struct {\n'
+               '        fn present() !void {\n            _ = try std.fs.cwd().statFile("a");\n        }\n    };\n'
+               '    const path = if (H.present()) |_| "a" else |_| "b";\n    _ = path;\n}\n')
+        rows = []
+        got, _ = codemod.rewrite(src, None, None, rows)
+        self.assertIn('std.fs.cwd().statFile("a")', got)
+        self.assertIn(("test-dir-io", 5, "hand edit: " + codemod.STAT_NESTED), rows)
+        # An error set in the helper's return type is not its body.
+        rows = []
+        got, _ = codemod.rewrite(src.replace('fn present() !void {', 'fn present() error{Gone}!void {'), None, None, rows)
+        self.assertIn(("test-dir-io", 5, "hand edit: " + codemod.STAT_NESTED), rows)
+
     def test_read_file_alloc_keeps_the_inclusive_bound(self):
         # council F2 (QR-30): 0.15 read a file of exactly n bytes, which 0.17's `.limited(n)` refuses; `n + 1` keeps
         # the bound where n is an integer literal (council G6: no longer a name, which may be the maximum).
