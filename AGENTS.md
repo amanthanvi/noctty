@@ -819,8 +819,10 @@ that govern each symbol you change, or that none does.
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
   `addTestRuns` in `build.zig`, and the names tests share across processes), the
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
-  `std.Progress.lockStdErr`, the search-thread tests in
-  `src/terminal/search/Thread.zig`), the test exe's isolated children and
+  `std.debug.lockStderr`, 0.15.2's `std.Progress.lockStdErr`, the
+  search-thread tests in `src/terminal/search/Thread.zig`), a test that
+  can hang and its watchdog (`TestMouseSurface.click` in `src/Surface.zig`;
+  a re-entered `std.Io.Mutex`), the test exe's isolated children and
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
   `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
   `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
