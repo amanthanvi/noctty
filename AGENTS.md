@@ -28,8 +28,9 @@ reading step under [Self-Correction Log](#self-correction-log).
     whose fully qualified name (file path, `.test.`, test name) contains the
     token, for quick iteration; it is not evidence on its own. Read the
     count: the `N/M tests passed` line counts the matching tests plus about
-    70 unnamed `test { ... }` blocks that no filter excludes, so a token that
-    matches nothing still reports about 70 passes, not zero. Use `ConPTY` to
+    90 unnamed `test { ... }` blocks that no filter excludes (87 at 1B.6),
+    so a token that matches nothing still reports about 90 passes, not
+    zero. Use `ConPTY` to
     reach the probe tests in `src/pty_transport_probe.zig`. A filtered build
     compiles the whole tree, about a minute.
     `Build Summary: 41/41 steps succeeded` counts build steps, not tests.
