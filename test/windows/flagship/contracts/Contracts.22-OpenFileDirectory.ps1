@@ -407,6 +407,9 @@ foreach ($sample in @(
         @{ Text = "fn z2() !void {`n    const f = try dir.@`"open\u{0000046}ile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
         @{ Text = "fn z3() void {`n    log.info(`"\\u{00000041}`", .{});`n}`n"; Hits = 0 }
         @{ Text = "fn z4() void {`n    log.info(`"\u{0000001b}`", .{});`n}`n"; Hits = 0 }
+        # Council AE1: \u{0}, all zeros, reads as NUL; more than six significant digits is no character at all.
+        @{ Text = "fn z5() void {`n    log.info(`"\u{0}`", .{});`n}`n"; Hits = 0 }
+        @{ Text = "fn z6() void {`n    log.info(`"\u{100000041}`", .{});`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
