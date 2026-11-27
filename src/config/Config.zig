@@ -13364,7 +13364,9 @@ test "clone command C view survives source config deinit" {
         try testing.expectEqualStrings(std.mem.span(expected.title), std.mem.span(commands.commands[i].title));
     }
     const custom = commands.commands[commands.len - 1];
-    try testing.expectEqualStrings("open_config", std.mem.span(custom.action));
+    // Since Ghostty 1.4 `open_config` has a parameter, which the entry left
+    // at its default and the C view writes out, as `+list-keybinds` does.
+    try testing.expectEqualStrings("open_config:os_open", std.mem.span(custom.action));
     try testing.expectEqualStrings("Custom", std.mem.span(custom.title));
     try testing.expectEqualStrings("", std.mem.span(custom.description));
 
