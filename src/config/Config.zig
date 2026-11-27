@@ -1514,11 +1514,28 @@ input: RepeatableReadableIO = .{},
 /// This can be changed at runtime but will only affect new terminal surfaces.
 @"scrollback-limit-lines": Limit(usize, std.math.maxInt(usize)) = .default,
 
-/// Compatibility setting from upstream Ghostty, which uses it to compress
-/// scrollback pages while the terminal is idle.
+/// Whether to compress scrollback pages while the terminal is idle.
 ///
-/// This has no effect in the Windows-only fork, which does not compress
-/// scrollback.
+/// Ghostty does its best to only compress when idle and decompress
+/// as needed. This means that compression doesn't lower IO throughput.
+/// We recommend you keep it on.
+///
+/// The scrollback limit remains an uncompressed logical limit regardless of
+/// this setting, so disabling compression can increase physical memory usage
+/// but does not change how much history is retained.
+///
+/// Text-heavy terminal history generally compresses to approximately 10% to
+/// 30% of its uncompressed page memory, corresponding to a 70% to 90% reduction
+/// in physical memory for pages which are compressed. Compression savings are
+/// content-dependent.
+///
+/// Note that the way Ghostty works is that we compress and discard the
+/// physical/resident memory but we retain virtual mappings. You will not
+/// see a decrease in virtual memory usage, but you will see a decrease
+/// in physical/memory usage.
+///
+/// Changing this at runtime affects future compression work. Pages which are
+/// already compressed remain compressed until their contents are accessed.
 @"scrollback-compression": bool = true,
 
 /// Control when the scrollbar is shown to scroll the scrollback buffer.
