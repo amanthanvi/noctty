@@ -124,28 +124,25 @@ class RuleTests(unittest.TestCase):
 
     # --- the council's round-1 findings (E3, E4, E5, O3, O6) ---------------------------------------------------
 
-    def test_make_open_path_translates_no_follow_and_nothing_else(self):
-        # council F3: `.no_follow = true` is 0.17's `.open_options = .{ .follow_symlinks = false }`, one to one;
-        # any other option is a hand edit, reported.
+    def test_make_open_path_translates_only_empty_options(self):
+        # council F3: `.{}` stays, one to one; any other option is a hand edit, reported. council G5: so is
+        # `.no_follow = true`, which round 2 translated to `.open_options = .{ .follow_symlinks = false }`: 0.17
+        # also stats an existing intermediate component without following a link there, which 0.15 followed.
         head = 'test "m" {\n    var tmp = std.testing.tmpDir(.{});\n'
-        for opts, want in ((".{}", ".{}"),
-                           (".{ .no_follow = true }", ".{ .open_options = .{ .follow_symlinks = false } }"),
-                           (".{ .no_follow = true, }", ".{ .open_options = .{ .follow_symlinks = false } }")):
-            with self.subTest(opts=opts):
-                got, hits = codemod.rewrite(head + f'    var a = try tmp.dir.makeOpenPath("a", {opts});\n}}\n')
-                self.assertIn(f'    var a = try tmp.dir.createDirPathOpen(std.testing.io, "a", {want});\n', got)
-        for opts in (".{ .iterate = true }", ".{ .no_follow = true, .iterate = true }", ".{ .no_follow = false }",
-                     ".{ .access_sub_paths = false }", "opts"):
+        got, hits = codemod.rewrite(head + '    var a = try tmp.dir.makeOpenPath("a", .{});\n}\n')
+        self.assertIn('    var a = try tmp.dir.createDirPathOpen(std.testing.io, "a", .{});\n', got)
+        self.assertEqual(len(hits), 1)
+        for opts, why in ((".{ .no_follow = true }", codemod.NO_FOLLOW), (".{ .no_follow = true, }", codemod.NO_FOLLOW),
+                          (".{\n        .no_follow = true,\n    }", codemod.NO_FOLLOW),
+                          (".{ .iterate = true }", codemod.OPEN_OPTIONS),
+                          (".{ .no_follow = true, .iterate = true }", codemod.OPEN_OPTIONS),
+                          (".{ .no_follow = false }", codemod.OPEN_OPTIONS),
+                          (".{ .access_sub_paths = false }", codemod.OPEN_OPTIONS), ("opts", codemod.OPEN_OPTIONS)):
             with self.subTest(opts=opts):
                 src = head + f'    var a = try tmp.dir.makeOpenPath("a", {opts});\n}}\n'
                 rows = []
                 self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
-                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.OPEN_OPTIONS)])
-        # The one translation over several lines would drop its line breaks: the engine's hand edit.
-        src = head + '    var a = try tmp.dir.makeOpenPath("a", .{\n        .no_follow = true,\n    });\n}\n'
-        rows = []
-        self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
-        self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.LINE_COUNT)])
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + why)])
 
     def test_realpath_alloc_keeps_its_sentinel_type_or_is_a_hand_edit(self):
         # council F3: 0.17's realPathFileAlloc returns `[:0]u8`. Into an untyped const it stays one, and
@@ -488,6 +485,32 @@ class RuleTests(unittest.TestCase):
                 got, hits = codemod.rewrite(head + body + '}\n')
                 self.assertEqual(got, head + body.replace('("x"', '(std.testing.io, "x"') + '}\n')
                 self.assertEqual(len(hits), 1)
+
+    def test_realpath_alloc_needs_every_use_freed_or_read(self):
+        # council G5: an untyped const keeps 0.17's `[:0]u8`, but a use of it may still drop the sentinel: a
+        # coercion (`const owned: []u8 = p;`) or a pass to a function that may free it would free the wrong size.
+        # The rewrite is kept only when every use is a direct `<allocator>.free(p)` or a read in place (`p.len`, an
+        # index); any other use is a hand edit, reported.
+        head = ('test "rp" {\n    var tmp = std.testing.tmpDir(.{});\n'
+                '    const p = try tmp.dir.realpathAlloc(alloc, ".");\n')
+        for uses in ('    defer std.testing.allocator.free(p);\n    try testing.expect(p.len > 1 and p[1] == \':\');\n',
+                     '    errdefer alloc.free(p);\n', ''):
+            with self.subTest(uses=uses):
+                got, hits = codemod.rewrite(head + uses + '}\n')
+                self.assertIn('    const p = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);\n' + uses, got)
+                self.assertEqual(len(hits), 1)
+        for uses in ('    const owned: []u8 = p;\n    defer alloc.free(owned);\n',
+                     '    const q = p;\n    defer alloc.free(q);\n',
+                     '    defer alloc.free(p);\n    try consume(alloc, p);\n',
+                     '    defer alloc.free(p);\n    try testing.expectEqualStrings("x", p);\n',
+                     '    defer alloc.free(p[0..p.len]);\n',
+                     '    s.path = p;\n',
+                     '    defer alloc.free(p);\n    {\n        const p = other;\n        _ = p.len;\n    }\n'):
+            with self.subTest(uses=uses):
+                src = head + uses + '}\n'
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.REALPATH_USE)])
 
     def test_all_rules_together_match_each_rule_alone(self):
         for rule_id, cases in FIXTURES.items():

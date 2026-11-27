@@ -270,10 +270,15 @@ IO_ARG_NAMES = ("io", "testing.io", "std.testing.io")
 # the slice, so a call's value changes meaning (a hand edit).
 
 
-OPEN_OPTIONS = ("makeOpenPath's options are not `.{}` or `.{ .no_follow = true }`, the two the rule translates "
-                "exactly")
+OPEN_OPTIONS = "makeOpenPath's options are not `.{}`, the one the rule translates exactly"
+NO_FOLLOW = ("makeOpenPath's `.no_follow = true` has no exact 0.17 form: under `.open_options = .{ .follow_symlinks = "
+             "false }` 0.17's createDirPathOpen also stats an existing intermediate component without following a "
+             "link there (NotDir), where 0.15's stat followed it")
 REALPATH_SHAPE = ("realpathAlloc's 0.17 result is a `[:0]u8`: outside an untyped `const` it may lose the sentinel, "
                   "and a later free would get the wrong size")
+REALPATH_USE = ("realpathAlloc's 0.17 result is a `[:0]u8`, and its binding has a use other than a direct "
+                "`<allocator>.free(<binding>)` or a read in place (`.len`, an index): a coercion or a pass to another "
+                "function may drop the sentinel, and a free through that slice would get the wrong size")
 OPEN_FILE_NOTE = ("0.17's openFile opens a directory, which 0.15's refused on Windows (error.IsDir); a test keeps "
                   "0.17's default")
 PRODUCT_OPEN_FILE = ("outside a test the rule has no Io to pass; 0.17's openFile opens a directory, which 0.15's "
@@ -281,13 +286,14 @@ PRODUCT_OPEN_FILE = ("outside a test the rule has no Io to pass; 0.17's openFile
 
 
 def _open_options(texts):
-    """makeOpenPath's 0.15 `OpenOptions`: `.{}` stays, and `.{ .no_follow = true }` is 0.17's
-    `.{ .open_options = .{ .follow_symlinks = false } }`, both exact; any other option is a hand edit."""
+    """makeOpenPath's 0.15 `OpenOptions`: `.{}` stays, exact; any other option is a hand edit. `.no_follow = true`
+    is too: 0.17's `.open_options = .{ .follow_symlinks = false }` also changes createDirPathOpen's check of an
+    existing intermediate component (std.Io.Threaded stats it with the same `follow_symlinks`)."""
     words = [t.text for t in code_tokens(texts[1])]
     if words == [".", "{", "}"]:
         return texts[1]
     if words in ([".", "{", ".", "no_follow", "=", "true", "}"], [".", "{", ".", "no_follow", "=", "true", ",", "}"]):
-        return ".{ .open_options = .{ .follow_symlinks = false } }"
+        raise HandEdit(NO_FOLLOW)
     raise HandEdit(OPEN_OPTIONS)
 
 
@@ -296,6 +302,36 @@ def _untyped_const_init(toks, s, close):
     k = s - 1 if is_tok(at(toks, s - 1), "keyword", "try") else s
     return (is_tok(at(toks, k - 1), "op", "=") and is_tok(at(toks, k - 2), "identifier")
             and is_tok(at(toks, k - 3), "keyword", "const") and is_tok(at(toks, close + 1), "op", ";"))
+
+
+def _freed_or_read(toks, lo, hi, decl):
+    """Every use in toks[lo:hi] of the name toks[decl] declares is a direct `<allocator>.free(<name>)` or a read in
+    place (`<name>.len`, `<name>[i]`, not a slice); `<name>.<field>` and `.<name>` are no uses of it."""
+    name = toks[decl].text
+    for k in range(lo, hi):
+        if k == decl or not is_tok(toks[k], "identifier", name) or is_tok(at(toks, k - 1), "op", "."):
+            continue
+        if (is_tok(at(toks, k - 1), "op", "(") and is_tok(at(toks, k + 1), "op", ")")
+                and is_tok(at(toks, k - 2), "identifier", "free") and is_tok(at(toks, k - 3), "op", ".")
+                and is_tok(at(toks, k - 4), "identifier")):
+            continue
+        if is_tok(at(toks, k + 1), "op", ".") and is_tok(at(toks, k + 2), "identifier", "len"):
+            continue
+        if is_tok(at(toks, k + 1), "op", "["):
+            close = close_of(toks, k + 1)
+            depth = 0
+            for j in range(k + 1, close if close is not None else k + 1):
+                if toks[j].kind == "op" and toks[j].text in ("(", "[", "{"):
+                    depth += 1
+                elif toks[j].kind == "op" and toks[j].text in (")", "]", "}"):
+                    depth -= 1
+                elif depth == 1 and is_tok(toks[j], "op", ".."):
+                    break
+            else:
+                if close is not None:
+                    continue
+        return False
+    return True
 
 
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
@@ -521,8 +557,9 @@ def rule_test_dir_io(text, toks):
     that reaches it; a bound that is not a literal or a simple name is a hand edit. Its oversize error is
     `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a helper outside the
     test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a `[:0]u8`, so it is
-    rewritten only as the whole initializer of an untyped `const`, whose `free` keeps the sentinel's size.
-    makeOpenPath's options are rewritten only where the translation is exact (`.{}`, `.{ .no_follow = true }`).
+    rewritten only as the whole initializer of an untyped `const` bound once in the test, whose every use is a
+    direct `<allocator>.free(<name>)` or a read in place (`.len`, an index), so a free keeps the sentinel's size.
+    makeOpenPath's options are rewritten only where the translation is exact (`.{}`; `.no_follow = true` is not).
     openFile in a test keeps 0.17's default, which opens a directory where 0.15's refused one on Windows, and the
     report notes each; outside a test nothing is rewritten (no `std.testing.io` there), and a 0.15 openFile on
     `std.fs.cwd()` or `std.fs.openFileAbsolute` is a reported hand edit that should pass `.allow_directory = false`.
@@ -573,8 +610,13 @@ def rule_test_dir_io(text, toks):
                     raise HandEdit(REUSED_RECEIVER.format(toks[i - 4].text))
                 if t.text == "readFileAlloc" and names_file_too_big:
                     raise HandEdit(FILE_TOO_BIG)
-                if t.text == "realpathAlloc" and not _untyped_const_init(toks, i - (4 if recv == "tmp" else 8), close):
-                    raise HandEdit(REALPATH_SHAPE)
+                if t.text == "realpathAlloc":
+                    s = i - (4 if recv == "tmp" else 8)
+                    if not _untyped_const_init(toks, s, close):
+                        raise HandEdit(REALPATH_SHAPE)
+                    decl = s - (3 if is_tok(at(toks, s - 1), "keyword", "try") else 2)
+                    if bound.get(toks[decl].text, 0) != 1 or not _freed_or_read(toks, lo, hi, decl):
+                        raise HandEdit(REALPATH_USE)
                 edits = _dir_call_edits(text, toks, i, args)
             except HandEdit as e:
                 hits.append(Bail(t.line + 1, str(e), call_lines))

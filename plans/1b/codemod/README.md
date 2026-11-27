@@ -52,12 +52,18 @@ test-dir-io (also):
   (a typed binding's or an assignment's). An open that nothing can close, passed straight to `expectError` or
   discarded by `_ =`, is rewritten;
 - arguments that change places must lie on one line, with no comment between the call's arguments;
-- makeOpenPath with any options but the two exact translations: `.{}` stays, `.{ .no_follow = true }` becomes
-  `.{ .open_options = .{ .follow_symlinks = false } }` (0.17 renamed the field and inverted it);
-- realpathAlloc anywhere but the whole initializer of an untyped `const` (`const p = try tmp.dir.realpathAlloc(..);`):
-  0.17's result is a `[:0]u8`, so a `[]u8` binding, a field, an argument or a `var` could drop the sentinel and a
-  later free would get the wrong size. An untyped `const` keeps the type, and `free(p)` frees the sentinel too; a
-  copy of `p` coerced elsewhere to `[]u8` and freed through that copy is not traced;
+- makeOpenPath with any options but `.{}`, the one exact translation (it stays). `.{ .no_follow = true }` is a hand
+  edit too: its 0.17 form, `.{ .open_options = .{ .follow_symlinks = false } }`, also changes how createDirPathOpen
+  checks an existing intermediate component. 0.17's Windows createDirPathOpen (`std.Io.Threaded`) stats it with the
+  same `follow_symlinks`, so a link there gives `NotDir`, where 0.15's `makeOpenPath` stat followed it (read in both
+  std sources, not measured);
+- realpathAlloc anywhere but the whole initializer of an untyped `const` (`const p = try tmp.dir.realpathAlloc(..);`)
+  bound once in the test, and with any use of `p` but a direct `<allocator>.free(p)` or a read in place (`p.len`,
+  `p[i]`). 0.17's result is a `[:0]u8`: a `[]u8` binding, a field, an argument or a `var` could drop the sentinel,
+  and so could a use of `p` that coerces or passes it on (`const owned: []u8 = p;`, `consume(alloc, p)`, a slice
+  `p[0..n]`, even `expectEqualStrings("x", p)`, since the tokens do not show which function may free it), and a
+  free through the coerced slice would get the wrong size. An untyped `const` used only so keeps the type, and
+  `free(p)` frees the sentinel too;
 - openFile outside a test. 0.15.2's Windows openFile refused a directory (`error.IsDir`, `std.os.windows.OpenFile`'s
   `.file_only`), and 0.17.1's opens one unless `.allow_directory = false` (both measured). The rule rewrites only test
   blocks, since product code has no `std.testing.io` and needs a reader to thread its caller's Io; so the product
