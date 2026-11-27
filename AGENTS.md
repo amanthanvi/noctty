@@ -282,7 +282,10 @@ that govern each symbol you change, or that none does.
   `src/unicode/testdata/conpty_width.tsv` and its test in
   `src/unicode/main.zig`, the width harness
   `test/windows/hidden-win11-conpty-width.ps1` and its probe
-  `test/windows/conpty-width-probe.c`), the
+  `test/windows/conpty-width-probe.c`), which sequences a console host
+  passes on to noctty and where (the passthrough harness
+  `test/windows/hidden-win11-conpty-passthru.ps1` and its probe
+  `test/windows/conpty-passthru-probe.c`, run at each ConPTY pin bump), the
   Ctrl+C-ignore attribute hosted shells inherit
   (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under

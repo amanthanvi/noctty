@@ -25,9 +25,12 @@ Neutral to Wide. The test "unicode: widths match the bundled ConPTY's measured
 widths" (src/unicode/main.zig) asserts noctty's width for every row; the pins
 that make them agree are in src/build/uucode_config.zig (conpty_width_pins).
 
-When the ConPTY pin (dist/windows/conpty-redist.json) moves: build (which
-stages the new pair), run this, and if the measured widths changed, run it
-with -WriteTable, fix the pins until the test passes, and run this again.
+When the ConPTY pin (dist/windows/conpty-redist.json) moves, build (which
+stages the new pair), run hidden-win11-conpty-width.ps1 and
+hidden-win11-conpty-passthru.ps1 on it, and ship the pair only when both pass
+(docs/agents/log/conpty.md, 2026-11-27 CONPTY-PASSTHRU-01). If the measured
+widths changed, run this with -WriteTable, fix the pins until the test passes,
+and run this again.
 
 The negative control: -ControlCodePoint <hex> changes only noctty's width for
 that one code point (1 <-> 2) before the comparison, and the run must report
