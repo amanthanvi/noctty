@@ -179,6 +179,12 @@ To refresh the pin:
    encoding.
 5. Package both architectures with `-RequireConPty`; the packager re-verifies
    the archive, each extracted file, and both PE machine types before staging.
+6. Build (it stages the new pair) and run
+   `test/windows/hidden-win11-conpty-width.ps1` and
+   `test/windows/hidden-win11-conpty-passthru.ps1` against `zig-out\bin`;
+   ship the pin only when both pass. They check that the new pair gives each
+   code point the width noctty does and still passes the prompt-time mode
+   resets on to noctty.
 
 Microsoft's MIT text is committed as `dist/windows/LICENSE-conpty.txt` and is
 staged beside noctty's `LICENSE` in every portable and installer package.
