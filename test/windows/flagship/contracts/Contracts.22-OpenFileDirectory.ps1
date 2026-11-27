@@ -160,12 +160,24 @@ function Test-OpenFileOptionsRefuseDirectory([string] $Options) {
 function Test-OpenFileKindCheck([string] $Code, [int] $After, [string] $Check) {
     $end = $Code.Length
     $depth = 0
-    $braces = Remove-OpenFileNonCode $Code
-    foreach ($brace in [regex]::new('[{}]').Matches($braces, $After)) {
+    $blank = Remove-OpenFileNonCode $Code
+    foreach ($brace in [regex]::new('[{}]').Matches($blank, $After)) {
         if ($brace.Value -eq '{') { $depth++ } elseif ($depth -eq 0) { $end = $brace.Index; break } else { $depth-- }
     }
-    $block = [regex]::Replace($Code.Substring($After, $end - $After), '\s+', ' ')
-    return [regex]::new('(?<![\w.])' + [regex]::Escape($Check)).Match($block).Success
+    return Test-OpenFilePinnedText -Code $Code -Blank $blank -Start $After -End $end -Text $Check
+}
+
+# Whether `$Text`, a pinned text with its whitespace normalized (each space matching any run of whitespace), is in
+# `$Code` (comments blanked, strings kept) between `$Start` and `$End`, starting at a code token: its first token
+# must be there in `$Blank` (strings blanked too), so the same text inside a string does not count (council AA3).
+function Test-OpenFilePinnedText([string] $Code, [string] $Blank, [int] $Start, [int] $End, [string] $Text) {
+    $pattern = '(?<![\w.])' + [regex]::Escape($Text).Replace('\ ', '\s+')
+    $lead = [regex]::Match($Text, '^\S+').Value.Length
+    foreach ($m in [regex]::new($pattern).Matches($Code.Substring($Start, $End - $Start))) {
+        $at = $Start + $m.Index
+        if ([string]::Equals($Blank.Substring($at, $lead), $Code.Substring($at, $lead), [StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
 }
 
 # The reviewed read-mode opens that keep 0.17's default, each `path:function` with how many it holds and why.
@@ -253,6 +265,8 @@ foreach ($kindControl in @(
         @{ Path = 'src/os/path.zig'; Function = 'expand'; Mutate = { param($t) $t.Replace('if (stat.kind != .directory and isExecutable(stat.permissions)) {', 'if (isExecutable(stat.permissions)) {') } }
         @{ Path = 'src/config/file_load.zig'; Function = 'open'; Mutate = { param($t) Remove-OpenFileSwitch $t 'open' } }
         @{ Path = 'src/config/Config.zig'; Function = 'loadRecursiveFiles'; Mutate = { param($t) Remove-OpenFileSwitch $t 'loadRecursiveFiles' } }
+        # Council AA3: the real check removed, its old text kept in a string after the open.
+        @{ Path = 'src/os/path.zig'; Function = 'expand'; Mutate = { param($t) $t.Replace('if (stat.kind != .directory and isExecutable(stat.permissions)) {', 'const old = "if (stat.kind != .directory and isExecutable(stat.permissions)) {"; _ = old; if (isExecutable(stat.permissions)) {') } }
         # Council Y1: each check weakened in its text.
         @{ Path = 'src/os/path.zig'; Function = 'expand'; Mutate = { param($t) $t.Replace('if (stat.kind != .directory and isExecutable(stat.permissions)) {', 'if (stat.kind != .directory or isExecutable(stat.permissions)) {') } }
         @{ Path = 'src/config/file_load.zig'; Function = 'open'; Mutate = { param($t) $t.Replace("    switch (stat.kind) {`n        .file => {},`n", "    switch (stat.kind) {`n        .file => {},`n        .directory => {},`n") } }
