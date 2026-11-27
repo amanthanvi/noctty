@@ -835,6 +835,10 @@ foreach ($case in @(
 $guiVerdictToken = [guid]::NewGuid().ToString('N')
 $guiGui = @('noctty.exe', '--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e', 'cmd')
 $guiIpc = @('noctty.com', '+list-windows', "--class=noctty-automation-x-$guiVerdictToken")
+# Council Q2 on #768: the forward N7 is for. A noctty.com with no action (no `+name`) returns right after it creates
+# its noctty.exe, which gets these arguments verbatim: the run's GUI launch, which the argument rule accepts. An IPC
+# action such as +list-windows makes the wrapper wait for its child instead.
+$guiActionless = @('noctty.com') + @($guiGui | Select-Object -Skip 1)
 $guiRow = { param($Id, $Image, $Parent, $Creation, [bool] $IsCmd = $false, [bool] $Read = $false, [bool] $System = $false, [bool] $Off = $false, [bool] $OpenFailed = $false, [string[]] $Argv = $null, [bool] $InCopy = $true, [bool] $Exited = $false, [bool] $Unpinned = $false)
     $isNoctty = $Image -ieq 'noctty.exe' -or $Image -ieq 'noctty.com'
     [pscustomobject]@{ Pid = $Id; Image = $Image; Parent = $Parent; Creation = $Creation; IsCmd = $IsCmd; CmdRead = $Read; CmdSystem = $System; CmdImageSystem = $System
@@ -894,8 +898,8 @@ foreach ($bad in @(
         # vouches for the noctty.exe it forwarded (700) only when 700's own arguments were read, and only for its exact
         # child; an exited CLI the leaf started itself vouches for nothing.
         @{ Name = 'a noctty forwarded by an exited launched CLI, its own command line unread'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Exited $true } else { $_ } }); Total = 11; Shells = 1 }
-        @{ Name = 'a noctty created before the exited launched CLI that is its parent'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 59 -Argv $guiIpc } else { $_ } }); Total = 11; Shells = 1 }
-        @{ Name = 'a noctty forwarded by an exited CLI the leaf started itself'; Rows = (& $guiWith @((& $guiRow 900 'noctty.com' 100 90 -Exited $true), (& $guiRow 910 'noctty.exe' 900 91 -Argv $guiIpc))); Total = 13; Shells = 1 }
+        @{ Name = 'a noctty created before the exited launched CLI that is its parent'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 59 -Argv $guiActionless } else { $_ } }); Total = 11; Shells = 1 }
+        @{ Name = 'a noctty forwarded by an exited CLI the leaf started itself'; Rows = (& $guiWith @((& $guiRow 900 'noctty.com' 100 90 -Exited $true), (& $guiRow 910 'noctty.exe' 900 91 -Argv $guiActionless))); Total = 13; Shells = 1 }
         # Council no-seat N6: a stray noctty that exits fast, its image read through class 27 after the Win32 read
         # failed, is a read noctty, and the accounting and copy rules fail it.
         @{ Name = 'a stray noctty.exe read through class 27 after it exited'; Rows = (& $guiWith @((& $guiRow 930 'noctty.exe' 100 93 -Exited $true))); Total = 12; Shells = 1 }
@@ -924,8 +928,9 @@ foreach ($good in @(
         @{ Name = 'a joiner that had exited before its image was read'; Rows = (& $guiWith @((& $guiRow 810 $null 100 81 -Exited $true))); Total = 12; Exited = 'imageUnreadExited'; Live = 'imageUnread' }
         @{ Name = 'a noctty that had exited before its command line was read'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Exited $true)); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyArgvUnread' }
         # Council no-seat N7: a real forward keeps its child row. The launched CLI (600) exited before its command line
-        # was read; the noctty.exe it forwarded (700), its own arguments read and kept, is still accounted.
-        @{ Name = 'a noctty forwarded by a launched CLI that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true)); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyUnaccounted' }
+        # was read; the noctty.exe it forwarded (700), its own arguments read and kept, is still accounted. The forward
+        # is an actionless one, the kind that returns at once (council Q2 on #768).
+        @{ Name = 'a noctty forwarded by a launched CLI that had exited before its command line was read'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Argv $guiActionless } else { $_ } }); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyUnaccounted' }
         @{ Name = 'a launched CLI that had exited before its image was read'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
         # Sourcery on #752: the exited rows are keyed by PID and creation time, so a later generation of the same PID
         # (creation 61) after the launcher's (60) does not hide it.
