@@ -848,7 +848,7 @@ fn stageWindowsInstallWithDownloader(
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
     defer alloc.free(stage_dir);
-    try std.Io.Dir.cwd().createDirPath(updateIo(), stage_dir);
+    try makeDirPath(stage_dir);
     var cleanup_stage_on_error = if (baseline.staged_version) |version|
         !windowsPathEqual(version, release.version_text)
     else
