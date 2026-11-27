@@ -1264,14 +1264,15 @@ test "a zero or all-0xFF file ID is no directory identity (council U6)" {
 /// the reverse. `image` has `isStagedImage`'s shape, `<dir>\<version>\<name>.exe`,
 /// and its `<dir>` is the stage itself by identity. Only an image whose
 /// `<dir>` is named `updates`, as every stage is (`stagedInstallerRunning`),
-/// and whose reported path lies on the stage's own root (`onStageRoot`), is
-/// opened, for its attributes only. A link put in place after the process
-/// started can still lead that open elsewhere (`processRunsFromStage`;
-/// inferred, council X2).
+/// and whose reported path lies on the stage's own root (`onStageRoot`), has
+/// its `updates` folder opened, for its attributes only; the image itself is
+/// never opened (council Z2). A link put in place after the process started
+/// can still lead that open elsewhere (`processRunsFromStage`; inferred,
+/// council X2).
 fn stagedImageByIdentity(alloc: Allocator, stage_final: []const u16, image: []const u16, stage: DirectoryIdentity) bool {
-    // An image reported off the stage's root is not opened (council U2): the
-    // open is synchronous, and this runs while noctty answers
-    // WM_QUERYENDSESSION, so an image on a slow or gone share would hold the
+    // For an image reported off the stage's root nothing is opened (council
+    // U2): the open is synchronous, and this runs while noctty answers
+    // WM_QUERYENDSESSION, so a folder on a slow or gone share would hold the
     // reply.
     if (!onStageRoot(stage_final, image)) return false;
     const sep: u16 = '\\';
