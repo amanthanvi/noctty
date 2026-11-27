@@ -1129,6 +1129,14 @@ pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
 /// process for `PROCESS_QUERY_LIMITED_INFORMATION` only, which an elevated
 /// process of the same user grants (not measured with an elevated Setup); a
 /// process that refuses even that is skipped.
+///
+/// When the string compare misses (another spelling of the stage, such as
+/// its 8.3 alias against the long one), an image with the stage's shape that
+/// lies on the stage's own drive or `\\server\share\` (`onStageRoot`) has its
+/// `updates` folder opened, for its attributes only, and that folder's
+/// identity (volume serial and FILE_ID_INFO file ID) compared with the
+/// stage's (`stagedImageByIdentity`; council T3, U2, U6). No other folder is
+/// opened, and none on another root.
 fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     const windows = std.os.windows;
     var dir = std.Io.Dir.openDirAbsolute(updateIo(), updates_dir, .{}) catch return false;

@@ -713,7 +713,8 @@ that govern each symbol you change, or that none does.
   closes noctty, with `stagedInstallerRunning`; the staging lock's and the
   staged-Setup check's path compares, `lockedHandleMatchesPath` and
   `processRunsFromStage`, over `win32/sys.zig`'s
-  `getFinalPathNameByHandle`; `pkg/wuffs/src/deflate.zig`,
+  `getFinalPathNameByHandle` and `eqlIgnoreCaseWtf16`, and its folder
+  identity fallback over `FILE_ID_INFO`; `pkg/wuffs/src/deflate.zig`,
   the raw DEFLATE decoder for update payloads; the files a portable payload
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
