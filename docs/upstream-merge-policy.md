@@ -414,7 +414,9 @@ nothing for:
   `GhosttyI18n.zig`, `GhosttyXcodebuild.zig`, `MetallibStep.zig` and
   `xcframework.zig`;
 - three of upstream's workflows: `clean-artifacts.yml`, `milestone.yml` and
-  `publish-tag.yml`.
+  `publish-tag.yml`;
+- the Darwin-only `src/build/libsystem_override.sh`, which `v1.4.0` adds and
+  `**/LibsystemOverride*` does not match.
 
 The paths of this kind:
 
@@ -429,7 +431,8 @@ The paths of this kind:
   `LibtoolStep.zig`, `XCFrameworkStep.zig`; row Qg11-1 of
   `plans/stone-1a/drift-decisions.tsv`), so they are in this kind from then
   on, and the contract lists them;
-- `LibsystemOverride*`;
+- `LibsystemOverride*`, and `v1.4.0`'s Darwin-only
+  `src/build/libsystem_override.sh`;
 - `nix/package.nix`, `nix/tests.nix`, `nix/vm/**`,
   `nix/patches/zig-0.17-ios-process-replace.patch`;
 - `pkg/gtk4-layer-shell/**`;
