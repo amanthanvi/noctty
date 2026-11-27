@@ -1233,14 +1233,15 @@ try {
     if (-not [GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] { $guiPumps[0]++; if ($guiPumps[0] -eq 2) { [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7) } }) -or $guiPumps[0] -ne 2) {
         throw "WaitExit did not end at the slice after its pump ended the process ($($guiPumps[0]) calls)."
     }
-    # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When a process holds the PID
-    # again (it opens, or refuses the open), the control is skipped and says so.
+    # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When the PID opens (reused,
+    # or the exited process kept alive by another process's open handle) or a process refuses the open, the control is
+    # skipped and says so.
     $gonePid = $exited.pid
     [void][GuiHiddenContractJoiner]::CloseHandle($exited.thread); [void][GuiHiddenContractJoiner]::CloseHandle($exited.process)
     [void]$guiJoinerOpen.Remove($exited)
     $gone = $false
     $handle = [GuiHiddenRunnerNative]::OpenJoiner($gonePid, [ref]$gone)
-    if ($handle -ne [IntPtr]::Zero) { [void][GuiHiddenContractJoiner]::CloseHandle($handle); Write-Host 'Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (the PID was reused at once)' }
+    if ($handle -ne [IntPtr]::Zero) { [void][GuiHiddenContractJoiner]::CloseHandle($handle); Write-Host 'Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (the PID opened: it was reused at once, or another process holds an open handle to the exited one)' }
     elseif (-not $gone) {
         $heldError = [GuiHiddenContractJoiner]::OpenError($gonePid)
         if ($heldError -ne 87) { Write-Host "Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (a process holds the PID again, open error $heldError)" }
