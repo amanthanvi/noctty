@@ -1088,10 +1088,12 @@ if (-not [string]::Equals([GuiHiddenContractJoiner]::Layout(), $guiJoinerLayout,
 foreach ($site in @(
         @{ Name = 'the open'; Pattern = 'row\.Handle = OpenJoiner\(row\.Pid, out gone\);\s*long openedAt; GetSystemTimePreciseAsFileTime\(out openedAt\);\s*if \(row\.Handle == IntPtr\.Zero\) \{ row\.OpenFailed = true; row\.ExitedBeforeRead = GoneBeforeStop\(gone, openedAt, StopAt\); \}' }
         @{ Name = 'the pin'; Pattern = 'bool asked = IsProcessInJob\(h, job, out member\);\s*long checkedAt; GetSystemTimePreciseAsFileTime\(out checkedAt\);\s*bool exitedFirst;\s*if \(!Pinned\(timed, asked, member, c, row\.Taken, checkedAt, StopAt, out exitedFirst\)\) \{\s*row\.ExitedBeforeRead = exitedFirst;\s*row\.Unpinned = true;' }
-        @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, ImageReadEnded\(readError\), \(\) => StopAt\); \}' }
+        @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, ImageReadEnded\(readError\), \(\) => StopAt, OpenWaiting\); \}' }
         # Council no-seat N6: a failed Win32 image read falls back to class 27 on the same pinned handle.
         @{ Name = 'the image read''s class-27 fallback'; Pattern = 'int imageStatus;\s*if \(imagePath == null\) imagePath = NtImagePathOf\(h, out imageStatus\);\s*row\.Image = imagePath == null \? null : Path\.GetFileName\(imagePath\);' }
-        @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, CommandLineReadEnded\(readError\), \(\) => StopAt\); \}' }
+        @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, CommandLineReadEnded\(readError\), \(\) => StopAt, OpenWaiting\); \}' }
+        # Council no-seat N1: the pump the two reads' waits run takes every waiting message.
+        @{ Name = 'the wait''s pump'; Pattern = 'void OpenWaiting\(\) \{ while \(!stopping && TakeMessage\(0\)\) \{ \} \}' }
         @{ Name = 'the stop'; Pattern = 'public static int StopRunJob\(IntPtr job, JobWatch watch\) \{\s*if \(watch != null\) watch\.NoteStop\(\);\s*return StopRunJob\(job\);' }
     )) {
     if ($guiRunnerSource -notmatch $site.Pattern) { throw "The reader's exited mark at $($site.Name) no longer goes through its predicate." }
@@ -1200,6 +1202,23 @@ try {
     if (-not $stopper.Join(5000)) { throw 'The stop control''s thread did not finish.' }
     if ([GuiHiddenContractJoiner]::ReadStop($guiStopCell) -eq $guiMax) { throw 'The stop control never noted its stop.' }
     if ($stoppedExited) { throw 'ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop.' }
+    # Council no-seat N1: with a `between`, the wait (WaitExit) calls it between slices while the handle has not
+    # signalled, as the reader opens queued joiners there; a handle that signals ends the wait at the next slice. A live,
+    # suspended process: the wait runs its whole bound with `between` called inside it; then `between` ends the process
+    # on its second call, and the wait returns signalled without a third.
+    $pumped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+    $guiJoinerOpen.Add($pumped)
+    $guiPumps = [int[]]@(0)
+    $waited = [Diagnostics.Stopwatch]::StartNew()
+    if ([GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] { $guiPumps[0]++ })) { throw 'WaitExit counted a live process as signalled.' }
+    if ($guiPumps[0] -lt 2 -or $waited.ElapsedMilliseconds -lt ([GuiHiddenRunnerNative]::ExitWaitMs - 10)) {
+        throw "WaitExit did not run its pump inside its whole wait ($($guiPumps[0]) calls, $($waited.ElapsedMilliseconds) ms)."
+    }
+    $guiPumps[0] = 0
+    $guiPumpedProcess = $pumped.process
+    if (-not [GuiHiddenRunnerNative]::WaitExit($pumped.process, [Action] { $guiPumps[0]++; if ($guiPumps[0] -eq 2) { [void][GuiHiddenContractJoiner]::TerminateProcess($guiPumpedProcess, 7) } }) -or $guiPumps[0] -ne 2) {
+        throw "WaitExit did not end at the slice after its pump ended the process ($($guiPumps[0]) calls)."
+    }
     # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When a process holds the PID
     # again (it opens, or refuses the open), the control is skipped and says so.
     $gonePid = $exited.pid

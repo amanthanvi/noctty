@@ -1743,7 +1743,8 @@ killed it. That takes proof:
   - the failure is a termination kind: 5 or 31 for the image, or
     `STATUS_PROCESS_IS_TERMINATING` or `STATUS_PARTIAL_COPY` for the command
     line, as measured on exiting processes;
-  - the pinned handle signals within 100 ms;
+  - the pinned handle signals within 100 ms (the reader keeps opening the
+    joiners queued meanwhile, between slices of that wait);
   - the creation time is the pinned one;
   - the exit time is no later than the failure plus that wait, and before the
     stop as it stands after the wait (`ExitedBeforeStop`).
