@@ -15,6 +15,11 @@
 # scripts configure in the same process; CI's sentinel step (windows-lib-vt,
 # scripts/check-configure-environment.ps1) covers them end to end.
 #
+# A `\xNN` or `\u{...}` escape in any string or character literal or quoted identifier fails outright
+# (council Y3): it could spell a name above, and the check refuses it rather than decoding it.
+#
+# The check reads source text: it guards against an ordinary regression in an ordinary spelling, not a
+# deliberate evasion, and what text cannot settle (a call moved into dead code, say) is code review's.
 # A known limit (council H3): a whole Run written as a struct literal, `run.* = .{ ..., .environ_map =
 # &env }`, reads as an options field and passes. Nothing in the tree writes a step that way.
 
@@ -135,6 +140,16 @@ function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path, [hashta
                 $subject.Substring($hit.Index + $hit.Length) -match '^\s*=(?!=)') { continue }
             $line = ($subject.Substring(0, $hit.Index) -split "`n").Count
             "${Path}:${line}: $($form.Name)"
+        }
+    }
+    # Council Y3: a `\xNN` or `\u{...}` escape in any string or character literal or quoted identifier (an
+    # `@field` name, an `@import` path, `@"..."`) could spell a name this check looks for, and Zig decodes it, so
+    # one fails outright: it is refused, not decoded.
+    foreach ($literal in [regex]::Matches($withStrings, '''(?:\\.|[^''\\\n])''|"(?:\\.|[^"\\\n])*"')) {
+        # An odd run of backslashes before it: `"\\x41"` is an escaped backslash, then text.
+        if ($literal.Value -match '(?<!\\)(?:\\\\)*\\(?:x[0-9A-Fa-f]{2}|u\{)') {
+            $line = ($withStrings.Substring(0, $literal.Index) -split "`n").Count
+            "${Path}:${line}: escaped name"
         }
     }
     if (-not $code.Contains('@field')) { return }
@@ -271,13 +286,22 @@ foreach ($sample in @(
         '@field(run, "environ" ++ "_map") = &env;',
         '@field(run, @as([]const u8, name)) = &env;',
         '@field(run, comptime name) = &env;',
-        'const m = @field(run, name);'
+        'const m = @field(run, name);',
+        # Council Y3: an escape in an @field name, a quoted identifier or an import path.
+        '@field(run, "environ\x5fmap") = &env;',
+        'run.@"environ\x5fmap" = &env;',
+        '@field(run, "setEnvironment\x56ariable")(run, "IS_STATIC", "1");',
+        'run.@"setEnvironment\x56ariable"("IS_STATIC", "1");',
+        '@field(run, "environ\u{5f}map") = &env;',
+        'const helper = @import("help\x65r.zig");'
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $sample`n}`n" -Path 'control.zig').Count -ne 1) {
         throw "The build environment check missed a control: $sample"
     }
-    # A comment never counts; a string counts only where it names a Run member (council H3).
-    $inString = if ($sample -match '\b(?:setEnvironmentVariable|removeEnvironmentVariable|getEnvMap|clearEnvironment)\b') { 1 } else { 0 }
+    # A comment never counts; a string counts where it names a Run member (council H3) or holds an escape
+    # (council Y3).
+    $inString = $(if ($sample -match '\b(?:setEnvironmentVariable|removeEnvironmentVariable|getEnvMap|clearEnvironment)\b') { 1 } else { 0 }) +
+        $(if ($sample -match '\\(?:x[0-9A-Fa-f]{2}|u\{)') { 1 } else { 0 })
     if (@(Get-BuildEnvironmentCopyHits -ZigText "// $sample`n" -Path 'control.zig').Count -ne 0 -or
         @(Get-BuildEnvironmentCopyHits -ZigText "const s = `"$($sample.Replace('"', ''))`";`n" -Path 'control.zig').Count -ne $inString) {
         throw "The build environment check miscounted a comment or string: $sample"
@@ -294,6 +318,9 @@ foreach ($allowed in @(
         # Council W1: a literal name, a comma or parenthesis inside it, and a call split over lines.
         'const argv = @field(run, "argv");',
         'const x = @field(options, "a,(b)");',
+        # Council Y3: other escapes, and an escaped backslash before x41, are no escape of a name.
+        'const nl = "a\nb\t";',
+        'const lit = "path\\x41";',
         "const y = @field(`n        options,`n        `"cwd`",`n    );"
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $allowed`n}`n" -Path 'control.zig').Count -ne 0) {
