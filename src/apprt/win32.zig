@@ -6145,6 +6145,20 @@ pub const ClipboardSource = struct {
     /// The CF_HDROP handle, borrowed from the clipboard; null when there is
     /// none.
     hdrop: *const fn () ?*anyopaque,
+    /// Whether the clipboard holds text, from its formats alone
+    /// (CF_UNICODETEXT, which Windows also reports for the CF_TEXT or
+    /// CF_OEMTEXT it converts): no data is read, and the clipboard need not
+    /// be open.
+    has_text: *const fn () bool,
+
+    /// The MIME types a Kitty paste event (mode 5522) and a program's
+    /// OSC 5522 type listing name: `text/plain` when the clipboard holds
+    /// text, else none. Only what a program's read is then served is
+    /// named; copied files (CF_HDROP) and every other format are not.
+    pub fn mimes(self: ClipboardSource) []const []const u8 {
+        const text: []const []const u8 = &.{"text/plain"};
+        return if (self.has_text()) text else &.{};
+    }
 };
 
 /// What `source` holds for a request: its text, else (for `include_files`,
@@ -15409,6 +15423,13 @@ const ClipboardReplyFixture = struct {
         // The terminal's modes decide whether a paste is bracketed.
         core.io.terminal = try terminal.Terminal.init(std.testing.io, self.core_app.alloc, .{ .cols = 10, .rows = 10 });
         core.renderer_state = .{ .mutex = &self.renderer_mutex, .terminal = &core.io.terminal };
+        // A mode 5522 paste event queues its write with the renderer lock
+        // held (`queueIo(..., .locked)`), which reaches the lock through
+        // the termio's pointer, as `Surface.init` sets it.
+        core.io.renderer_state = &core.renderer_state;
+        // Where a paste event records the one-time password its read is
+        // granted by; the rest of the stream handler is not used.
+        core.io.terminal_stream.handler.kitty_clipboard_grants = .{};
         self.surface.core_initialized = true;
     }
 
@@ -15417,6 +15438,7 @@ const ClipboardReplyFixture = struct {
         self.surface.core_initialized = false;
         if (self.surface.pending_clipboard_op) |*op| op.deinit(self.core_app.alloc);
         self.surface.pending_clipboard_op = null;
+        self.surface.core_surface.io.terminal_stream.handler.kitty_clipboard_grants.deinit(self.core_app.alloc);
         self.surface.core_surface.io.terminal.deinit(self.core_app.alloc);
         self.surface.core_surface.io.mailbox.deinit(self.core_app.alloc);
         self.session.deinit();
@@ -15582,6 +15604,8 @@ const EmptyPasteClipboard = struct {
     var files: ?[]const []const u8 = null;
     /// Whether the read looked at the CF_HDROP format at all.
     var hdrop_read = false;
+    /// Whether anything read the text itself, not only asked if it is there.
+    var text_read = false;
     /// The HDROP lent out by the last read.
     var held: ?*anyopaque = null;
 
@@ -15617,8 +15641,15 @@ const EmptyPasteClipboard = struct {
 
     /// The text format: a copy of the text, or null when there is none.
     fn readText(alloc: Allocator) anyerror!?[:0]u8 {
+        text_read = true;
         const value = text orelse return null;
         return try alloc.dupeSentinel(u8, value, 0);
+    }
+
+    /// Whether there is a text format, as the system clipboard's formats
+    /// say, without reading it.
+    fn hasText() bool {
+        return text != null;
     }
 
     /// The CF_HDROP format, borrowed as the system clipboard lends its own:
@@ -15641,7 +15672,8 @@ const EmptyPasteClipboard = struct {
         text = value;
         files = null;
         hdrop_read = false;
-        fixture.app.test_clipboard_source = .{ .text = &readText, .hdrop = &readHdrop };
+        text_read = false;
+        fixture.app.test_clipboard_source = .{ .text = &readText, .hdrop = &readHdrop, .has_text = &hasText };
     }
 
     /// A clipboard holding copied files and no text.
@@ -15936,6 +15968,246 @@ test "win32 copied-files-paste: a drop pastes through the same path as a copy" {
     try std.testing.expectEqualStrings("\x1b[200~\"C:\\a b\\x.txt\"\x1b[201~", try takePastedBytes(&fixture, &buf));
     surfaceDropPayloadCallback(&fixture.surface, "");
     try fixture.expectSilent();
+}
+
+/// A program's Kitty clipboard protocol (OSC 5522) read as the IO thread's
+/// stream handler makes one (`StreamHandler.kittyClipboardRead`): `pw` is the
+/// decoded password, and the read is granted when the session's grants take
+/// it, which uses up a paste event's one-time password.
+fn testKittyClipboardRead(
+    fixture: *ClipboardReplyFixture,
+    location: apprt.Clipboard,
+    mimes: []const []const u8,
+    list: bool,
+    pw: []const u8,
+) !*apprt.ClipboardRequest.KittyRead {
+    const core_alloc = fixture.core_app.alloc;
+    const grants = &fixture.surface.core_surface.io.terminal_stream.handler.kitty_clipboard_grants;
+    const granted = !terminal.kitty.clipboard.readPromptExempt(mimes.len) and
+        grants.use(core_alloc, pw, .read);
+    var arena: std.heap.ArenaAllocator = .init(core_alloc);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+    const req = try alloc.create(apprt.ClipboardRequest.KittyRead);
+    const owned = try alloc.alloc([:0]const u8, mimes.len);
+    for (mimes, owned) |src, *dst| dst.* = try alloc.dupeSentinel(u8, src, 0);
+    const pw_owned = try alloc.dupe(u8, pw);
+    const name = try alloc.dupeSentinel(u8, "Paste event", 0);
+    req.* = .{
+        // Copied in after the last allocation, so it frees them all.
+        .arena = arena,
+        .location = location,
+        .mimes = owned,
+        .list = list,
+        .id = "",
+        .pw = pw_owned,
+        .name = name,
+        .granted = granted,
+        .terminator = .st,
+    };
+    return req;
+}
+
+/// The one-time password a paste event's first packet carries, base64 as
+/// written, copied into `buf`.
+fn pasteEventPassword(event: []const u8, buf: []u8) ![]const u8 {
+    const ok_prefix = "\x1b]5522;type=read:status=OK:pw=";
+    if (!std.mem.startsWith(u8, event, ok_prefix)) return error.NotAPasteEvent;
+    const end = std.mem.indexOfPos(u8, event, ok_prefix.len, "\x1b\\") orelse return error.NotAPasteEvent;
+    const pw = event[ok_prefix.len..end];
+    @memcpy(buf[0..pw.len], pw);
+    return buf[0..pw.len];
+}
+
+/// The paste event a paste of a clipboard listing `listing` (base64, or empty
+/// for none) sends, with its password `pw` (base64).
+fn expectPasteEvent(event: []const u8, pw: []const u8, listing: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const expected = try std.mem.print(
+        &buf,
+        "\x1b]5522;type=read:status=OK:pw={s}\x1b\\" ++
+            "\x1b]5522;type=read:status=DATA:mime=Lg==:pw={s}{s}{s}\x1b\\" ++
+            "\x1b]5522;type=read:status=DONE:pw={s}\x1b\\",
+        .{ pw, pw, if (listing.len > 0) ";" else "", listing, pw },
+    );
+    try std.testing.expectEqualStrings(expected, event);
+}
+
+test "win32 kitty-paste-events: a paste sends the event and not the text, and the read it grants gets the text once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: ClipboardReplyFixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const core = &fixture.surface.core_surface;
+    var buf: [512]u8 = undefined;
+    var pw_buf: [64]u8 = undefined;
+    fixture.setBracketedPaste(true);
+    EmptyPasteClipboard.install(&fixture, "secret");
+
+    // Without paste events, the text pastes between the fences as before.
+    try std.testing.expect(try core.performBindingAction(.paste_from_clipboard));
+    try std.testing.expectEqualStrings("\x1b[200~secret\x1b[201~", try takePastedBytes(&fixture, &buf));
+
+    // The program turns them on (mode 5522): the same paste is an event that
+    // lists the clipboard's types, and nothing reads the text for it.
+    core.io.terminal.modes.set(.kitty_paste_events, true);
+    EmptyPasteClipboard.install(&fixture, "secret");
+    try std.testing.expect(try core.performBindingAction(.paste_from_clipboard));
+    const event = try takePastedBytes(&fixture, &buf);
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+    try std.testing.expect(std.mem.indexOf(u8, event, "secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, event, "\x1b[200~") == null);
+    const pw_b64 = try pasteEventPassword(event, &pw_buf);
+    try std.testing.expectEqual(std.base64.standard.Encoder.calcSize(terminal.kitty.clipboard.otp_len), pw_b64.len);
+    // "text/plain\n", the one type a read is served.
+    try expectPasteEvent(event, pw_b64, "dGV4dC9wbGFpbgo=");
+
+    // The program reads with the event's password, under the default
+    // `clipboard-read = ask`: granted, it gets the text with no prompt.
+    var pw: [terminal.kitty.clipboard.otp_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&pw, pw_b64);
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"text/plain"}, false, &pw) });
+    try std.testing.expect(EmptyPasteClipboard.text_read);
+    try std.testing.expectEqual(HostOverlayMode.none, fixture.host.overlay_mode);
+    try fixture.expectReply("\x1b]5522;type=read:status=OK\x1b\\" ++
+        "\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;c2VjcmV0\x1b\\" ++
+        "\x1b]5522;type=read:status=DONE\x1b\\");
+
+    // The password was one-time: the same read again would have to ask, and
+    // is not served (ENOSYS) without reading the clipboard.
+    EmptyPasteClipboard.text_read = false;
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"text/plain"}, false, &pw) });
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+    try std.testing.expectEqual(HostOverlayMode.none, fixture.host.overlay_mode);
+    try fixture.expectReply("\x1b]5522;type=read:status=ENOSYS\x1b\\");
+
+    // Every event has a fresh password.
+    try std.testing.expect(try core.performBindingAction(.paste_from_clipboard));
+    var next_buf: [64]u8 = undefined;
+    const next_pw = try pasteEventPassword(try takePastedBytes(&fixture, &buf), &next_buf);
+    try std.testing.expect(!std.mem.eql(u8, pw_b64, next_pw));
+}
+
+test "win32 kitty-paste-events: a clipboard without text, or with only copied files, sends an event listing nothing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: ClipboardReplyFixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    defer EmptyPasteClipboard.release();
+    const core = &fixture.surface.core_surface;
+    var buf: [512]u8 = undefined;
+    var pw_buf: [64]u8 = undefined;
+    fixture.setBracketedPaste(true);
+    core.io.terminal.modes.set(.kitty_paste_events, true);
+
+    // No text: not the empty bracketed pair, an event with an empty listing.
+    EmptyPasteClipboard.install(&fixture, null);
+    try std.testing.expect(try core.performBindingAction(.paste_from_clipboard));
+    var event = try takePastedBytes(&fixture, &buf);
+    try expectPasteEvent(event, try pasteEventPassword(event, &pw_buf), "");
+
+    // Copied files are not a type a read is served, so they are not listed
+    // and never read.
+    EmptyPasteClipboard.installFiles(&fixture, &.{"C:\\f.txt"});
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .list = .standard }));
+    event = try takePastedBytes(&fixture, &buf);
+    try expectPasteEvent(event, try pasteEventPassword(event, &pw_buf), "");
+    try std.testing.expect(!EmptyPasteClipboard.hdrop_read);
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+
+    // An empty text is still a text format.
+    EmptyPasteClipboard.install(&fixture, "");
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .list = .standard }));
+    event = try takePastedBytes(&fixture, &buf);
+    try expectPasteEvent(event, try pasteEventPassword(event, &pw_buf), "dGV4dC9wbGFpbgo=");
+
+    // Windows has no selection or primary clipboard to paste from.
+    try std.testing.expectEqual(apprt.ClipboardReadResult.unsupported, try fixture.surface.clipboardRequest(.selection, .{ .list = .selection }));
+    try std.testing.expect(!try core.performBindingAction(.paste_from_selection));
+    try fixture.expectSilent();
+}
+
+test "win32 kitty-clipboard-read: a program's own read is served only when nothing would ask, and only text" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: ClipboardReplyFixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    defer EmptyPasteClipboard.release();
+    const core = &fixture.surface.core_surface;
+    const ok = "\x1b]5522;type=read:status=OK\x1b\\";
+    const done = "\x1b]5522;type=read:status=DONE\x1b\\";
+    const listing = "\x1b]5522;type=read:status=DATA:mime=Lg==;dGV4dC9wbGFpbgo=\x1b\\";
+    const text = "\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;c2VjcmV0\x1b\\";
+    EmptyPasteClipboard.install(&fixture, "secret");
+
+    // Under `clipboard-read = ask` with no grant a data read would ask, and
+    // Win32 has no prompt for it: not served, the clipboard not read.
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"text/plain"}, false, "") });
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+    try std.testing.expectEqual(HostOverlayMode.none, fixture.host.overlay_mode);
+    try fixture.expectReply("\x1b]5522;type=read:status=ENOSYS\x1b\\");
+
+    // The type listing alone discloses no data and never asks.
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{}, true, "") });
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+    try fixture.expectReply(ok ++ listing ++ done);
+
+    // Under `allow`: the text for a text type, under the name asked for,
+    // the listing when asked, and nothing for another type.
+    core.config.clipboard_read = .allow;
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{ "text/plain", "image/png" }, true, "") });
+    try fixture.expectReply(ok ++ listing ++ text ++ done);
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"UTF8_STRING"}, false, "") });
+    try fixture.expectReply(ok ++ "\x1b]5522;type=read:status=DATA:mime=VVRGOF9TVFJJTkc=;c2VjcmV0\x1b\\" ++ done);
+    EmptyPasteClipboard.text_read = false;
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"image/png"}, false, "") });
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+    try fixture.expectReply(ok ++ done);
+
+    // Copied files are never served to a program, nor looked at.
+    EmptyPasteClipboard.installFiles(&fixture, &.{"C:\\f.txt"});
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"text/plain"}, true, "") });
+    try std.testing.expect(!EmptyPasteClipboard.hdrop_read);
+    try fixture.expectReply(ok ++ "\x1b]5522;type=read:status=DATA:mime=Lg==\x1b\\" ++ done);
+
+    // Windows has no primary selection.
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .primary, &.{"text/plain"}, false, "") });
+    try fixture.expectReply("\x1b]5522;type=read:status=ENOSYS\x1b\\");
+
+    // `deny` refuses in core before Win32 is asked.
+    EmptyPasteClipboard.install(&fixture, "secret");
+    core.config.clipboard_read = .deny;
+    try core.handleMessage(.{ .kitty_clipboard_read = try testKittyClipboardRead(&fixture, .standard, &.{"text/plain"}, false, "") });
+    try std.testing.expect(!EmptyPasteClipboard.text_read);
+    try fixture.expectReply("\x1b]5522;type=read:status=EPERM\x1b\\");
+}
+
+test "win32 upstream 1.4 actions the runtime does not perform answer not performed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: ClipboardReplyFixture = .{};
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const core = &fixture.surface.core_surface;
+    core.rt_app = app;
+
+    // A program's CSI 8 t, a `set_window_title` binding and the inspector's
+    // Terminal IO export, at the targets core sends them to.
+    for ([_]apprt.Target{ .app, .{ .surface = core } }) |target| {
+        try std.testing.expect(!try app.performAction(target, .resize_window, .{ .width = 800, .height = 600 }));
+        try std.testing.expect(!try app.performAction(target, .set_window_title, .{ .title = "title" }));
+        try std.testing.expect(!try app.performAction(target, .export_terminal_io, .{ .contents = "io" }));
+    }
+    // The binding is not performed, so a `performable:` one goes on to the
+    // program.
+    try std.testing.expect(!try core.performBindingAction(.{ .set_window_title = "title" }));
+    try std.testing.expect(fixture.host.banner_text == null);
+    try fixture.expectSilent();
+
+    // GTK's D-Bus `+new-tab`: nothing is sent and nothing waits for a reply.
+    try std.testing.expect(!try App.performIpc(std.testing.allocator, .detect, .new_tab, .{ .surface_id = 0, .arguments = null }, 60_000));
+    var arguments = [_][:0]const u8{"--title=x"};
+    try std.testing.expect(!try App.performIpc(std.testing.allocator, .{ .class = "com.example.noctty" }, .new_tab, .{ .surface_id = 7, .arguments = &arguments }, 60_000));
 }
 
 test "win32 a program's clipboard request asks in its own words and cannot be answered by a key in flight" {
