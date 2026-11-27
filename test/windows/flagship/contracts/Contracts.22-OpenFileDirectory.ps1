@@ -346,6 +346,18 @@ if ((Get-OpenFileDirectoryProblems -HitsByFile $kittyHits) -cnotcontains "${kitt
     throw 'The open-file directory check kept the kitty open reviewed after its Windows branch was removed.'
 }
 $openFileControls++
+# Council AC3: the pinned open takes .allow_directory = false and a plain open follows it in readFile; the pinned
+# branch ends at the first open, not the second, so the second is refused (-AtEnd).
+$kittyOpen = "        } else std.Io.Dir.cwd().openFile(`n            io,`n            path,`n            .{},`n        ) catch |err| {`n            log.warn(`"failed to open image file: {}`", .{err});`n            return error.InvalidData;`n        };`n"
+$kittyFollowed = $kittyOpen.Replace("            .{},`n", "            .{ .allow_directory = false },`n") + "        var plain = try std.Io.Dir.cwd().openFile(io, path, .{});`n        plain.close(io);`n"
+$kittyAtEnd = $kittyText.Replace($kittyOpen, $kittyFollowed)
+if ([string]::Equals($kittyAtEnd, $kittyText, [StringComparison]::Ordinal)) { throw 'The kitty -AtEnd control changed nothing.' }
+$kittyHits = @{} + $openFileHits
+$kittyHits[$kittyPath] = @(Get-OpenFileDirectoryHits -ZigText $kittyAtEnd -Path $kittyPath)
+if ((Get-OpenFileDirectoryProblems -HitsByFile $kittyHits) -cnotcontains "${kittyPath}:readFile (its pinned branch is not before the open) opens without .allow_directory = false (1, reviewed 0)") {
+    throw 'The open-file directory check let a plain open after the kitty open pass on its pinned branch.'
+}
+$openFileControls++
 foreach ($sample in @(
         @{ Text = "test `"t`" {`n    const f = try dir.openFile(io, `"x`", .{});`n}`n"; Hits = 0 }
         @{ Text = "fn w() !void {`n    const f = try dir.openFile(io, `"x`", .{ .mode = .write_only });`n}`n"; Hits = 0 }
