@@ -10,9 +10,12 @@
 # Allowed, and nothing else (council F10): the graph's own map (`b.graph.environ_map`), an options
 # field in a struct literal (`.{ .environ_map = &env }`, a host tool's `std.process.run`), the name in
 # `@hasField(..., "environ_map")`, and a host tool's own process environment (`init.environ_map` in a
-# file whose `main` takes `init: std.process.Init`). The dependencies' own build scripts configure in
-# the same process; CI's sentinel step (windows-lib-vt, scripts/check-configure-environment.ps1)
-# covers them end to end.
+# file whose `main` takes `init: std.process.Init`, inside that `main`). The dependencies' own build
+# scripts configure in the same process; CI's sentinel step (windows-lib-vt,
+# scripts/check-configure-environment.ps1) covers them end to end.
+#
+# A known limit (council H3): a whole Run written as a struct literal, `run.* = .{ ..., .environ_map =
+# &env }`, reads as an options field and passes. Nothing in the tree writes a step that way.
 
 # Blanks every Zig comment, multi-line-string line, string literal and character literal, keeping
 # the length, so a hit is code. A quoted identifier (`@"name"`) keeps its name, so
@@ -33,16 +36,20 @@ function Remove-BuildEnvironmentNonCode([string] $Text, [switch] $KeepStrings) {
 
 # The Run step members that reach the step's environment map (`lib/std/Build/Step/Run.zig`:
 # setEnvironmentVariable, removeEnvironmentVariable and getEnvMap clone the graph's map,
-# clearEnvironment replaces it), named in any way (a call, a reference called later, `@call`); any
-# mention of an `environ_map` field but the allowed ones, however the receiver is spelled (a write, a
-# read, an address taken for a later write or a swap); the field named as a string, but in
-# `@hasField`; and a `@field` write whose field name is not a literal, which could be `environ_map`.
+# clearEnvironment replaces it), named in any way (a call, a reference called later, `@call`, or a
+# string, as `@field(Run, "setEnvironmentVariable")` names one: council H3, so these read the
+# strings-kept text); any mention of an `environ_map` field but the allowed ones, however the receiver
+# is spelled (a write, a read, an address taken for a later write or a swap); the field named as a
+# string, but in `@hasField`; and a `@field` write whose field name is not a literal, which could be
+# `environ_map`.
 $script:BuildEnvironmentCopyForms = @(
-    @{ Name = 'setEnvironmentVariable'; Pattern = '\bsetEnvironmentVariable\b' }
-    @{ Name = 'removeEnvironmentVariable'; Pattern = '\bremoveEnvironmentVariable\b' }
-    @{ Name = 'getEnvMap'; Pattern = '\bgetEnvMap\b' }
-    @{ Name = 'clearEnvironment'; Pattern = '\bclearEnvironment\b' }
-    @{ Name = 'environ_map mention'; Pattern = '(?<!\bgraph\s*)(?<![{,]\s*)\.\s*environ_map\b(?!\s*:)'; HostInit = $true }
+    @{ Name = 'setEnvironmentVariable'; Pattern = '\bsetEnvironmentVariable\b'; KeepStrings = $true }
+    @{ Name = 'removeEnvironmentVariable'; Pattern = '\bremoveEnvironmentVariable\b'; KeepStrings = $true }
+    @{ Name = 'getEnvMap'; Pattern = '\bgetEnvMap\b'; KeepStrings = $true }
+    @{ Name = 'clearEnvironment'; Pattern = '\bclearEnvironment\b'; KeepStrings = $true }
+    # An options field in a struct literal (`{` or `,` before it, an `=` after it, not `==`) passes; a
+    # `setField(run, .environ_map, &env)` argument does not (council H3).
+    @{ Name = 'environ_map mention'; Pattern = '(?<!\bgraph\s*)\.\s*environ_map\b(?!\s*:)'; HostInit = $true; OptionsField = $true }
     @{ Name = 'environ_map named'; Pattern = '(?<!@hasField\s*\([^()]*(?:\([^()]*\))?[^()]*,\s*)"environ_map"'; KeepStrings = $true }
     # In every file the check reads (council G1: an imported `anytype` helper could write a step's field by
     # a computed name), but the reviewed sites below.
@@ -84,12 +91,14 @@ function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path) {
         foreach ($hit in [regex]::Matches($subject, $form.Pattern)) {
             if ($form['HostInit'] -and $null -ne $hostMain -and $hit.Index -gt $hostMain[0] -and $hit.Index -lt $hostMain[1] -and
                 $subject.Substring(0, $hit.Index) -match '\binit\s*$') { continue }
+            if ($form['OptionsField'] -and $subject.Substring([Math]::Max(0, $hit.Index - 64), [Math]::Min(64, $hit.Index)) -match '[{,]\s*$' -and
+                $subject.Substring($hit.Index + $hit.Length) -match '^\s*=(?!=)') { continue }
             if ($form['Reviewed']) {
                 $text = [regex]::Replace($hit.Value, '\s*=$', '')
                 $site = @($script:BuildEnvironmentReviewedFieldWrites | Where-Object { $_.Path -ceq $Path -and $_.Text -ceq $text })
                 if ($site.Count -eq 1) {
                     $reviewed[$text] = 1 + $(if ($reviewed.ContainsKey($text)) { $reviewed[$text] } else { 0 })
-                    if ($reviewed[$text] -le $site[0].Count) { continue }
+                    if ($reviewed[$text] -le $site[0]['Count']) { continue }
                 }
             }
             $line = ($subject.Substring(0, $hit.Index) -split "`n").Count
@@ -178,13 +187,20 @@ foreach ($sample in @(
         'const run = b.addSystemCommand(&.{ "tool" }); @field(run, name) = &env;',
         'if (run.environ_map == null) return;',
         # Council G1: with no Run constructor in sight, as an imported anytype helper writes it.
-        '@field(run, name) = &env;'
+        '@field(run, name) = &env;',
+        # Council H3: a member named as a string, and an environ_map argument that is no options field.
+        '@field(Run, "setEnvironmentVariable")(run, "IS_STATIC", "1");',
+        '_ = @call(.auto, @field(Run, "getEnvMap"), .{run});',
+        'setField(run, .environ_map, &env);'
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $sample`n}`n" -Path 'control.zig').Count -ne 1) {
         throw "The build environment check missed a control: $sample"
     }
-    if (@(Get-BuildEnvironmentCopyHits -ZigText "// $sample`nconst s = `"$($sample.Replace('"', ''))`";`n" -Path 'control.zig').Count -ne 0) {
-        throw "The build environment check flagged a comment or string: $sample"
+    # A comment never counts; a string counts only where it names a Run member (council H3).
+    $inString = if ($sample -match '\b(?:setEnvironmentVariable|removeEnvironmentVariable|getEnvMap|clearEnvironment)\b') { 1 } else { 0 }
+    if (@(Get-BuildEnvironmentCopyHits -ZigText "// $sample`n" -Path 'control.zig').Count -ne 0 -or
+        @(Get-BuildEnvironmentCopyHits -ZigText "const s = `"$($sample.Replace('"', ''))`";`n" -Path 'control.zig').Count -ne $inString) {
+        throw "The build environment check miscounted a comment or string: $sample"
     }
     $buildEnvironmentControls += 2
 }
