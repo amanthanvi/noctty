@@ -19,8 +19,16 @@
 # `run.@"setEnvironmentVariable"(...)` is still seen.
 function Remove-BuildEnvironmentNonCode([string] $Text, [switch] $KeepStrings) {
     $named = [regex]::Replace($Text, '@"([A-Za-z_][A-Za-z0-9_]*)"', { param($m) ' ' + $m.Groups[1].Value + '  ' })
-    $pattern = if ($KeepStrings) { '//[^\n]*|\\\\[^\n]*' } else { '//[^\n]*|\\\\[^\n]*|''(?:\\.|[^''\\\n])''|"(?:\\.|[^"\\\n])*"' }
-    return [regex]::Replace($named, $pattern, { param($m) ' ' * $m.Length })
+    # One pass over the literals and the comments, so a `//` inside a string is the string's (council G2:
+    # an `@import` after a URL string on the same line was blanked as a comment). With -KeepStrings the
+    # string and character literals stay as written.
+    $pattern = '(?<literal>''(?:\\.|[^''\\\n])''|"(?:\\.|[^"\\\n])*")|//[^\n]*|\\\\[^\n]*'
+    $keep = [bool]$KeepStrings
+    return [regex]::Replace($named, $pattern, {
+            param($m)
+            if ($keep -and $m.Groups['literal'].Success) { return $m.Value }
+            return ' ' * $m.Length
+        })
 }
 
 # The Run step members that reach the step's environment map (`lib/std/Build/Step/Run.zig`:
@@ -36,22 +44,54 @@ $script:BuildEnvironmentCopyForms = @(
     @{ Name = 'clearEnvironment'; Pattern = '\bclearEnvironment\b' }
     @{ Name = 'environ_map mention'; Pattern = '(?<!\bgraph\s*)(?<![{,]\s*)\.\s*environ_map\b(?!\s*:)'; HostInit = $true }
     @{ Name = 'environ_map named'; Pattern = '(?<!@hasField\s*\([^()]*(?:\([^()]*\))?[^()]*,\s*)"environ_map"'; KeepStrings = $true }
-    # In a file that makes or takes a Run step only: an options struct filled by name
-    # (`terminal/build_options.zig`) is no step.
-    @{ Name = 'computed @field write'; Pattern = '@field\s*\((?:[^()]|\([^()]*\))*,\s*[A-Za-z_][A-Za-z0-9_.]*\s*\)\s*=(?!=)'; RunFile = $true }
+    # In every file the check reads (council G1: an imported `anytype` helper could write a step's field by
+    # a computed name), but the reviewed sites below.
+    @{ Name = 'computed @field write'; Pattern = '@field\s*\((?:[^()]|\([^()]*\))*,\s*[A-Za-z_][A-Za-z0-9_.]*\s*\)\s*=(?!=)'; Reviewed = $true }
 )
+
+# Computed-name `@field` writes read and kept, each by file, its code text and its count: anything else,
+# another site or another of these, fails.
+$script:BuildEnvironmentReviewedFieldWrites = @(
+    # `Options.parse`'s feature list fills its own `Features` struct, by the names `@typeInfo(Features)` gives
+    # it (`inline for`), "all" and each named one: no step, no environment.
+    @{ Path = 'src/terminal/build_options.zig'; Text = '@field(result, field)'; Count = 2 }
+)
+
+# The body of `main` when it takes a `std.process.Init` (a host tool's entry point): its start and end
+# offsets in `$Code`, or $null.
+function Get-BuildEnvironmentHostMain([string] $Code) {
+    $head = [regex]::Match($Code, '\bfn\s+main\s*\(\s*init\s*:\s*std\.process\.Init\b[^{]*\{')
+    if (-not $head.Success) { return $null }
+    $start = $head.Index + $head.Length
+    $depth = 1
+    foreach ($brace in [regex]::new('[{}]').Matches($Code, $start)) {
+        if ($brace.Value -eq '{') { $depth++ } else { $depth-- }
+        if ($depth -eq 0) { return @($start, $brace.Index) }
+    }
+    return $null
+}
 
 function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path) {
     $code = Remove-BuildEnvironmentNonCode $ZigText
     $withStrings = Remove-BuildEnvironmentNonCode $ZigText -KeepStrings
-    # A host tool's own process environment: `init.environ_map` where `main` takes a std.process.Init.
-    $hostTool = $code -match '\bfn\s+main\s*\(\s*init\s*:\s*std\.process\.Init\b'
-    $runFile = $code -match '\bStep\s*\.\s*Run\b|\baddRunArtifact\b|\baddSystemCommand\b'
+    # A host tool's own process environment: `init.environ_map` inside the body of the `main` that takes
+    # the std.process.Init, and nowhere else in the file (council G1: ConptyRedist's configure-time
+    # `install` sits beside its host `main`).
+    $hostMain = Get-BuildEnvironmentHostMain $code
     foreach ($form in $script:BuildEnvironmentCopyForms) {
-        if ($form['RunFile'] -and -not $runFile) { continue }
         $subject = if ($form['KeepStrings']) { $withStrings } else { $code }
+        $reviewed = @{}
         foreach ($hit in [regex]::Matches($subject, $form.Pattern)) {
-            if ($form['HostInit'] -and $hostTool -and $subject.Substring(0, $hit.Index) -match '\binit\s*$') { continue }
+            if ($form['HostInit'] -and $null -ne $hostMain -and $hit.Index -gt $hostMain[0] -and $hit.Index -lt $hostMain[1] -and
+                $subject.Substring(0, $hit.Index) -match '\binit\s*$') { continue }
+            if ($form['Reviewed']) {
+                $text = [regex]::Replace($hit.Value, '\s*=$', '')
+                $site = @($script:BuildEnvironmentReviewedFieldWrites | Where-Object { $_.Path -ceq $Path -and $_.Text -ceq $text })
+                if ($site.Count -eq 1) {
+                    $reviewed[$text] = 1 + $(if ($reviewed.ContainsKey($text)) { $reviewed[$text] } else { 0 })
+                    if ($reviewed[$text] -le $site[0].Count) { continue }
+                }
+            }
             $line = ($subject.Substring(0, $hit.Index) -split "`n").Count
             "${Path}:${line}: $($form.Name)"
         }
@@ -136,7 +176,9 @@ foreach ($sample in @(
         'std.mem.swap(?*std.process.Environ.Map, &run.environ_map, &other);',
         '@field(steps.get(0), "environ_map") = &env;',
         'const run = b.addSystemCommand(&.{ "tool" }); @field(run, name) = &env;',
-        'if (run.environ_map == null) return;'
+        'if (run.environ_map == null) return;',
+        # Council G1: with no Run constructor in sight, as an imported anytype helper writes it.
+        '@field(run, name) = &env;'
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $sample`n}`n" -Path 'control.zig').Count -ne 1) {
         throw "The build environment check missed a control: $sample"
@@ -166,6 +208,19 @@ if (@(Get-BuildEnvironmentCopyHits -ZigText $hostToolText.Replace('init: std.pro
     throw 'The build environment check passed init.environ_map outside a host tool.'
 }
 $buildEnvironmentControls += 2
+# Council G1: only inside that main's body; the same file's other function is refused.
+$hostToolBeside = $hostToolText + "pub fn install(init: anytype) void {`n    _ = init.environ_map;`n}`n"
+if (@(Get-BuildEnvironmentCopyHits -ZigText $hostToolBeside -Path 'control.zig').Count -ne 1) {
+    throw 'The build environment check passed init.environ_map outside the host main''s body.'
+}
+# The reviewed computed-name writes pass only in their file, and only as many as were read.
+$reviewedWrite = "fn parse() void {`n    @field(result, field) = enable;`n    @field(result, field) = enable;`n}`n"
+if (@(Get-BuildEnvironmentCopyHits -ZigText $reviewedWrite -Path 'src/terminal/build_options.zig').Count -ne 0) { throw 'The build environment check flagged a reviewed @field write.' }
+if (@(Get-BuildEnvironmentCopyHits -ZigText $reviewedWrite -Path 'src/build/Other.zig').Count -ne 2) { throw 'The build environment check passed a reviewed @field write in another file.' }
+if (@(Get-BuildEnvironmentCopyHits -ZigText ($reviewedWrite + "fn more() void {`n    @field(result, field) = enable;`n}`n") -Path 'src/terminal/build_options.zig').Count -ne 1) {
+    throw 'The build environment check passed a third computed @field write in build_options.zig.'
+}
+$buildEnvironmentControls += 4
 
 # Discovery controls (council F1): a helper the build script imports, which names std only as
 # `@import("std").Build`, is read, and so is one it reaches through another import.
@@ -175,15 +230,19 @@ try {
     [void](New-Item -ItemType Directory -Path (Join-Path $discoveryRoot 'pkg\x') -Force)
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'build.zig') -NoNewline -Value "const helper = @import(`"src/tools/helper.zig`");`npub fn build(b: *std.Build) void { _ = b; }`n"
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'pkg\x\build.zig') -NoNewline -Value "pub fn build(b: *std.Build) void { _ = b; }`n"
-    Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\helper.zig') -NoNewline -Value "const B = @import(`"std`").Build;`nconst deep = @import(`"deep.zig`");`n"
+    # Council G2: an import after a URL string on the same line is still read.
+    Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\helper.zig') -NoNewline -Value "const B = @import(`"std`").Build;`nconst deep = @import(`"deep.zig`");`nconst url = `"https://example.invalid/x`"; const more = @import(`"more.zig`");`n"
+    Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\more.zig') -NoNewline -Value "pub fn add(run: anytype) void {`n    run.clearEnvironment();`n}`n"
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\deep.zig') -NoNewline -Value "pub fn add(run: anytype) void {`n    run.setEnvironmentVariable(`"X`", `"1`");`n}`n"
     $discovered = Get-BuildEnvironmentFiles $discoveryRoot
     $found = @($discovered | ForEach-Object { [System.IO.Path]::GetRelativePath($discoveryRoot, $_).Replace('\', '/') })
-    foreach ($want in 'build.zig', 'pkg/x/build.zig', 'src/tools/helper.zig', 'src/tools/deep.zig') {
+    foreach ($want in 'build.zig', 'pkg/x/build.zig', 'src/tools/helper.zig', 'src/tools/deep.zig', 'src/tools/more.zig') {
         if ($found -cnotcontains $want) { throw "The build environment discovery missed $want (found: $($found -join ', '))." }
     }
     $failed = $false
-    try { [void](Assert-NoBuildEnvironmentCopies -Root $discoveryRoot) } catch { $failed = $_.Exception.Message -match 'src/tools/deep\.zig:2: setEnvironmentVariable' }
+    try { [void](Assert-NoBuildEnvironmentCopies -Root $discoveryRoot) } catch {
+        $failed = ($_.Exception.Message -match 'src/tools/deep\.zig:2: setEnvironmentVariable') -and ($_.Exception.Message -match 'src/tools/more\.zig:2: clearEnvironment')
+    }
     if (-not $failed) { throw 'The build environment check passed a forbidden call in an imported helper.' }
     $buildEnvironmentControls += 2
 } finally {
