@@ -35,7 +35,7 @@ def declaration_key(bindings, index):
 
 def changed_declarations(bindings, added, deleted, base_text):
     """The head declarations a changed line or deletion gap touches whose own tokens differ from every base
-    declaration's in the same scope (council no-seat P1 on #768): a comment, a layout change or a move inside a mixed
+    declaration's in the same scope (council P1 on #768): a comment, a layout change or a move inside a mixed
     hunk changes no binding. Without a base text (a new file), every touched one."""
     touched = bindings.changed_aliases(added, deleted)
     if base_text is None or not touched:
