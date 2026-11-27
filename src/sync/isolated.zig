@@ -569,6 +569,7 @@ const StateMutex = state_mutex.StateMutex;
 test {
     _ = compare;
     _ = symbolise;
+    _ = @import("io_tasks.zig");
 }
 
 test "a test's qualified name comes from its block's @src()" {
