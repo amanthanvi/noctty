@@ -13982,8 +13982,11 @@ test "scrollback limits" {
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
+    // The fork keeps 10 MB where upstream 1.4 has 50 MB: Windows does not
+    // compress scrollback, so the history the limit allows stays resident
+    // (the field's documentation).
     try testing.expectEqual(
-        @as(usize, 50_000_000),
+        @as(usize, 10_000_000),
         cfg.@"scrollback-limit-bytes".value,
     );
     try testing.expectEqual(
@@ -14028,7 +14031,7 @@ test "scrollback limits" {
     try cfg.loadIter(alloc, &reset_it);
 
     try testing.expectEqual(
-        @as(usize, 50_000_000),
+        @as(usize, 10_000_000),
         cfg.@"scrollback-limit-bytes".value,
     );
     try testing.expectEqual(
