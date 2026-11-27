@@ -1264,6 +1264,8 @@ fn rootLen(path: []const u16) ?usize {
 }
 
 test "the identity fallback looks only on the stage's own root (council U2)" {
+    // Each literal below is converted at comptime.
+    @setEvalBranchQuota(20_000);
     const w = std.unicode.utf8ToUtf16LeStringLiteral;
     // The same drive, any case.
     try std.testing.expect(onStageRoot(w("C:\\Users\\a\\updates"), w("c:\\Users\\A\\UPDATES\\1.2.3\\s.exe")));
