@@ -11,8 +11,10 @@
 # argument, the call's last, is read (council W3), and it must be one plain struct literal whose top level sets
 # `.allow_directory = false` or a write `.mode`, exactly (council Y2): a computed, conditional or unparsed form
 # fails, and a real site in one is reviewed below. Any other mention of either name outside test code and `sys.`
-# (a quoted identifier, the name as a string, a reference without a call) fails too (council Y5). A new open, or
-# one that loses the option, fails here.
+# (a quoted identifier, the name as a string, a reference without a call) fails too (council Y5), and so does a
+# `\xNN` or `\u{...}` escape in a quoted identifier or an `@field` name outside test code (council AA5): refused,
+# not decoded. Not refused: a name built at comptime, as `"open" ++ "File"` in an `@field`, which is code
+# review's. A new open, or one that loses the option, fails here.
 
 # Blanks comments, multi-line-string lines and string and character literals, keeping the length. With
 # -KeepStrings the string and character literals stay as written (a pinned check's text holds its strings).
@@ -40,11 +42,28 @@ function Get-OpenFileTestSpans([string] $Code) {
 
 # `path:function` for each read-mode open without `.allow_directory = false` outside test code.
 function Get-OpenFileDirectoryHits([string] $ZigText, [string] $Path) {
-    if (-not $ZigText.Contains('openFile')) { return }
+    $mayEscape = $ZigText.Contains('\x') -or $ZigText.Contains('\u{')
+    if (-not $ZigText.Contains('openFile') -and -not $mayEscape) { return }
     $code = Remove-OpenFileNonCode $ZigText
     $spans = @(Get-OpenFileTestSpans $code)
     $functions = [regex]::Matches($code, '\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
     $withStrings = $null
+    # Council AA5: a `\xNN` or `\u{...}` escape in a quoted identifier or an `@field` name, outside test code, could
+    # spell either name, and fails outright: refused, not decoded (Contracts.21's Y3 rule, for product code).
+    if ($mayEscape) {
+        $withStrings = Remove-OpenFileNonCode $ZigText -KeepStrings
+        foreach ($m in [regex]::Matches($withStrings, '@"(?:\\.|[^"\\\n])*"|@field\s*\((?:[^()]|\([^()]*\))*?,\s*(?<name>"(?:\\.|[^"\\\n])*")')) {
+            $literal = if ($m.Groups['name'].Success) { $m.Groups['name'] } else { $m }
+            if ($literal.Value -notmatch '(?<!\\)(?:\\\\)*\\(?:x[0-9A-Fa-f]{2}|u\{)') { continue }
+            $inTest = $false
+            foreach ($span in $spans) { if ($literal.Index -gt $span[0] -and $literal.Index -lt $span[1]) { $inTest = $true; break } }
+            if ($inTest) { continue }
+            $name = '(top level)'
+            foreach ($function in $functions) { if ($function.Index -lt $literal.Index) { $name = $function.Groups[1].Value } else { break } }
+            "${Path}:${name} (an escaped name)"
+        }
+    }
+    if (-not $ZigText.Contains('openFile')) { return }
     # Council Y5: any other mention of either name outside test code and `sys.` (a quoted identifier, the name
     # as a string, or a reference without a call) is an open the guard cannot read, and fails.
     $mentions = @(
@@ -309,6 +328,13 @@ foreach ($sample in @(
         @{ Text = "const open = std.Io.Dir.openFileAbsolute;`n"; Hits = 1 }
         @{ Text = "const open = win32_sys.openFile;`n"; Hits = 0 }
         @{ Text = "test `"t`" {`n    const open = std.Io.Dir.openFile;`n}`n"; Hits = 0 }
+        # Council AA5: an escape in a quoted identifier or an @field name fails; one in another string, or in a
+        # test block, does not.
+        @{ Text = "fn e1() !void {`n    const f = try dir.@`"open\x46ile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn e2() !void {`n    const f = try dir.@`"open\u{46}ile`"(io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn e3() !void {`n    const f = try @field(std.Io.Dir, `"open\x46ile`")(dir, io, `"x`", .{});`n}`n"; Hits = 1 }
+        @{ Text = "fn e4() void {`n    log.info(`"\x41`", .{});`n}`n"; Hits = 0 }
+        @{ Text = "test `"t`" {`n    const f = try dir.@`"open\x46ile`"(io, `"x`", .{});`n}`n"; Hits = 0 }
     )) {
     if (@(Get-OpenFileDirectoryHits -ZigText $sample.Text -Path 'control.zig').Count -ne $sample.Hits) {
         throw "The open-file directory check miscounted a control: $($sample.Text)"
