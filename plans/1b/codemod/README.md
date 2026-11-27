@@ -13,7 +13,11 @@ migration re-runs at every forward merge through 1B.9 (PLAN.md row 1B.5, U7).
 - `b1_sweep.py` (with `b1-moved-users.txt`, its map, and `test_b1_sweep.py`): re-points the callers of the
   declarations 1B.1 moved to `src/os/windows_ext.zig`. A `windows_ext` binding it adds beside a file's windows
   binding is derived from that binding's own initializer (`const w = os.windows;` gives `os.windows_ext`), never from
-  a name found elsewhere in the text, such as a comment. `python -I plans/1b/codemod/test_b1_sweep.py`.
+  a name found elsewhere in the text, such as a comment. A file with more than one binding of the windows module (a
+  local `os.windows` alias and a file-scope `internal_os.windows` one), or of windows_ext, is a hand edit: which
+  binding a use, or an added windows_ext, goes through needs a reader, so nothing in the file is rewritten and each
+  use the sweep would re-point is printed (`hand edit<TAB><file><TAB><name><TAB><target><TAB><line><TAB><why>`) and
+  counted. `python -I plans/1b/codemod/test_b1_sweep.py`.
 - `census.py`: the distinct compile errors of a `zig build` log, by file and by kind, for the waves that follow.
 - `residue.tsv`: the hand edits, each with its file and why no rule makes it.
 
