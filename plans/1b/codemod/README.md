@@ -43,6 +43,11 @@ The engine, for every rule:
   `git ls-tree -r -z`, compared case-folded), is a hand edit whole: which of its lines are the fork's is unknown, so
   each rewrite a rule would make in it is reported as a hand edit and nothing in it is written. Such a file goes in
   `residue.tsv`, with its hand edits.
+- the mirror case is left unchanged and unreported (council W5): when the index renames a file by case only and the
+  disk keeps the ref's spelling, its path matches the ref's, `git diff` finds no line of the fork's in it, and the
+  codemod reads it as upstream's, so nothing in it is rewritten or reported. That fails closed: no inherited line is
+  edited, and the compile catches any 0.15 spelling left in it. The soft freeze keeps renames off fork `main` through
+  1B, so a forward merge brings no case-only rename in.
 
 test-dir-io (also):
 - an open and the closes of what it opened, when the open's name is bound more than once in the test (sibling
