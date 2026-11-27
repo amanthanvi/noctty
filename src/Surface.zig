@@ -1592,7 +1592,7 @@ fn expectRecordedPairs(pairs: []const RecordedPair) !void {
             if (slot.tag != tag) continue;
             const s = if (session) |*s| s else break true;
             // The call instruction, as the symbolise mode names a site.
-            const location = (try s.locate(alloc, slot.site - 1)) orelse continue;
+            const location = (try s.locateSite(alloc, slot.site - 1, symbolise.wrapper_skip)) orelse continue;
             defer location.deinit(alloc);
             const file = try symbolise.keyFile(alloc, location.file, root);
             defer alloc.free(file);
