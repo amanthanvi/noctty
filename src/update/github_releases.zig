@@ -302,6 +302,23 @@ pub fn defaultStatePath(alloc: Allocator) ![]u8 {
     });
 }
 
+/// Make directory `path` and its parents as 0.15's `makePath` did: a `path`
+/// that is already a directory, through a link or junction too, is left as it
+/// is. Zig 0.17's `createDirPath` reads an existing last component without
+/// following it and refuses a link with `error.NotDir`, before the identity
+/// check a stage directory gets next (`lockedHandleMatchesPath`, then
+/// `InvalidUpdateStageRoot`), which is the check that refuses a link here,
+/// one planted before the create or after it.
+fn makeDirPath(path: []const u8) !void {
+    const io = updateIo();
+    if (std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = true })) |existing| {
+        existing.close(io);
+    } else |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createDirPath(io, path),
+        else => |e| return e,
+    }
+}
+
 fn openStateLock(path: []const u8) !std.Io.File {
     if (std.fs.path.dirname(path)) |dir_path| try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
     var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
@@ -334,7 +351,7 @@ fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !StagingWorkLoc
     }
     const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
     defer alloc.free(updates_dir);
-    try std.Io.Dir.cwd().createDirPath(updateIo(), updates_dir);
+    try makeDirPath(updates_dir);
     var updates_root = try openLockedStageDirectory(updates_dir);
     errdefer updates_root.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, updates_dir, updates_root.handle)) {
