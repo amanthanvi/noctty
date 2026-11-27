@@ -141,10 +141,16 @@ whose removed and added lines hold the same Zig tokens (`same_zig_code`, which
 `line_changes` takes as `same_code`), so a comment or whitespace edit on an
 alias's definition line rechecks nothing, while a reference added in the same
 edit is still checked (council no-seat N3, after the lint was enforced).
+Inside a hunk that does change code, a touched definition counts as changed
+only when its own tokens (with its prefix keywords and the headers of the
+scopes around it, `declaration_key`) match no declaration of the merge base
+(`changed_declarations`, council P1 on #768). So a comment on an alias line
+beside a changed next line, or an alias moved within its scope, rechecks none
+of its uses.
 
-**Known conservative over-report:** a touched definition rechecks its uses
-even if the final origin stayed the same. Moving or re-spelling an alias's
-definition can therefore report unchanged legacy uses. Introducing an intermediate
+**Known conservative over-report:** a definition whose own tokens changed
+rechecks its uses even if the final origin stayed the same. Re-spelling an
+alias's definition can therefore report unchanged legacy uses. Introducing an intermediate
 alias (for example `const os = std.os; const windows = os.windows;`), or routing
 an existing std alias through the fork's re-exports, can recheck uses whose final
 binding stayed the same. This may report existing removed uses even though that

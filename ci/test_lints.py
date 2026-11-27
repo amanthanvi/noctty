@@ -855,8 +855,14 @@ class GitControls(unittest.TestCase):
         base = self.commit()
         upstream, removed, _ = self.inputs()
         commented = source.replace("kernel32;", "kernel32; // Win32 API")
+        # Council P1 on #768: in one mixed hunk, a comment on the alias line beside a changed next line, and a move of
+        # the alias inside its scope, leave the binding's own tokens as they were.
+        mixed = commented.replace("const unrelated = 1;", "const unrelated = 2;")
+        moved = source.replace("const w = std.os.windows.kernel32;\n", "").replace(
+            "const unrelated = 1;", "const unrelated = 1;\nconst w = std.os.windows.kernel32;")
         for variant in (commented, source.replace("const w = std", "const  w =\n    std"),
-                        source.replace("const unrelated = 1;\n", "const unrelated = 1;\n// a comment line\n")):
+                        source.replace("const unrelated = 1;\n", "const unrelated = 1;\n// a comment line\n"),
+                        mixed, moved):
             self.write("probe.zig", variant)
             head = self.commit()
             self.assertIn("probe.zig", common.line_changes(self.repo, base, head))
@@ -866,16 +872,15 @@ class GitControls(unittest.TestCase):
         self.assertEqual([("probe.zig", 5, "error", "removed std.os.windows.kernel32.Sleep")],
                          win.check(self.repo, base, head, upstream, removed))
 
-    def test_touched_alias_moves_visibility_and_spellings_recheck(self):
+    def test_touched_alias_visibility_and_spellings_recheck(self):
         self.write("src/os/windows.zig", "// reexports\n")
         source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
                   'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
         self.write("probe.zig", source)
         base = self.commit()
         upstream, removed, _ = self.inputs()
+        # A changed visibility or spelling is a change to the binding's own tokens (a move is not: council P1 on #768).
         variants = (source.replace("const w =", "pub const w ="),
-                    source.replace("const w = std.os.windows.kernel32;\n", "").replace(
-                        "const unrelated = 1;", "const unrelated = 1;\nconst w = std.os.windows.kernel32;"),
                     source.replace("std.os.windows.kernel32;", '@import("std").os.windows.kernel32;'))
         for variant in variants:
             self.write("probe.zig", variant)
@@ -1121,25 +1126,37 @@ class HistoryControls(unittest.TestCase):
         self.assertEqual(1, source.count(alias))
         commented = source.replace(alias, "const windows = std.os.windows; // council probe\n")
         self.assertEqual([], self.check(self.base, self.fixture(path, commented)))
+        # Council P1 on #768, Sol's probe: the same comment beside a change to the next line is one hunk, which
+        # rechecked all 40 uses of the untouched alias; the alias's own tokens did not change.
+        following = "const log = std.log.scoped(.win32);\n"
+        self.assertEqual(1, commented.count(following))
+        adjacent = commented.replace(following, "const log = std.log.scoped(.win32_ipc);\n")
+        mixed = self.fixture(path, adjacent)
+        # One hunk, lines 5 (the alias) and 6, that the token filter keeps.
+        self.assertEqual({5, 6}, common.line_changes(self.repo, self.base, mixed, same_code=win.same_zig_code)[path][0])
+        self.assertEqual([], self.check(self.base, mixed))
         added = commented + "\nfn councilProbe() void {\n    windows.kernel32.Sleep(1);\n}\n"
         self.assertEqual([(path, added.count("\n") - 1, "error", "removed std.os.windows.kernel32.Sleep")],
                          self.check(self.base, self.fixture(path, added)))
-        print("Real comment on an alias line: 0 errors; added-reference twin: 1")
+        print("Real comment on an alias line: 0 errors; with the next line changed in its hunk: 0; "
+              "added-reference twin: 1")
 
-    def test_real_import_swap_and_ipc_alias_move_touch_definitions(self):
+    def test_real_import_swap_and_ipc_alias_move_pass(self):
+        # Council P1 on #768: a binding is changed only by its own tokens in its scope, so two swapped imports and a
+        # moved alias recheck none of their uses (they rechecked 48 and 40 before).
         path = "src/apprt/win32.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
         self.assertEqual('const std = @import("std");\n', lines[10])
         lines[10], lines[11] = lines[11], lines[10]
-        self.assertEqual(48, len(self.check(self.base, self.fixture(path, "".join(lines)))))
+        self.assertEqual(0, len(self.check(self.base, self.fixture(path, "".join(lines)))))
         path = "src/apprt/win32/ipc_server.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
         at = lines.index("const windows = std.os.windows;\n")
         line = lines.pop(at)
         lines.insert(at + 2, line)
-        self.assertEqual(40, len(self.check(self.base, self.fixture(path, "".join(lines)))))
+        self.assertEqual(0, len(self.check(self.base, self.fixture(path, "".join(lines)))))
 
     def test_rekeyed_alias_owner_fixtures_keep_unchanged_uses(self):
         path = "src/os/monotonic.zig"
@@ -1194,8 +1211,9 @@ class HistoryControls(unittest.TestCase):
             added = common.added_lines(self.repo, base, head)
             unchanged = [row for row in rows if row[1] not in added.get(row[0], ())]
             if head.startswith("1c8d4d394"):
-                self.assertEqual(2, len(rows))
-                self.assertEqual(2, len(unchanged))
+                # Its two unchanged-use errors came from host.zig's `const windows = win32.windows;`, which this
+                # refactor only moved (line 268 to 255): no change to the binding (council P1 on #768).
+                self.assertEqual(0, len(rows))
             else:
                 self.assertEqual(74, len(rows))
                 self.assertEqual(29, len(unchanged))
@@ -1239,10 +1257,15 @@ class HistoryControls(unittest.TestCase):
                             'const zstd = @import("std");\nconst std = zstd;'), 40),
             (source.replace('const windows = std.os.windows;',
                             'const windows = @import("../../os/windows.zig");'), 32),
+            # Council P1 on #768: the alias moved, its tokens and scope as they were, is no change.
+            (source.replace('const windows = std.os.windows;\n', '').replace(
+                'const log = std.log.scoped(.win32);\n',
+                'const log = std.log.scoped(.win32);\nconst windows = std.os.windows;\n'), 0),
         )
         for text, count in variants:
+            self.assertNotEqual(source, text)
             self.assertEqual(count, len(self.check(self.base, self.fixture(path, text))))
-        print("Documented safe-side over-report retained: 40 / 40 / 32")
+        print("Documented safe-side over-report retained: 40 / 40 / 32; a moved alias: 0")
 
 
 if __name__ == "__main__":

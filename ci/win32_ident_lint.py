@@ -7,14 +7,47 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lint_common import emit, line_changes, paths, sources
+from lint_common import emit, line_changes, merge_base, paths, sources
 from zig_bindings import Bindings as LiteralBindings
 import zigtok
 
 
+def declaration_key(bindings, index):
+    """A declaration as its own tokens say it: its prefix keywords and `const NAME = ... ;`, and the headers of the
+    scopes around it (the tokens before each enclosing `{` back to the last `;`, `{` or `}`). Comments and layout are
+    not in it, so a moved or commented declaration in the same scope keeps its key; a respelled one does not."""
+    tokens = bindings.tokens
+    start = index
+    while start and (tokens[start - 1].kind == "keyword" and tokens[start - 1].text in
+                     ("pub", "export", "extern", "threadlocal", "comptime")):
+        start -= 1
+    own = tuple((t.kind, t.text) for t in tokens[start:bindings.ends[index] + 1])
+    headers, scope = [], bindings.scopes[index]
+    while scope:
+        brace = scope - 1
+        first = brace
+        while first and not zigtok.is_op(tokens[first - 1], ";", "{", "}"):
+            first -= 1
+        headers.append(tuple((t.kind, t.text) for t in tokens[first:brace]))
+        scope = bindings.parents[scope]
+    return own, tuple(headers)
+
+
+def changed_declarations(bindings, added, deleted, base_text):
+    """The head declarations a changed line or deletion gap touches whose own tokens differ from every base
+    declaration's in the same scope (council no-seat P1 on #768): a comment, a layout change or a move inside a mixed
+    hunk changes no binding. Without a base text (a new file), every touched one."""
+    touched = bindings.changed_aliases(added, deleted)
+    if base_text is None or not touched:
+        return touched
+    base = LiteralBindings(base_text, path=bindings.path)
+    before = {declaration_key(base, index) for index in base.ends}
+    return frozenset(index for index in touched if declaration_key(bindings, index) not in before)
+
+
 class Bindings(LiteralBindings):
-    def uses(self, removed, added=None, deleted=(), changed_exports=frozenset()):
-        changed = self.changed_aliases(added or (), deleted)
+    def uses(self, removed, added=None, deleted=(), changed_exports=frozenset(), base_text=None):
+        changed = changed_declarations(self, added or (), deleted, base_text)
         for start, end, origin in self.accesses():
             if origin.kind != "std" or origin.parts[:2] != ("os", "windows"):
                 continue
@@ -60,9 +93,9 @@ def fork_added(repo, head, upstream):
 
 
 @functools.lru_cache(maxsize=64)
-def removed_uses(path, text, exports, removed, added, deleted, changed_exports):
+def removed_uses(path, text, exports, removed, added, deleted, changed_exports, base_text=None):
     bindings = Bindings(text, dict(exports), path)
-    return tuple(bindings.uses(removed, frozenset(added), deleted, changed_exports))
+    return tuple(bindings.uses(removed, frozenset(added), deleted, changed_exports, base_text))
 
 
 def check(repo, base, head, upstream_path, removed_path):
@@ -72,22 +105,30 @@ def check(repo, base, head, upstream_path, removed_path):
         raise ValueError("missing upstream paths or malformed removed-name inventory")
     removed = frozenset(rows)
     changes = line_changes(repo, base, head, same_code=same_zig_code)
+    # The texts line_changes diffs against: the merge base's, for the files it holds.
+    ancestor = merge_base(repo, base, head)
+    ancestor_paths = paths(repo, ancestor)
+
+    def base_texts(names):
+        return sources(repo, ancestor, set(names) & ancestor_paths)
+
     module = "src/os/windows.zig"
     new_module = sources(repo, head, {module})[module]
     bindings = LiteralBindings(new_module, path=module)
     origins = dict(export_origins(bindings))
     exports = tuple(sorted((name, origin.parts) for name, origin in origins.items()))
-    changed = bindings.changed_aliases(*changes.get(module, ((), ())))
+    changed = changed_declarations(bindings, *changes.get(module, ((), ())), base_texts({module}).get(module))
     changed_exports = frozenset(name for name, origin in origins.items() if origin.declarations & changed)
     fork = {name for name in fork_added(repo, head, upstream) if name.endswith(".zig")}
     # A re-export edit can change bindings even in files with no changed lines.
     names = fork if changed_exports else set(changes) & fork
     texts = sources(repo, head, names)
+    befores = base_texts(names & set(changes))
     findings = set()
     for name in sorted(names):
         added, deleted = changes.get(name, ((), ()))
         for key, span, line in removed_uses(name, texts[name], exports, removed, tuple(sorted(added)),
-                                          tuple(sorted(deleted)), changed_exports):
+                                          tuple(sorted(deleted)), changed_exports, befores.get(name)):
             findings.add((name, line, "error", "removed std.os.windows." + key))
     return sorted(findings)
 
