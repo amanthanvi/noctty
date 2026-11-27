@@ -302,8 +302,27 @@ pub fn defaultStatePath(alloc: Allocator) ![]u8 {
     });
 }
 
+/// Make directory `path` and its parents as 0.15's `makePath` did: a `path`
+/// that is already a directory, through a link or junction too, is left as it
+/// is. Zig 0.17's `createDirPath` reads an existing last component without
+/// following it and refuses a link with `error.NotDir`, before the identity
+/// check a stage directory gets next (`lockedHandleMatchesPath`, then
+/// `InvalidUpdateStageRoot`), which is the check that refuses a link there,
+/// one planted before the create or after it. The state folder itself may be
+/// a link (a moved folder linked back): its state is read and saved through
+/// it, and only staging refuses it (ZIG017-CREATEDIRPATH-LINK-01).
+fn makeDirPath(path: []const u8) !void {
+    const io = updateIo();
+    if (std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = true })) |existing| {
+        existing.close(io);
+    } else |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createDirPath(io, path),
+        else => |e| return e,
+    }
+}
+
 fn openStateLock(path: []const u8) !std.Io.File {
-    if (std.fs.path.dirname(path)) |dir_path| try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
+    if (std.fs.path.dirname(path)) |dir_path| try makeDirPath(dir_path);
     var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
     const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{path});
     return std.Io.Dir.createFileAbsolute(updateIo(), lock_path, .{
@@ -334,7 +353,7 @@ fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !StagingWorkLoc
     }
     const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
     defer alloc.free(updates_dir);
-    try std.Io.Dir.cwd().createDirPath(updateIo(), updates_dir);
+    try makeDirPath(updates_dir);
     var updates_root = try openLockedStageDirectory(updates_dir);
     errdefer updates_root.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, updates_dir, updates_root.handle)) {
@@ -516,7 +535,7 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
 
 pub fn saveState(path: []const u8, state: *const State) !void {
     if (std.fs.path.dirname(path)) |dir_path| {
-        try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
+        try makeDirPath(dir_path);
     }
 
     var temp_path_buf: [std.fs.max_path_bytes + ".tmp".len]u8 = undefined;
@@ -831,7 +850,7 @@ fn stageWindowsInstallWithDownloader(
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
     defer alloc.free(stage_dir);
-    try std.Io.Dir.cwd().createDirPath(updateIo(), stage_dir);
+    try makeDirPath(stage_dir);
     var cleanup_stage_on_error = if (baseline.staged_version) |version|
         !windowsPathEqual(version, release.version_text)
     else
@@ -2421,7 +2440,7 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     const dir_path = std.fs.path.dirname(dest_path) orelse return error.InvalidDownloadPath;
     const leaf = std.fs.path.basename(dest_path);
     if (leaf.len == 0) return error.InvalidDownloadPath;
-    try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
+    try makeDirPath(dir_path);
 
     // Every child below is created, replaced, and renamed relative to this
     // one handle. Holding the stage directory keeps that directory from
@@ -2620,7 +2639,7 @@ fn extractAndVerifyPortableZip(
     try portable_apply.cleanupUpdatePath(partial_root);
     try portable_apply.cleanupUpdatePath(extracted_root);
     errdefer portable_apply.cleanupUpdatePath(partial_root) catch {};
-    try std.Io.Dir.cwd().createDirPath(updateIo(), partial_root);
+    try makeDirPath(partial_root);
 
     // `extractPortableZip` creates every entry relative to this handle, so
     // the archive cannot escape it. The handle itself is still resolved by
@@ -5108,7 +5127,11 @@ test "portable recovery abandons stranded swapped transaction" {
     const marker_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, marker_path);
     defer alloc.free(marker_path_w);
     // dwShareMode=0 denies subsequent opens per the Microsoft CreateFileW
-    // contract, giving this test a deterministic transient access failure.
+    // contract, giving this test a deterministic transient access failure:
+    // a sharing violation, which Zig 0.17's open retries for about four
+    // seconds and then reports as `FileBusy` (0.15: `AccessDenied` at once;
+    // ZIG017-SHARING-BUSY-01). Either way it is not a missing backup, so the
+    // transaction is kept.
     const held = win32_sys.CreateFileW(
         marker_path_w.ptr,
         win32_types.GENERIC_READ,
@@ -5126,7 +5149,7 @@ test "portable recovery abandons stranded swapped transaction" {
     state.portable_apply_phase = .swapped;
     try saveState(state_path, &state);
     try std.testing.expectError(
-        error.AccessDenied,
+        error.FileBusy,
         abandonUnrecoverablePortableApply(alloc, state_path, install_root),
     );
     {
@@ -5635,6 +5658,41 @@ test "update staging rejects a reparse-point state directory before creating upd
         stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "outside/updates", .{}));
+}
+
+test "update state saves, locks and loads through a state folder that is a link to a directory" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "moved");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(root);
+    const moved_root = try tmp.dir.realPathFileAlloc(std.testing.io, "moved", alloc);
+    defer alloc.free(moved_root);
+    const state_root = try std.fs.path.join(alloc, &.{ root, "state" });
+    defer alloc.free(state_root);
+    std.Io.Dir.symLinkAbsolute(std.testing.io, moved_root, state_root, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    // A state folder moved and linked back: an update check still saves and
+    // reads its state through the link, as on 0.15 (makeDirPath; staging
+    // refuses the link, the test above).
+    var state: State = .{ .last_checked_at = 42 };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+    const lock = try openStateLock(state_path);
+    lock.close(std.testing.io);
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 42), loaded.last_checked_at);
+    const saved = try tmp.dir.readFileAlloc(std.testing.io, "moved/update-state.json", alloc, .limited(16 * 1024));
+    defer alloc.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "42") != null);
 }
 
 test "stage children are created only where they were named" {
@@ -6759,8 +6817,11 @@ test "locked staged installer rejects replacement until launch handoff" {
 
     const renamed_stage_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}.renamed", .{stage_dir});
     defer std.testing.allocator.free(renamed_stage_dir);
+    // The held folder shares no delete, so its rename is a sharing violation,
+    // which Zig 0.17 retries for about four seconds and reports as `FileBusy`
+    // (0.15's `MoveFileExW` gave `Unexpected`; ZIG017-SHARING-BUSY-01).
     try std.testing.expectError(
-        error.Unexpected,
+        error.FileBusy,
         std.Io.Dir.renameAbsolute(stage_dir, renamed_stage_dir, std.testing.io),
     );
 

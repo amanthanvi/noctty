@@ -457,12 +457,14 @@ pub fn Combo(comptime field: SettingField) type {
         // Windows has one clipboard: clipboard and both copy to it, and
         // primary, the selection clipboard, copies nothing there. Off, On
         // and the same-as-On row keep their positions (0.15's false, true
-        // and clipboard; true is clipboard on Windows).
+        // and clipboard; true is clipboard on Windows). A label fits the
+        // closed field in the narrowest lane ("settings dropdown choices fit
+        // their closed field in the narrowest two-column lane").
         .copy_on_select => &.{
             .{ .value = .none, .label = "Off" },
             .{ .value = .clipboard, .label = "On" },
             .{ .value = .both, .label = "On (same as On on Windows)" },
-            .{ .value = .primary, .label = "Selection clipboard only (copies nothing on Windows)" },
+            .{ .value = .primary, .label = "Selection only (copies nothing)" },
         },
         .clipboard_read, .clipboard_write => &.{
             .{ .value = .ask, .label = "Ask each time" },
