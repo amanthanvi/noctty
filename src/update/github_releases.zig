@@ -1131,15 +1131,19 @@ pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
 /// process that refuses even that is skipped.
 ///
 /// When the string compare misses (another spelling of the stage, such as
-/// its 8.3 alias against the long one), an image with the stage's shape that
-/// lies on the stage's own drive or `\\server\share\` (`onStageRoot`) has its
-/// `updates` folder opened, for its attributes only, and that folder's
-/// identity (volume serial and FILE_ID_INFO file ID) compared with the
-/// stage's (`stagedImageByIdentity`; council T3, U2, U6). No other folder is
-/// opened, and none on another root. The root check reads the path the
-/// process reports, which is the path after any link
-/// (`QueryFullProcessImageNameW` names the image's file object; council V1):
-/// a process started through a local link to a share reports the share.
+/// its 8.3 alias against the long one), an image with the stage's shape whose
+/// reported path lies on the stage's own drive or `\\server\share\`
+/// (`onStageRoot`) has its `updates` folder opened, for its attributes only,
+/// and that folder's identity (volume serial and FILE_ID_INFO file ID)
+/// compared with the stage's (`stagedImageByIdentity`; council T3, U2, U6).
+/// The root check reads the path the process reports
+/// (`QueryFullProcessImageNameW`). That this is the path after any link, so
+/// that a process started through a local link to a share reports the share,
+/// is inferred from the call naming the image's file object, not measured
+/// (council V1, X2). The open then goes through that path again, so it still
+/// follows a link put in place after the process started: a folder holding a
+/// running image, swapped for a directory link to a share, is reached through
+/// the link (inferred, not measured; council X2).
 fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     const windows = std.os.windows;
     var dir = std.Io.Dir.openDirAbsolute(updateIo(), updates_dir, .{}) catch return false;
@@ -1260,12 +1264,15 @@ test "a zero or all-0xFF file ID is no directory identity (council U6)" {
 /// the reverse. `image` has `isStagedImage`'s shape, `<dir>\<version>\<name>.exe`,
 /// and its `<dir>` is the stage itself by identity. Only an image whose
 /// `<dir>` is named `updates`, as every stage is (`stagedInstallerRunning`),
-/// and that lies on the stage's own root (`onStageRoot`), is opened, for its
-/// attributes only.
+/// and whose reported path lies on the stage's own root (`onStageRoot`), is
+/// opened, for its attributes only. A link put in place after the process
+/// started can still lead that open elsewhere (`processRunsFromStage`;
+/// inferred, council X2).
 fn stagedImageByIdentity(alloc: Allocator, stage_final: []const u16, image: []const u16, stage: DirectoryIdentity) bool {
-    // Nothing off the stage's root is opened (council U2): the open is
-    // synchronous, and this runs while noctty answers WM_QUERYENDSESSION, so
-    // an image on a slow or gone share would hold the reply.
+    // An image reported off the stage's root is not opened (council U2): the
+    // open is synchronous, and this runs while noctty answers
+    // WM_QUERYENDSESSION, so an image on a slow or gone share would hold the
+    // reply.
     if (!onStageRoot(stage_final, image)) return false;
     const sep: u16 = '\\';
     const name_start = (std.mem.lastIndexOfScalar(u16, image, sep) orelse return false) + 1;
