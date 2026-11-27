@@ -472,6 +472,7 @@ class ForkLineTests(unittest.TestCase):
         for key, value in (("core.autocrlf", "false"), ("core.quotePath", "true")) + tuple(config):
             self.git(repo, "config", key, value)
         for name, data in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
             (repo / name).write_bytes(data)
         self.git(repo, "add", "--", *files)
         self.git(repo, "-c", "user.name=codemod-test", "-c", "user.email=codemod-test@example.invalid",
@@ -508,6 +509,50 @@ class ForkLineTests(unittest.TestCase):
         repo, rev = self.make_repo({"a.zig": b"one\rtwo\nthree\nfour\n"})
         (repo / "a.zig").write_bytes(b"one\nthree\nFOUR\n")
         self.assertEqual(self.changed(repo, "a.zig", rev), {1, 3})
+
+    # council G3: git on Windows keeps a file's on-disk case when a merge renames it by case only. The path read
+    # from the disk is then absent at the ref, which has it in another case; read as fork-only, every line of the
+    # file (upstream's too) would be eligible. The whole file is a hand edit instead: each rewrite a rule would make
+    # in it is reported, and nothing is written.
+    SRC = b'const a = std.mem.trimLeft(u8, s, " ");\n'
+
+    def case_only_repo(self, ref_name, disk_name):
+        import os
+        repo, rev = self.make_repo({ref_name: self.SRC})
+        top_ref, top_disk = ref_name.split("/")[0], disk_name.split("/")[0]
+        os.rename(repo / top_ref, repo / top_disk)   # a case-only rename the work tree keeps
+        (repo / disk_name).write_bytes(self.SRC + b'const b = std.mem.trimLeft(u8, s, " ");\n')
+        return repo, rev
+
+    def test_a_case_only_spelling_difference_is_a_hand_edit(self):
+        for ref_name, disk_name in (("foo.zig", "Foo.zig"), ("lib/a.zig", "Lib/a.zig")):
+            with self.subTest(disk_name=disk_name):
+                repo, rev = self.case_only_repo(ref_name, disk_name)
+                with self.assertRaises(codemod.HandEdit) as caught:
+                    self.changed(repo, disk_name, rev)
+                self.assertEqual(str(caught.exception), codemod.CASE_ONLY)
+        # A path the ref lacks in every case is still the fork's alone.
+        repo, rev = self.make_repo({"foo.zig": self.SRC})
+        (repo / "bar.zig").write_bytes(self.SRC)
+        self.assertIsNone(self.changed(repo, "bar.zig", rev))
+
+    def test_a_case_only_file_is_reported_and_never_written(self):
+        import contextlib
+        import io
+        from unittest import mock
+        repo, rev = self.case_only_repo("foo.zig", "Foo.zig")
+        path = repo / "Foo.zig"
+        before = path.read_bytes()
+        out = io.StringIO()
+        with mock.patch.object(codemod, "ROOT", repo), contextlib.redirect_stdout(out):
+            code = codemod.main(["--fork-lines", rev, str(path)])
+        self.assertEqual(code, 0)
+        self.assertEqual(path.read_bytes(), before)
+        for line in (1, 2):
+            self.assertIn(f"hand edit\t{path.as_posix()}\tmem-trim\t{line}\t{codemod.CASE_ONLY}\n", out.getvalue())
+        self.assertIn("mem-trim\t0\n", out.getvalue())
+        self.assertIn("hand edits\t2\n", out.getvalue())
+        self.assertIn("files changed\t0\n", out.getvalue())
 
 
 if __name__ == "__main__":

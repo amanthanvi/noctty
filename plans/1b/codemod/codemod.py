@@ -18,9 +18,10 @@ A hand edit is a 0.15 shape a rule recognises but cannot prove equivalent: the r
 rewritten in memory first; nothing is written unless every file rewrote cleanly (a failure, such as an unreadable
 baseline, writes nothing). A rule's hit is one group of edits, kept or dropped whole: with --fork-lines a group is
 kept only when every line it touches (from each edit's first line to its last) differs from REV, and one that also
-touches an inherited line is a hand edit. A group that would add, drop or move a line break is a hand edit too, so
-the line ownership the filter reads stays true. Two groups that overlap (a call nested in another's arguments) are
-applied in turns until the rule finds nothing more.
+touches an inherited line is a hand edit; a file REV has only under another case (a case-only rename the work tree
+did not take) is a hand edit whole, each rewrite a rule would make in it reported and none written. A group that
+would add, drop or move a line break is a hand edit too, so the line ownership the filter reads stays true. Two
+groups that overlap (a call nested in another's arguments) are applied in turns until the rule finds nothing more.
 """
 import argparse
 import os
@@ -73,7 +74,8 @@ class Bail:
 
 
 class HandEdit(Exception):
-    """Raised while a rule builds a hit for a shape it cannot prove equivalent; the rule reports it as a Bail."""
+    """Raised while a rule builds a hit for a shape it cannot prove equivalent; the rule reports it as a Bail. Also
+    raised by changed_lines for a file whose fork lines it cannot tell, which the run leaves whole."""
 
 
 # Why the engine leaves a hit for a hand edit.
@@ -748,15 +750,35 @@ def check_rev(rev):
         raise ValueError(f"--fork-lines: {rev!r} is no commit")
 
 
+CASE_ONLY = ("the ref has this path only in another case (git on Windows keeps a file's case on disk when a merge "
+             "renames it by case only), so which lines are the fork's is unknown: the whole file is a hand edit")
+_REF_PATHS = {}   # (root, rev) -> the case-folded path of every file in rev's tree
+
+
+def _ref_paths_folded(rev):
+    """The case-folded path of every file in `rev`'s tree (`ls-tree -r -z`, read once per root and ref)."""
+    key = (str(ROOT), rev)
+    if key not in _REF_PATHS:
+        listed = _git("ls-tree", "-r", "-z", "--name-only", rev)
+        if listed.returncode != 0:
+            raise ValueError(f"git ls-tree -r {rev} failed: {_text(listed.stderr).strip()[:200]}")
+        _REF_PATHS[key] = {_text(p).casefold() for p in listed.stdout.split(b"\0") if p}
+    return _REF_PATHS[key]
+
+
 def changed_lines(path, rev):
     """The 1-based lines of `path` (as it is in the work tree) that differ from `rev`, or None when `rev` lacks
-    the file (fork-only: every line). An empty set means the file is upstream's as it stands. A git failure other
-    than a path `rev` lacks stops the run. `ls-tree -z` names the path unquoted, so a non-ASCII name is found."""
+    the file (fork-only: every line). An empty set means the file is upstream's as it stands. A path `rev` has only
+    in another case (a directory's or the file's own) raises HandEdit(CASE_ONLY): which of its lines are the fork's
+    needs a reader. A git failure other than a path `rev` lacks stops the run. `ls-tree -z` names the path
+    unquoted, so a non-ASCII name is found."""
     rel = Path(path).resolve().relative_to(ROOT).as_posix()
     listed = _git("ls-tree", "-z", "--name-only", rev, "--", rel)
     if listed.returncode != 0:
         raise ValueError(f"git ls-tree {rev} {rel} failed: {_text(listed.stderr).strip()[:200]}")
     if listed.stdout != (rel + "\0").encode("utf-8"):
+        if rel.casefold() in _ref_paths_folded(rev):
+            raise HandEdit(CASE_ONLY)
         return None
     out = _git("diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--inter-hunk-context=0", rev, "--",
                rel)
@@ -785,7 +807,7 @@ def main(argv=None):
     ap.add_argument("--report")
     ap.add_argument("--fork-lines", metavar="REV",
                     help="rewrite only lines that differ from REV (the upstream tag); a file REV lacks is rewritten "
-                         "whole, a file equal to REV not at all")
+                         "whole, a file equal to REV not at all, a file REV has only in another case is a hand edit")
     ap.add_argument("paths", nargs="+")
     args = ap.parse_args(argv)
     rule_ids = set(args.rules.split(",")) if args.rules else None
@@ -803,7 +825,11 @@ def main(argv=None):
             if b"\r" in raw:
                 raise ValueError(f"refused (CR bytes): {path}")
             text = raw.decode("utf-8")
-            lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
+            whole = None   # why the whole file is a hand edit, or None
+            try:
+                lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
+            except HandEdit as e:
+                lines, whole = None, str(e)
             if lines is not None and not lines:
                 continue
             rows = []
@@ -811,6 +837,10 @@ def main(argv=None):
                 new, hits = rewrite(text, rule_ids, lines, rows)
             except ValueError as e:
                 raise ValueError(f"{path}: {e}") from e
+            if whole is not None:
+                # Every rewrite a rule would make in the file is reported as a hand edit; nothing is written.
+                new, hits = text, []
+                rows = [(r, n, f"hand edit: {whole}" if what.startswith("rewritten") else what) for r, n, what in rows]
             for rule_id, line in hits:
                 counts[rule_id] += 1
             for rule_id, line, what in sorted(rows, key=lambda r: r[1]):
