@@ -33,7 +33,9 @@
         "src/unicode/main.zig",
         "src/unicode/testdata/conpty_width.tsv",
         "test/windows/hidden-win11-conpty-width.ps1",
-        "test/windows/conpty-width-probe.c"
+        "test/windows/conpty-width-probe.c",
+        "test/windows/hidden-win11-conpty-passthru.ps1",
+        "test/windows/conpty-passthru-probe.c"
       ]
     },
     {
