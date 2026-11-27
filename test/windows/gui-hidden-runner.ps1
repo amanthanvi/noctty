@@ -505,7 +505,8 @@ public static class GuiHiddenRunnerNative {
     // `cmd /D /C exit 7` children whose handle was held, each polled with these reads until the first one failed (#752):
     // the image read, QueryFullProcessImageNameW, failed with ERROR_ACCESS_DENIED (5) in 99 of 100 and ERROR_GEN_FAILURE
     // (31) in 1, the one already signalled; the command-line read, ProcessCommandLineInformation, with
-    // STATUS_PROCESS_IS_TERMINATING in 86 of 100 and STATUS_PARTIAL_COPY in 14. Every read before those failures
+    // STATUS_PROCESS_IS_TERMINATING in 86 of 100 and STATUS_PARTIAL_COPY in 14 (one run of 100; the 88 and 12 that
+    // GUI-HIDDEN-EXITED-READ-01 records are another run's). Every read before those failures
     // succeeded: on a handle opened with these rights a live process does not fail them. Any other failure is a live one.
     public static bool ImageReadEnded(int error) { return error == 31 || error == 5; }
     public static bool CommandLineReadEnded(int status) { return status == unchecked((int)0xC000010A) || status == unchecked((int)0x8000000D); }
