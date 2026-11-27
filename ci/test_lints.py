@@ -890,6 +890,18 @@ class GitControls(unittest.TestCase):
         self.assertNotIn("probe.zig", common.line_changes(self.repo, base, head, same_code=win.same_zig_code))
         # Git's alignment is the one that misled the hunk rule: without the file check the swap reads as a change.
         self.assertIn("probe.zig", common.line_changes(self.repo, base, head))
+        # Council U3 on #768: the fixture's premise, that git's diff of the swap holds a hunk whose removed and added
+        # lines have unequal tokens, so the hunk rule alone would not drop it.
+        diff = common.git(self.repo, "diff", *common.DIFF_OPTIONS, base, head, "--", "probe.zig").decode("utf-8")
+        hunks = []
+        for line in diff.split("\n"):
+            if line.startswith("@@ "):
+                hunks.append(([], []))
+            elif hunks and line.startswith("-") and not line.startswith("---"):
+                hunks[-1][0].append(line[1:])
+            elif hunks and line.startswith("+") and not line.startswith("+++"):
+                hunks[-1][1].append(line[1:])
+        self.assertTrue(any(not win.same_zig_code(removed_lines, added_lines) for removed_lines, added_lines in hunks))
         # The same swap beside a genuinely added call in another file reports that call alone.
         self.write("other.zig", 'const std = @import("std");\nfn g() void { std.os.windows.kernel32.Sleep(2); }\n')
         head = self.commit()
