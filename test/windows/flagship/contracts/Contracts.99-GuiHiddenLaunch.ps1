@@ -898,8 +898,8 @@ foreach ($bad in @(
         # vouches for the noctty.exe it forwarded (700) only when 700's own arguments were read, and only for its exact
         # child; an exited CLI the leaf started itself vouches for nothing.
         @{ Name = 'a noctty forwarded by an exited launched CLI, its own command line unread'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 70 -Exited $true } else { $_ } }); Total = 11; Shells = 1 }
-        @{ Name = 'a noctty created before the exited launched CLI that is its parent'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 59 -Argv $guiActionless } else { $_ } }); Total = 11; Shells = 1 }
-        @{ Name = 'a noctty forwarded by an exited CLI the leaf started itself'; Rows = (& $guiWith @((& $guiRow 900 'noctty.com' 100 90 -Exited $true), (& $guiRow 910 'noctty.exe' 900 91 -Argv $guiActionless))); Total = 13; Shells = 1 }
+        @{ Name = 'a noctty created before the exited launched CLI that is its parent'; Rows = (& $guiReplace 600 (& $guiRow 600 'noctty.com' 100 60 -Exited $true) | ForEach-Object { if ($_.Pid -eq 700) { & $guiRow 700 'noctty.exe' 600 59 -Argv $guiActionless } else { $_ } }); Total = 11; Shells = 1; Unaccounted = 1 }
+        @{ Name = 'a noctty forwarded by an exited CLI the leaf started itself'; Rows = (& $guiWith @((& $guiRow 900 'noctty.com' 100 90 -Exited $true), (& $guiRow 910 'noctty.exe' 900 91 -Argv $guiActionless))); Total = 13; Shells = 1; Unaccounted = 2 }
         # Council no-seat N6: a stray noctty that exits fast, its image read through class 27 after the Win32 read
         # failed, is a read noctty, and the accounting and copy rules fail it.
         @{ Name = 'a stray noctty.exe read through class 27 after it exited'; Rows = (& $guiWith @((& $guiRow 930 'noctty.exe' 100 93 -Exited $true))); Total = 12; Shells = 1 }
@@ -907,7 +907,13 @@ foreach ($bad in @(
         @{ Name = 'a cmd that had exited before its command line was read'; Rows = (& $guiReplace 400 (& $guiRow 400 'cmd.exe' 200 40 $true $false $false $false -Exited $true)); Total = 11; Shells = 1 }
         @{ Name = 'a launcher record matched only by an exited joiner of another creation time'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 61 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Shells = 1 }
     )) {
-    if ((& $guiVerdict $bad.Rows $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
+    $verdict = & $guiVerdict $bad.Rows $bad.Total $bad.Shells
+    if ($verdict.passed) { throw "The process verdict passed $($bad.Name)." }
+    # Council R4 on #768: where a row pins how many noctty processes stay unaccounted, a guard that let one more
+    # through shows (the leaf-started CLI and its child: 2, since the exited CLI is not accounted and may not vouch).
+    if ($bad.ContainsKey('Unaccounted') -and $verdict.nocttyUnaccounted -ne $bad.Unaccounted) {
+        throw "The process verdict left $($verdict.nocttyUnaccounted) noctty processes unaccounted for $($bad.Name), not $($bad.Unaccounted)."
+    }
 }
 # Council P5 on #768: only a noctty.com forwards. A launched noctty.exe (960, accounted by the launcher's record) that
 # exited with its command line unread does not vouch for a noctty.exe child (970) whose arguments were read and kept:
