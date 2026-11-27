@@ -181,7 +181,8 @@ function Get-BuildEnvironmentStaleReviews([hashtable] $Seen) {
 function Get-BuildEnvironmentImports([string] $Root, [string] $From) {
     $code = Remove-BuildEnvironmentNonCode (Get-Content -LiteralPath $From -Raw) -KeepStrings
     $dir = Split-Path -Parent $From
-    foreach ($m in [regex]::Matches($code, '@import\s*\(\s*"([^"\\]+\.zig)"\s*\)')) {
+    # Over several lines with a trailing comma too, as zig fmt lays out a long argument (council AA1).
+    foreach ($m in [regex]::Matches($code, '@import\s*\(\s*"([^"\\]+\.zig)"\s*,?\s*\)')) {
         $target = [System.IO.Path]::GetFullPath((Join-Path $dir $m.Groups[1].Value))
         if ($target.StartsWith([System.IO.Path]::GetFullPath($Root), [StringComparison]::OrdinalIgnoreCase) -and
             (Test-Path -LiteralPath $target -PathType Leaf)) { $target }
@@ -358,20 +359,24 @@ try {
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'build.zig') -NoNewline -Value "const helper = @import(`"src/tools/helper.zig`");`npub fn build(b: *std.Build) void { _ = b; }`n"
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'pkg\x\build.zig') -NoNewline -Value "pub fn build(b: *std.Build) void { _ = b; }`n"
     # Council G2: an import after a URL string on the same line is still read.
-    Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\helper.zig') -NoNewline -Value "const B = @import(`"std`").Build;`nconst deep = @import(`"deep.zig`");`nconst url = `"https://example.invalid/x`"; const more = @import(`"more.zig`");`n"
+    Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\helper.zig') -NoNewline -Value ("const B = @import(`"std`").Build;`nconst deep = @import(`"deep.zig`");`nconst url = `"https://example.invalid/x`"; const more = @import(`"more.zig`");`n" +
+        "const wide = @import(`n    `"wide.zig`",`n);`n")
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\more.zig') -NoNewline -Value "pub fn add(run: anytype) void {`n    run.clearEnvironment();`n}`n"
+    # Council AA1: reached only through the multi-line import above.
+    Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\wide.zig') -NoNewline -Value "pub fn add(run: anytype) void {`n    run.removeEnvironmentVariable(`"PATH`");`n}`n"
     Set-Content -LiteralPath (Join-Path $discoveryRoot 'src\tools\deep.zig') -NoNewline -Value "pub fn add(run: anytype) void {`n    run.setEnvironmentVariable(`"X`", `"1`");`n}`n"
     $discovered = Get-BuildEnvironmentFiles $discoveryRoot
     $found = @($discovered | ForEach-Object { [System.IO.Path]::GetRelativePath($discoveryRoot, $_).Replace('\', '/') })
-    foreach ($want in 'build.zig', 'pkg/x/build.zig', 'src/tools/helper.zig', 'src/tools/deep.zig', 'src/tools/more.zig') {
+    foreach ($want in 'build.zig', 'pkg/x/build.zig', 'src/tools/helper.zig', 'src/tools/deep.zig', 'src/tools/more.zig', 'src/tools/wide.zig') {
         if ($found -cnotcontains $want) { throw "The build environment discovery missed $want (found: $($found -join ', '))." }
     }
     $failed = $false
     try { [void](Assert-NoBuildEnvironmentCopies -Root $discoveryRoot) } catch {
-        $failed = ($_.Exception.Message -match 'src/tools/deep\.zig:2: setEnvironmentVariable') -and ($_.Exception.Message -match 'src/tools/more\.zig:2: clearEnvironment')
+        $failed = ($_.Exception.Message -match 'src/tools/deep\.zig:2: setEnvironmentVariable') -and ($_.Exception.Message -match 'src/tools/more\.zig:2: clearEnvironment') -and
+            ($_.Exception.Message -match 'src/tools/wide\.zig:2: removeEnvironmentVariable')
     }
     if (-not $failed) { throw 'The build environment check passed a forbidden call in an imported helper.' }
-    $buildEnvironmentControls += 2
+    $buildEnvironmentControls += 3
 } finally {
     if (Test-Path -LiteralPath $discoveryRoot) { [IO.Directory]::Delete($discoveryRoot, $true) }
 }
