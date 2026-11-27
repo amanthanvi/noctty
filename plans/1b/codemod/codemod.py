@@ -335,14 +335,17 @@ def _freed_or_read(toks, lo, hi, decl):
 
 
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
-LIMIT_SHAPE = "readFileAlloc's limit is no literal or simple name, so `+ 1` (0.15's inclusive bound) could change it"
+LIMIT_SHAPE = ("readFileAlloc's limit is no integer literal, so `+ 1` (0.15's inclusive bound) could change it "
+               "(`1 << 20 + 1` is `1 << 21`) or overflow (a name bound to `maxInt(usize)`)")
+INT_LITERAL = re.compile(r"0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*")
 
 
 def _inclusive_limit(texts):
     """readFileAlloc's 0.15 `max_bytes` accepted a file of exactly that size; 0.17's `Io.Limit` refuses a file that
-    reaches it. `.limited(n + 1)` keeps the bound, for a literal or a simple name only: `1 << 20 + 1` is `1 << 21`."""
+    reaches it. `.limited(n + 1)` keeps the bound, for an integer literal only: `1 << 20 + 1` is `1 << 21`, and a
+    name's value (`maxInt(usize)`, which `+ 1` overflows) is not in the tokens."""
     toks = code_tokens(texts[2])
-    if len(toks) == 1 and toks[0].kind in ("number", "identifier"):
+    if len(toks) == 1 and toks[0].kind == "number" and INT_LITERAL.fullmatch(toks[0].text):
         return ".limited(" + texts[2] + " + 1)"
     raise HandEdit(LIMIT_SHAPE)
 
@@ -554,11 +557,12 @@ def rule_test_dir_io(text, toks):
     (`<tmp>.dir.<method>(`) or on `std.fs.cwd()` becomes the 0.17 `std.Io.Dir` call with `std.testing.io`, renamed
     where 0.17 renamed it (makeDir, makePath, makeOpenPath, realpathAlloc). readFileAlloc's byte bound `n` becomes
     the `Io.Limit` `.limited(n + 1)`, since 0.15 accepted a file of exactly `n` bytes and 0.17's limit refuses a file
-    that reaches it; a bound that is not a literal or a simple name is a hand edit. Its oversize error is
-    `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a helper outside the
-    test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a `[:0]u8`, so it is
-    rewritten only as the whole initializer of an untyped `const` bound once in the test, whose every use is a
-    direct `<allocator>.free(<name>)` or a read in place (`.len`, an index), so a free keeps the sentinel's size.
+    that reaches it; a bound that is not an integer literal (a name may be `maxInt(usize)`) is a hand edit. Its
+    oversize error is `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a
+    helper outside the test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a
+    `[:0]u8`, so it is rewritten only as the whole initializer of an untyped `const` bound once in the test, whose
+    every use is a direct `<allocator>.free(<name>)` or a read in place (`.len`, an index), so a free keeps the
+    sentinel's size.
     makeOpenPath's options are rewritten only where the translation is exact (`.{}`; `.no_follow = true` is not).
     openFile in a test keeps 0.17's default, which opens a directory where 0.15's refused one on Windows, and the
     report notes each; outside a test nothing is rewritten (no `std.testing.io` there), and a 0.15 openFile on

@@ -72,8 +72,9 @@ test-dir-io (also):
   tokens do not show, is not). An openFile inside a test keeps 0.17's default: a test opens the path it just made,
   and the report notes each one (`rewritten; 0.17's openFile opens a directory ...`);
 - readFileAlloc's bound `n` becomes `.limited(n + 1)`: 0.15 read a file of exactly `n` bytes and 0.17's `Io.Limit`
-  refuses a file that reaches it (measured on both toolchains). Only a literal or a simple name takes the `+ 1`;
-  any other bound is a hand edit (`1 << 20 + 1` is `1 << 21`; `maxInt(usize) + 1` overflows). A name whose value
-  is `maxInt(usize)` would overflow too, which a comptime value turns into a compile error;
+  refuses a file that reaches it (measured on both toolchains). Only an integer literal (decimal, `0x`, `0o` or
+  `0b`) takes the `+ 1`; any other bound is a hand edit (`1 << 20 + 1` is `1 << 21`; `maxInt(usize) + 1`
+  overflows), a name too, since the tokens do not show its value and a name bound to `maxInt(usize)` would overflow
+  the same way. A literal at the type's maximum would overflow too, which the compile reports;
 - every readFileAlloc in a file that names `FileTooBig` anywhere (code, string or comment): 0.17's oversize error
   is `StreamTooLong`, and a helper outside the test may consume the old name.

@@ -58,7 +58,7 @@ FIXTURES = {
          '    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });\n'
          '    try tmp.dir.makeDir("real");\n    try tmp.dir.makePath("a/b");\n'
          '    const p = try tmp.dir.realpathAlloc(alloc, ".");\n'
-         '    const d = try tmp.dir.readFileAlloc(alloc, "a.txt", max_bytes);\n'
+         '    const d = try tmp.dir.readFileAlloc(alloc, "a.txt", 1024);\n'
          '    try tmp.dir.symLink("t", "l", .{});\n    const f = try tmp.dir.openFile("a.txt", .{});\n'
          '    try testing.expectError(error.FileNotFound, tmp.dir.access("x", .{}));\n}\n',
          'test "a" {\n    var tmp = std.testing.tmpDir(.{});\n    defer tmp.cleanup();\n'
@@ -66,7 +66,7 @@ FIXTURES = {
          '    try tmp.dir.createDir(std.testing.io, "real", .default_dir);\n'
          '    try tmp.dir.createDirPath(std.testing.io, "a/b");\n'
          '    const p = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);\n'
-         '    const d = try tmp.dir.readFileAlloc(std.testing.io, "a.txt", alloc, .limited(max_bytes + 1));\n'
+         '    const d = try tmp.dir.readFileAlloc(std.testing.io, "a.txt", alloc, .limited(1024 + 1));\n'
          '    try tmp.dir.symLink(std.testing.io, "t", "l", .{});\n'
          '    const f = try tmp.dir.openFile(std.testing.io, "a.txt", .{});\n'
          '    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "x", .{}));\n}\n'),
@@ -209,21 +209,32 @@ class RuleTests(unittest.TestCase):
 
     def test_read_file_alloc_keeps_the_inclusive_bound(self):
         # council F2 (QR-30): 0.15 read a file of exactly n bytes, which 0.17's `.limited(n)` refuses; `n + 1` keeps
-        # the bound where n is a literal or a simple name.
+        # the bound where n is an integer literal (council G6: no longer a name, which may be the maximum).
         head = 'test "rf" {\n    var tmp = std.testing.tmpDir(.{});\n'
-        for limit in ("4096", "0x10_0000", "max_bytes"):
+        for limit in ("4096", "0x10_0000", "0o777", "0b1010"):
             with self.subTest(limit=limit):
                 src = head + f'    const d = try tmp.dir.readFileAlloc(alloc, "a", {limit});\n}}\n'
                 got, hits = codemod.rewrite(src)
                 self.assertIn(f'readFileAlloc(std.testing.io, "a", alloc, .limited({limit} + 1));', got)
                 self.assertEqual(len(hits), 1)
-        # Another expression is a hand edit: `1 << 20 + 1` is `1 << 21`, `maxInt(usize) + 1` overflows.
-        for limit in ("1 << 20", "(n)", "self.max", "std.math.maxInt(usize)", "@sizeOf(T)", "'a'"):
+        # Another expression is a hand edit: `1 << 20 + 1` is `1 << 21`, `maxInt(usize) + 1` overflows, and so does
+        # a name bound to it.
+        for limit in ("max_bytes", "1 << 20", "(n)", "self.max", "std.math.maxInt(usize)", "@sizeOf(T)", "'a'",
+                      "1e6"):
             with self.subTest(limit=limit):
                 src = head + f'    const d = try tmp.dir.readFileAlloc(alloc, "a", {limit});\n}}\n'
                 rows = []
                 self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
                 self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.LIMIT_SHAPE)])
+
+    def test_a_name_bound_to_the_maximum_is_no_bound_to_widen(self):
+        # council G6: `max + 1` with `max = maxInt(usize)` overflows (a compile error, or a trap at run time); the
+        # tokens do not show a name's value, so a bound written as a name is a hand edit, reported.
+        src = ('const max = std.math.maxInt(usize);\ntest "max" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    const d = try tmp.dir.readFileAlloc(alloc, "a", max);\n    defer alloc.free(d);\n}\n')
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+        self.assertEqual(rows, [("test-dir-io", 4, "hand edit: " + codemod.LIMIT_SHAPE)])
 
     def test_file_too_big_anywhere_in_the_file_keeps_read_file_alloc(self):
         # council F2: a helper outside the test consumes the error by name (or by its name's text); 0.17's
