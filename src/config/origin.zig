@@ -592,6 +592,9 @@ const compatibility = [_]Compatibility{
     .{ .name = "cursor-invert-fg-bg", .keys = &.{ .@"cursor-color", .@"cursor-text" }, .when = .truthy },
     .{ .name = "selection-invert-fg-bg", .keys = &.{ .@"selection-foreground", .@"selection-background" }, .when = .truthy },
     .{ .name = "bold-is-bright", .keys = &.{.@"bold-color"}, .when = .truthy },
+    // Ghostty 1.4's name. `scrollback-limit` is no field any more, so its
+    // handler takes every value.
+    .{ .name = "scrollback-limit", .keys = &.{.@"scrollback-limit-bytes"}, .when = .always },
 };
 
 /// Whether an `-e` with a command set `key` (`Config.applyECommand`): the
@@ -783,6 +786,7 @@ test "origin: the last line that parsed, an included file, the command line, com
     try expectFile(of(&cfg, .@"font-size", null), included_path, 2, .included);
     // `scrollback-limit` is the compatibility name of `scrollback-limit-bytes`
     // since Ghostty 1.4.
+    try std.testing.expectEqual(@as(usize, 5), cfg.@"scrollback-limit-bytes".value);
     try expectFile(of(&cfg, .@"scrollback-limit-bytes", null), path, 5, .config);
     try expectFile(of(&cfg, .@"config-file", null), path, 4, .config);
     // Compatibility names set the keys their handlers set, and only those.
