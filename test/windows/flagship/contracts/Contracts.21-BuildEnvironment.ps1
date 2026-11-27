@@ -31,7 +31,8 @@ function Remove-BuildEnvironmentNonCode([string] $Text, [switch] $KeepStrings) {
     # One pass over the literals and the comments, so a `//` inside a string is the string's (council G2:
     # an `@import` after a URL string on the same line was blanked as a comment). With -KeepStrings the
     # string and character literals stay as written.
-    $pattern = '(?<literal>''(?:\\.|[^''\\\n])''|"(?:\\.|[^"\\\n])*")|//[^\n]*|\\\\[^\n]*'
+    # A character literal's escape is read whole: `'\x41'` and `'\u{41}'` too (council AA4).
+    $pattern = '(?<literal>''(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]+\}|.)|[^''\\\n])''|"(?:\\.|[^"\\\n])*")|//[^\n]*|\\\\[^\n]*'
     $keep = [bool]$KeepStrings
     return [regex]::Replace($named, $pattern, {
             param($m)
@@ -145,7 +146,7 @@ function Get-BuildEnvironmentCopyHits([string] $ZigText, [string] $Path, [hashta
     # Council Y3: a `\xNN` or `\u{...}` escape in any string or character literal or quoted identifier (an
     # `@field` name, an `@import` path, `@"..."`) could spell a name this check looks for, and Zig decodes it, so
     # one fails outright: it is refused, not decoded.
-    foreach ($literal in [regex]::Matches($withStrings, '''(?:\\.|[^''\\\n])''|"(?:\\.|[^"\\\n])*"')) {
+    foreach ($literal in [regex]::Matches($withStrings, '''(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]+\}|.)|[^''\\\n])''|"(?:\\.|[^"\\\n])*"')) {
         # An odd run of backslashes before it: `"\\x41"` is an escaped backslash, then text.
         if ($literal.Value -match '(?<!\\)(?:\\\\)*\\(?:x[0-9A-Fa-f]{2}|u\{)') {
             $line = ($withStrings.Substring(0, $literal.Index) -split "`n").Count
@@ -294,7 +295,10 @@ foreach ($sample in @(
         '@field(run, "setEnvironment\x56ariable")(run, "IS_STATIC", "1");',
         'run.@"setEnvironment\x56ariable"("IS_STATIC", "1");',
         '@field(run, "environ\u{5f}map") = &env;',
-        'const helper = @import("help\x65r.zig");'
+        'const helper = @import("help\x65r.zig");',
+        # Council AA4: a character literal's escape.
+        "const c = '\x41';",
+        "const d = '\u{41}';"
     )) {
     if (@(Get-BuildEnvironmentCopyHits -ZigText "fn f() void {`n    $sample`n}`n" -Path 'control.zig').Count -ne 1) {
         throw "The build environment check missed a control: $sample"
